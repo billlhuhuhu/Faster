@@ -85,7 +85,7 @@ def epoch_test(dataloader, model, device, bert_test_embed):
     start_time = time.time()  
 
 
-    txt_embed = model.text_projection(bert_test_embed.float().to('cuda')) 
+    txt_embed = model.text_projection(bert_test_embed.float().to(device))
     text_embeds = txt_embed / txt_embed.norm(dim=1, keepdim=True) #torch.Size([5000, 768])
     text_embeds = text_embeds.to(device)
 

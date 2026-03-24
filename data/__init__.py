@@ -9,13 +9,15 @@ import json
 from PIL import Image
 import os
 from torchvision import transforms as T
-from src.networks import CLIPModel_full
 from data.flickr30k_dataset import flickr30k_train, flickr30k_retrieval_eval, pre_caption
 from data.coco_dataset import coco_train, coco_caption_eval, coco_retrieval_eval
+from data.subset_dataset import PairSubsetDataset, SelectedIndicesSampler, load_selected_indices, save_selected_indices
 import numpy as np
 from tqdm import tqdm
 @torch.no_grad()
 def textprocess(args, testloader):
+    from src.networks import CLIPModel_full
+
     net = CLIPModel_full(args).to('cuda')
     net.eval() 
     texts = testloader.dataset.text 
@@ -33,6 +35,8 @@ def textprocess(args, testloader):
 
 @torch.no_grad()
 def textprocess_train(args, texts):
+    from src.networks import CLIPModel_full
+
     net = CLIPModel_full(args).to('cuda')
     net.eval() 
     chunk_size = 2000
@@ -55,6 +59,7 @@ def textprocess_train(args, texts):
 
 def create_dataset(args, min_scale=0.5):
     normalize = transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711))
+    return_sample_idx = getattr(args, 'return_sample_idx', False)
     transform_train = transforms.Compose([                        
             transforms.RandomResizedCrop(args.image_size,scale=(min_scale, 1.0),interpolation=InterpolationMode.BICUBIC),
             transforms.RandomHorizontalFlip(),
@@ -73,13 +78,13 @@ def create_dataset(args, min_scale=0.5):
         transform_train = transform_test # no augmentation
 
     if args.dataset=='flickr':          
-        train_dataset = flickr30k_train(transform_train, args.image_root, args.ann_root)
+        train_dataset = flickr30k_train(transform_train, args.image_root, args.ann_root, return_sample_idx=return_sample_idx)
         val_dataset = flickr30k_retrieval_eval(transform_test, args.image_root, args.ann_root, 'val') 
         test_dataset = flickr30k_retrieval_eval(transform_test, args.image_root, args.ann_root, 'test')         
         return train_dataset, val_dataset, test_dataset    
     
     elif args.dataset=='coco':             
-        train_dataset = coco_train(transform_train, args.image_root, args.ann_root)
+        train_dataset = coco_train(transform_train, args.image_root, args.ann_root, return_sample_idx=return_sample_idx)
         val_dataset = coco_retrieval_eval(transform_test, args.image_root, args.ann_root, 'val') 
         test_dataset = coco_retrieval_eval(transform_test, args.image_root, args.ann_root, 'test')         
         return train_dataset, val_dataset, test_dataset    

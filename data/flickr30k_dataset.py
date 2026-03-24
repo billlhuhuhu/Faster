@@ -37,7 +37,7 @@ def pre_caption(caption,max_words=50):
 
 
 class flickr30k_train(Dataset):
-    def __init__(self, transform, image_root, ann_root, max_words=30, prompt=''):        
+    def __init__(self, transform, image_root, ann_root, max_words=30, prompt='', return_sample_idx=False):        
         '''
         image_root (string): Root directory of images (e.g. flickr30k/)
         ann_root (string): directory to store the annotation file
@@ -54,6 +54,7 @@ class flickr30k_train(Dataset):
         self.image_root = image_root
         self.max_words = max_words      
         self.prompt = prompt
+        self.return_sample_idx = return_sample_idx
         
         self.img_ids = {}
         n = 0
@@ -71,19 +72,33 @@ class flickr30k_train(Dataset):
         image = Image.open(image_path).convert('RGB')   
         image = self.transform(image)
         return image
+
+    def get_pair_metadata(self, sample_idx):
+        sample_idx = int(sample_idx)
+        ann = self.annotation[sample_idx]
+        caption = self.prompt + pre_caption(ann['caption'], self.max_words)
+        return {
+            "sample_idx": sample_idx,
+            "image": ann["image"],
+            "caption": caption,
+            "img_id": self.img_ids[ann["image_id"]],
+            "raw_image_id": ann["image_id"],
+        }
+
+    def get_sample(self, index, return_sample_idx=None):
+        if return_sample_idx is None:
+            return_sample_idx = self.return_sample_idx
+
+        meta = self.get_pair_metadata(index)
+        image_path = os.path.join(self.image_root, meta["image"])
+        image = self.read_image(image_path)
+
+        if return_sample_idx:
+            return image, meta["caption"], meta["sample_idx"], meta["img_id"]
+        return image, meta["caption"], meta["img_id"]
     
     def __getitem__(self, index):    
-        
-        ann = self.annotation[index]
-        
-        image_path = os.path.join(self.image_root,ann['image'])
-        image = self.read_image(image_path)      
-        # image = Image.open(image_path).convert('RGB')   
-        # image = self.transform(image)
-        
-        caption = self.prompt+pre_caption(ann['caption'], self.max_words) 
-
-        return image, caption, self.img_ids[ann['image_id']]
+        return self.get_sample(index)
         
     def get_all_captions(self):
         captions = []

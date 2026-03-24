@@ -12,3 +12,15 @@ __pycache__/
 .vscode
 *.pyc
 *.npz
+**/.tmp-conda/
+*.dll
+*.pyd
+*.exe
+/.tmp-conda
+/.tmp-conda
+/.tmp-conda
+/.tmp-conda
+/.tmp-conda/_MEI254682
+/.tmp-conda/_MEI254682
+/artifacts
+

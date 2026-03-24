@@ -5,7 +5,10 @@ import torch.nn.functional as F
 import torch
 # from collections import OrderedDict
 # from typing import Tuple, Union
-import clip
+try:
+    import clip
+except ImportError:
+    clip = None
 # from transformers import ViTConfig, ViTModel, AutoTokenizer, CLIPTextModel, CLIPTextConfig, CLIPProcessor, CLIPConfig
 import numpy as np
 from transformers import BertTokenizer, BertModel, DistilBertModel, DistilBertTokenizer, OpenAIGPTTokenizer, OpenAIGPTModel
@@ -675,7 +678,10 @@ class ProjectionHead(nn.Module):
 
 @functools.lru_cache(maxsize=128)
 def load_from_timm(model_name, pretrained):
+    model_name = canonical_image_encoder_name(model_name)
     if model_name == 'clip':
+        if clip is None:
+            raise ImportError("The 'clip' package is required when image_encoder='clip'.")
         raise NotImplementedError("it is unfair to use pretrained clip")
         # if pretrained:
         #     model, preprocess = clip.load("ViT-B/32", device='cuda')
@@ -688,6 +694,8 @@ def load_from_timm(model_name, pretrained):
                                         pretrained_cfg_overlay=dict(file='distill_utils/checkpoints/nfnet_l0_ra2-45c6688d.pth'),)
     elif model_name == 'vit':
         model = timm.create_model('vit_tiny_patch16_224', pretrained=True)
+    elif model_name == 'vit_base_patch16_224':
+        model = timm.create_model('vit_base_patch16_224', pretrained=True, num_classes=0)
     elif model_name == 'nf_resnet50':
         model = timm.create_model('nf_resnet50', pretrained=True)
     elif model_name == 'nf_regnet':
@@ -699,6 +707,33 @@ def load_from_timm(model_name, pretrained):
 
 
     return model
+
+
+def canonical_image_encoder_name(model_name):
+    aliases = {
+        'resnet-50': 'resnet50',
+        'vit_b16': 'vit_base_patch16_224',
+        'vit-b16': 'vit_base_patch16_224',
+        'vit-b/16': 'vit_base_patch16_224',
+    }
+    return aliases.get(model_name, model_name)
+
+
+def infer_image_embedding_dim(model_name, eval_stage=False):
+    model_name = canonical_image_encoder_name(model_name)
+    if model_name == 'nfnet':
+        return 1000 if eval_stage else 2304
+    if model_name == 'resnet50':
+        return 2048
+    if model_name == 'vit_base_patch16_224':
+        return 768
+    if model_name == 'convnet':
+        return 768
+    if model_name == 'resnet18':
+        return 512
+    if model_name == 'convnext':
+        return 640
+    return 1000
     
 
 
@@ -710,7 +745,7 @@ class ImageEncoder(nn.Module):
 
     def __init__(self, args):
         super().__init__()
-        self.model_name = args.image_encoder
+        self.model_name = canonical_image_encoder_name(args.image_encoder)
         self.pretrained = args.image_pretrained
         self.trainable = args.image_trainable
 
@@ -743,6 +778,8 @@ class TextEncoder(nn.Module):
         self.model_name = args.text_encoder
         
         if self.model_name == 'clip':
+            if clip is None:
+                raise ImportError("The 'clip' package is required when text_encoder='clip'.")
             self.model, preprocess = clip.load("ViT-B/32", device='cuda', download_root="distill_utils/checkpoints")
         elif self.model_name == 'bert':
             pt_model, self.tokenizer = get_bert_stuff()
@@ -764,9 +801,14 @@ class TextEncoder(nn.Module):
         # we are using the CLS token hidden representation as the sentence's embedding
         self.target_token_idx = 0
     
-    def forward(self, texts, device='cuda'):
+    def forward(self, texts, device=None):
+        if device is None:
+            try:
+                device = next(self.model.parameters()).device
+            except StopIteration:
+                device = 'cpu'
         if self.model_name == 'clip':
-            output = self.model.encode_text(clip.tokenize(texts).to('cuda'))  
+            output = self.model.encode_text(clip.tokenize(texts).to(device))
 
         elif self.model_name == 'bert':
             # Tokenize the input text
@@ -803,19 +845,7 @@ class CLIPModel_full(nn.Module):
     ):
         super().__init__()
 
-        if args.image_encoder == 'nfnet':
-            if eval_stage:
-                self.image_embedding = 1000 #2048
-            else:
-                self.image_embedding = 2304
-        elif args.image_encoder == 'convnet':
-            self.image_embedding = 768
-        elif args.image_encoder == 'resnet18':
-            self.image_embedding = 512
-        elif args.image_encoder == 'convnext':
-            self.image_embedding = 640
-        else:
-            self.image_embedding = 1000
+        self.image_embedding = infer_image_embedding_dim(args.image_encoder, eval_stage=eval_stage)
 
         if args.text_encoder == 'clip':
             self.text_embedding = 512 
@@ -835,11 +865,11 @@ class CLIPModel_full(nn.Module):
 
         if args.only_has_image_projection:
             self.image_projection = ProjectionHead(embedding_dim=self.image_embedding)
-        self.text_projection = ProjectionHead(embedding_dim=self.text_embedding, projection_dim=self.image_embedding).to('cuda')
+        self.text_projection = ProjectionHead(embedding_dim=self.text_embedding, projection_dim=self.image_embedding)
         if train_logit_scale:
             self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1.0 / temperature))
         else:
-            self.logit_scale = torch.ones([]) * np.log(1.0 / temperature)
+            self.register_buffer("logit_scale", torch.ones([]) * np.log(1.0 / temperature))
 
         
         self.args = args
@@ -849,11 +879,8 @@ class CLIPModel_full(nn.Module):
 
 
     def forward(self, image, caption, epoch, similarity=None):
-        self.image_encoder = self.image_encoder.to('cuda')
-        self.text_encoder = self.text_encoder.to('cuda')
-        
         image_features = self.image_encoder(image)
-        text_features = caption if self.distill else self.text_encoder(caption) 
+        text_features = caption if self.distill else self.text_encoder(caption, device=image.device)
 
         use_image_project = False
         im_embed = image_features.float() if not use_image_project else self.image_projection(image_features.float())
