@@ -52,7 +52,8 @@ python run_topology_graph.py \
   --output_root "$TOPOLOGY_ROOT" \
   --metric "$TOPOLOGY_METRIC_IMAGE" \
   --k "$K_NEIGHBORS" \
-  --num_eigs 32
+  --num_eigs 32 \
+  --n_jobs "$TOPOLOGY_N_JOBS"
 stage_log "Stage 3/8 topology graph (image) done"
 
 stage_log "Stage 3/8 topology graph (text): metric=${TOPOLOGY_METRIC_TEXT}"
@@ -66,7 +67,8 @@ python run_topology_graph.py \
   --output_root "$TOPOLOGY_ROOT" \
   --metric "$TOPOLOGY_METRIC_TEXT" \
   --k "$K_NEIGHBORS" \
-  --num_eigs 32
+  --num_eigs 32 \
+  --n_jobs "$TOPOLOGY_N_JOBS"
 stage_log "Stage 3/8 topology graph (text) done"
 
 stage_log "Stage 4/8 cross-modal topology"
