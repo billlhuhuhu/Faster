@@ -1,5 +1,4 @@
 from torchvision import transforms
-from data.randaugment import RandomAugment
 from torchvision.transforms.functional import InterpolationMode
 import torch
 from torch.utils.data import DataLoader
@@ -60,14 +59,6 @@ def textprocess_train(args, texts):
 def create_dataset(args, min_scale=0.5):
     normalize = transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711))
     return_sample_idx = getattr(args, 'return_sample_idx', False)
-    transform_train = transforms.Compose([                        
-            transforms.RandomResizedCrop(args.image_size,scale=(min_scale, 1.0),interpolation=InterpolationMode.BICUBIC),
-            transforms.RandomHorizontalFlip(),
-            RandomAugment(2,5,isPIL=True,augs=['Identity','AutoContrast','Brightness','Sharpness','Equalize',
-                                              'ShearX', 'ShearY', 'TranslateX', 'TranslateY', 'Rotate']),     
-            transforms.ToTensor(),
-            normalize,
-        ])     
     transform_test = transforms.Compose([
         transforms.Resize((args.image_size, args.image_size),interpolation=InterpolationMode.BICUBIC),
         transforms.ToTensor(),
@@ -76,6 +67,23 @@ def create_dataset(args, min_scale=0.5):
 
     if args.no_aug:
         transform_train = transform_test # no augmentation
+    else:
+        try:
+            from data.randaugment import RandomAugment
+        except Exception as exc:
+            raise ImportError(
+                "RandomAugment requires OpenCV with system libraries (e.g. libGL.so.1). "
+                "Install the missing system dependency or run with --no_aug for stages that do not need augmentation."
+            ) from exc
+
+        transform_train = transforms.Compose([
+                transforms.RandomResizedCrop(args.image_size,scale=(min_scale, 1.0),interpolation=InterpolationMode.BICUBIC),
+                transforms.RandomHorizontalFlip(),
+                RandomAugment(2,5,isPIL=True,augs=['Identity','AutoContrast','Brightness','Sharpness','Equalize',
+                                                  'ShearX', 'ShearY', 'TranslateX', 'TranslateY', 'Rotate']),
+                transforms.ToTensor(),
+                normalize,
+            ])
 
     if args.dataset=='flickr':          
         train_dataset = flickr30k_train(transform_train, args.image_root, args.ann_root, return_sample_idx=return_sample_idx)
