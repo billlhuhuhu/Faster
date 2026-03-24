@@ -285,12 +285,17 @@ def run_topology_graph(args):
     feature_dir = build_feature_dir(args)
     output_dir = build_output_dir(args)
 
+    print(f"[topology] loading features from {feature_dir} for modality={args.modality}")
     features = load_feature_tensor(feature_dir, args.modality)
     sample_meta = load_sample_meta(feature_dir)
     features, sample_meta = maybe_truncate(features, sample_meta, args.max_samples)
+    print(f"[topology] feature shape: {features.shape}")
 
+    print(f"[topology] computing kNN: k={args.k}, metric={args.metric}")
     knn_indices, knn_distances = compute_knn(features, args.k, args.metric, args.n_jobs)
+    print("[topology] computing rho")
     rho = compute_rho(knn_distances, local_connectivity=args.local_connectivity)
+    print("[topology] computing sigma")
     sigma = compute_sigmas(
         knn_distances,
         rho,
@@ -299,14 +304,21 @@ def run_topology_graph(args):
         target=args.bandwidth if args.bandwidth is not None else None,
     )
 
+    print("[topology] building directed graph")
     directed_graph = build_directed_graph(knn_indices, knn_distances, rho, sigma, features.shape[0])
+    print("[topology] symmetrizing graph")
     sym_graph = symmetrize_graph(directed_graph)
+    print("[topology] row-normalizing graph")
     transition_graph = row_normalize_graph(sym_graph)
+    print("[topology] building laplacian")
     laplacian = build_laplacian(sym_graph, normalized=True)
+    print(f"[topology] computing spectrum: num_eigs={args.num_eigs}")
     eigenvalues, eigenvectors = compute_spectrum(laplacian, args.num_eigs, return_eigenvectors=args.save_eigenvectors)
+    print("[topology] computing collapse metrics")
     collapse_metrics = compute_collapse_metrics(eigenvalues)
     summary = summarize_results(args, features, knn_indices, sym_graph, eigenvalues, collapse_metrics)
 
+    print(f"[topology] saving outputs to {output_dir}")
     save_outputs(
         output_dir,
         knn_indices,
@@ -327,4 +339,3 @@ def run_topology_graph(args):
         "summary_path": str(output_dir / "summary.json"),
         "summary": summary,
     }
-

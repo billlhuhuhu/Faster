@@ -62,3 +62,8 @@ sanitize_component() {
   value="${value// /_}"
   echo "$value"
 }
+
+stage_log() {
+  local message="$1"
+  echo "[$(date '+%F %T')] ${message}"
+}
