@@ -10,9 +10,18 @@ def sanitize_name(name):
     return name.replace("\\", "-").replace("/", "-").replace(" ", "_")
 
 
+def get_modality_metric(args, modality):
+    if modality == "image":
+        return getattr(args, "image_metric", None) or args.metric
+    if modality == "text":
+        return getattr(args, "text_metric", None) or args.metric
+    raise ValueError(f"Unsupported modality: {modality}")
+
+
 def build_graph_dir(args, modality):
     model_tag = f"{sanitize_name(args.image_encoder)}_{sanitize_name(args.text_encoder)}"
-    graph_tag = f"k{args.k}_{sanitize_name(args.metric)}"
+    modality_metric = get_modality_metric(args, modality)
+    graph_tag = f"k{args.k}_{sanitize_name(modality_metric)}"
     return Path(args.topology_root) / args.dataset / args.split / model_tag / modality / graph_tag
 
 
@@ -142,6 +151,8 @@ def build_summary(args, healthy_modality, image_bundle, text_bundle, corrected_s
         "image_encoder": args.image_encoder,
         "text_encoder": args.text_encoder,
         "metric": args.metric,
+        "image_metric": get_modality_metric(args, "image"),
+        "text_metric": get_modality_metric(args, "text"),
         "k": int(args.k),
         "alpha": float(args.alpha),
         "fusion_mode": args.fusion_mode,
@@ -236,4 +247,3 @@ def run_cross_modal_topology(args):
         "summary_path": str(output_dir / "summary.json"),
         "summary": summary,
     }
-

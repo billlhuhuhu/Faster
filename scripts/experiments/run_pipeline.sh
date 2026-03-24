@@ -71,6 +71,8 @@ python run_cross_modal_topology.py \
   --topology_root "$TOPOLOGY_ROOT" \
   --output_root "$CROSS_MODAL_ROOT" \
   --metric "$TOPOLOGY_METRIC_IMAGE" \
+  --image_metric "$TOPOLOGY_METRIC_IMAGE" \
+  --text_metric "$TOPOLOGY_METRIC_TEXT" \
   --k "$K_NEIGHBORS" \
   --alpha "$ALPHA"
 

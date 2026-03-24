@@ -12,6 +12,8 @@ def build_parser():
     parser.add_argument("--topology_root", type=str, default="artifacts/topology_graph")
     parser.add_argument("--output_root", type=str, default="artifacts/cross_modal_topology")
     parser.add_argument("--metric", type=str, default="euclidean", choices=["euclidean", "cosine"])
+    parser.add_argument("--image_metric", type=str, default=None, choices=["euclidean", "cosine"])
+    parser.add_argument("--text_metric", type=str, default=None, choices=["euclidean", "cosine"])
     parser.add_argument("--k", type=int, default=15)
     parser.add_argument("--alpha", type=float, default=1.0, help="Strength of healthy-modality correction.")
     parser.add_argument("--fusion_mode", type=str, default="intersection", choices=["intersection"])
