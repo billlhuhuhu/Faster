@@ -42,33 +42,51 @@ python run_feature_cache.py \
 stage_log "Stage 2/8 feature cache done"
 
 stage_log "Stage 3/8 topology graph (image): metric=${TOPOLOGY_METRIC_IMAGE}"
-python run_topology_graph.py \
-  --dataset "$DATASET" \
-  --split train \
-  --image_encoder "$IMAGE_ENCODER" \
-  --text_encoder bert \
-  --modality image \
-  --feature_cache_root "$FEATURE_CACHE_ROOT" \
-  --output_root "$TOPOLOGY_ROOT" \
-  --metric "$TOPOLOGY_METRIC_IMAGE" \
-  --k "$K_NEIGHBORS" \
-  --num_eigs 32 \
+IMAGE_TOPOLOGY_CMD=(
+  python run_topology_graph.py
+  --dataset "$DATASET"
+  --split train
+  --image_encoder "$IMAGE_ENCODER"
+  --text_encoder bert
+  --modality image
+  --feature_cache_root "$FEATURE_CACHE_ROOT"
+  --output_root "$TOPOLOGY_ROOT"
+  --metric "$TOPOLOGY_METRIC_IMAGE"
+  --k "$K_NEIGHBORS"
+  --num_eigs 32
   --n_jobs "$TOPOLOGY_N_JOBS"
+  --knn_backend "$TOPOLOGY_KNN_BACKEND"
+  --pre_knn_method "$TOPOLOGY_PRE_KNN_METHOD"
+  --pre_knn_dim "$TOPOLOGY_PRE_KNN_DIM"
+)
+if [[ "${TOPOLOGY_FAISS_USE_GPU}" == "1" ]]; then
+  IMAGE_TOPOLOGY_CMD+=(--faiss_use_gpu)
+fi
+"${IMAGE_TOPOLOGY_CMD[@]}"
 stage_log "Stage 3/8 topology graph (image) done"
 
 stage_log "Stage 3/8 topology graph (text): metric=${TOPOLOGY_METRIC_TEXT}"
-python run_topology_graph.py \
-  --dataset "$DATASET" \
-  --split train \
-  --image_encoder "$IMAGE_ENCODER" \
-  --text_encoder bert \
-  --modality text \
-  --feature_cache_root "$FEATURE_CACHE_ROOT" \
-  --output_root "$TOPOLOGY_ROOT" \
-  --metric "$TOPOLOGY_METRIC_TEXT" \
-  --k "$K_NEIGHBORS" \
-  --num_eigs 32 \
+TEXT_TOPOLOGY_CMD=(
+  python run_topology_graph.py
+  --dataset "$DATASET"
+  --split train
+  --image_encoder "$IMAGE_ENCODER"
+  --text_encoder bert
+  --modality text
+  --feature_cache_root "$FEATURE_CACHE_ROOT"
+  --output_root "$TOPOLOGY_ROOT"
+  --metric "$TOPOLOGY_METRIC_TEXT"
+  --k "$K_NEIGHBORS"
+  --num_eigs 32
   --n_jobs "$TOPOLOGY_N_JOBS"
+  --knn_backend "$TOPOLOGY_KNN_BACKEND"
+  --pre_knn_method "$TOPOLOGY_PRE_KNN_METHOD"
+  --pre_knn_dim "$TOPOLOGY_PRE_KNN_DIM"
+)
+if [[ "${TOPOLOGY_FAISS_USE_GPU}" == "1" ]]; then
+  TEXT_TOPOLOGY_CMD+=(--faiss_use_gpu)
+fi
+"${TEXT_TOPOLOGY_CMD[@]}"
 stage_log "Stage 3/8 topology graph (text) done"
 
 stage_log "Stage 4/8 cross-modal topology"

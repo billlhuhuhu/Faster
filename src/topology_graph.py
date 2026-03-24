@@ -9,7 +9,14 @@ import torch
 from scipy import sparse
 from scipy.sparse import csgraph
 from scipy.sparse.linalg import eigsh
+from sklearn.decomposition import PCA
 from sklearn.neighbors import NearestNeighbors
+from sklearn.random_projection import GaussianRandomProjection
+
+try:
+    import faiss
+except ImportError:
+    faiss = None
 
 
 def sanitize_name(name):
@@ -54,7 +61,41 @@ def maybe_truncate(features, sample_meta, max_samples=None):
     return features[:max_samples], sample_meta[:max_samples]
 
 
-def compute_knn(features, k, metric, n_jobs=None):
+def preprocess_features_for_knn(features, method="none", target_dim=None, random_state=0):
+    features = np.asarray(features, dtype=np.float32)
+    original_dim = int(features.shape[1])
+
+    if method in {None, "none"} or target_dim is None or int(target_dim) <= 0 or original_dim <= int(target_dim):
+        return features, {
+            "pre_knn_method": "none",
+            "original_dim": original_dim,
+            "knn_dim": original_dim,
+        }
+
+    target_dim = int(target_dim)
+    if method == "pca":
+        transformer = PCA(n_components=target_dim, svd_solver="randomized", random_state=int(random_state))
+        reduced = transformer.fit_transform(features).astype(np.float32)
+    elif method == "random_projection":
+        transformer = GaussianRandomProjection(n_components=target_dim, random_state=int(random_state))
+        reduced = transformer.fit_transform(features).astype(np.float32)
+    else:
+        raise ValueError(f"Unsupported pre-kNN reduction method: {method}")
+
+    return reduced, {
+        "pre_knn_method": str(method),
+        "original_dim": original_dim,
+        "knn_dim": int(reduced.shape[1]),
+    }
+
+
+def normalize_for_cosine(features, eps=1e-12):
+    norms = np.linalg.norm(features, axis=1, keepdims=True)
+    norms = np.maximum(norms, eps)
+    return (features / norms).astype(np.float32)
+
+
+def compute_knn_sklearn(features, k, metric, n_jobs=None):
     num_nodes = features.shape[0]
     if num_nodes < 2:
         raise ValueError("At least two feature vectors are required to build a topology graph.")
@@ -78,6 +119,68 @@ def compute_knn(features, k, metric, n_jobs=None):
         indices = indices[:, : min(k, indices.shape[1])]
 
     return indices.astype(np.int64), distances.astype(np.float32)
+
+
+def compute_knn_faiss(features, k, metric, use_gpu=False):
+    if faiss is None:
+        raise ImportError("faiss is not installed, but faiss backend was requested.")
+
+    features = np.ascontiguousarray(features.astype(np.float32))
+    num_nodes = features.shape[0]
+    if num_nodes < 2:
+        raise ValueError("At least two feature vectors are required to build a topology graph.")
+
+    query_features = features
+    if metric == "cosine":
+        query_features = normalize_for_cosine(query_features)
+        index = faiss.IndexFlatIP(query_features.shape[1])
+    elif metric == "euclidean":
+        index = faiss.IndexFlatL2(query_features.shape[1])
+    else:
+        raise ValueError(f"Unsupported metric for faiss backend: {metric}")
+
+    if use_gpu:
+        if not hasattr(faiss, "StandardGpuResources"):
+            raise RuntimeError("Installed faiss package does not support GPU.")
+        resources = faiss.StandardGpuResources()
+        index = faiss.index_cpu_to_gpu(resources, 0, index)
+
+    index.add(query_features)
+    distances, indices = index.search(query_features, min(int(k) + 1, num_nodes))
+
+    if metric == "cosine":
+        distances = 1.0 - distances
+
+    if np.all(indices[:, 0] == np.arange(num_nodes)):
+        distances = distances[:, 1:]
+        indices = indices[:, 1:]
+    else:
+        distances = distances[:, : min(k, indices.shape[1])]
+        indices = indices[:, : min(k, indices.shape[1])]
+
+    return indices.astype(np.int64), distances.astype(np.float32)
+
+
+def resolve_knn_backend(backend, use_gpu):
+    backend = (backend or "auto").lower()
+    if backend == "auto":
+        if faiss is not None:
+            if use_gpu and hasattr(faiss, "StandardGpuResources"):
+                return "faiss"
+            return "faiss"
+        return "sklearn"
+    if backend == "faiss" and faiss is None:
+        raise ImportError("faiss backend requested but faiss is not installed.")
+    return backend
+
+
+def compute_knn(features, k, metric, n_jobs=None, backend="auto", use_gpu=False):
+    backend = resolve_knn_backend(backend, use_gpu)
+    if backend == "faiss":
+        return compute_knn_faiss(features, k, metric, use_gpu=use_gpu), backend
+    if backend == "sklearn":
+        return compute_knn_sklearn(features, k, metric, n_jobs=n_jobs), backend
+    raise ValueError(f"Unsupported kNN backend: {backend}")
 
 
 def compute_rho(distances, local_connectivity=1.0):
@@ -237,12 +340,16 @@ def summarize_results(args, features, knn_indices, sym_graph, eigenvalues, colla
         "image_encoder": args.image_encoder,
         "text_encoder": args.text_encoder,
         "metric": args.metric,
+        "knn_backend": getattr(args, "resolved_knn_backend", getattr(args, "knn_backend", "sklearn")),
         "k": int(args.k),
         "num_nodes": num_nodes,
         "num_edges": num_edges,
         "avg_degree": avg_degree,
         "knn_width": int(knn_indices.shape[1]),
         "feature_dim": int(features.shape[1]),
+        "pre_knn_method": getattr(args, "pre_knn_method", "none"),
+        "pre_knn_dim": getattr(args, "pre_knn_dim", None),
+        "original_feature_dim": getattr(args, "original_feature_dim", int(features.shape[1])),
         "first_eigenvalues": [float(x) for x in eigenvalues[: min(10, len(eigenvalues))]],
         "spectral_entropy": collapse_metrics["spectral_entropy"],
         "collapse_score": collapse_metrics["collapse_score"],
@@ -289,10 +396,38 @@ def run_topology_graph(args):
     features = load_feature_tensor(feature_dir, args.modality)
     sample_meta = load_sample_meta(feature_dir)
     features, sample_meta = maybe_truncate(features, sample_meta, args.max_samples)
+    args.original_feature_dim = int(features.shape[1])
     print(f"[topology] feature shape: {features.shape}")
 
-    print(f"[topology] computing kNN: k={args.k}, metric={args.metric}")
-    knn_indices, knn_distances = compute_knn(features, args.k, args.metric, args.n_jobs)
+    reduced_features, reduction_info = preprocess_features_for_knn(
+        features,
+        method=getattr(args, "pre_knn_method", "none"),
+        target_dim=getattr(args, "pre_knn_dim", None),
+        random_state=getattr(args, "random_state", 0),
+    )
+    args.pre_knn_method = reduction_info["pre_knn_method"]
+    args.pre_knn_dim = reduction_info["knn_dim"] if reduction_info["pre_knn_method"] != "none" else None
+    args.original_feature_dim = reduction_info["original_dim"]
+    if reduction_info["pre_knn_method"] != "none":
+        print(
+            f"[topology] reduced features for kNN: method={reduction_info['pre_knn_method']} "
+            f"{reduction_info['original_dim']} -> {reduction_info['knn_dim']}"
+        )
+
+    print(
+        f"[topology] computing kNN: k={args.k}, metric={args.metric}, "
+        f"backend={getattr(args, 'knn_backend', 'auto')}, n_jobs={args.n_jobs}"
+    )
+    (knn_indices, knn_distances), resolved_backend = compute_knn(
+        reduced_features,
+        args.k,
+        args.metric,
+        n_jobs=args.n_jobs,
+        backend=getattr(args, "knn_backend", "auto"),
+        use_gpu=bool(getattr(args, "faiss_use_gpu", False)),
+    )
+    args.resolved_knn_backend = resolved_backend
+    print(f"[topology] kNN backend resolved to: {resolved_backend}")
     print("[topology] computing rho")
     rho = compute_rho(knn_distances, local_connectivity=args.local_connectivity)
     print("[topology] computing sigma")
