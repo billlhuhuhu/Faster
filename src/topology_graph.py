@@ -2,7 +2,6 @@ import json
 import math
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -23,6 +22,18 @@ def sanitize_name(name):
     return name.replace("\\", "-").replace("/", "-").replace(" ", "_")
 
 
+def parse_multi_scale_ks(k, multi_scale_ks=None):
+    if multi_scale_ks is None:
+        return [int(k)]
+    if isinstance(multi_scale_ks, str):
+        values = [item.strip() for item in multi_scale_ks.split(",") if item.strip()]
+        ks = [int(item) for item in values]
+    else:
+        ks = [int(item) for item in multi_scale_ks]
+    ks = sorted(set(max(1, int(item)) for item in ks))
+    return ks or [int(k)]
+
+
 def build_feature_dir(args):
     model_tag = f"{sanitize_name(args.image_encoder)}_{sanitize_name(args.text_encoder)}"
     return Path(args.feature_cache_root) / args.dataset / args.split / model_tag
@@ -30,16 +41,27 @@ def build_feature_dir(args):
 
 def build_output_dir(args):
     model_tag = f"{sanitize_name(args.image_encoder)}_{sanitize_name(args.text_encoder)}"
-    graph_tag = f"k{args.k}_{sanitize_name(args.metric)}"
+    k_list = parse_multi_scale_ks(args.k, getattr(args, "multi_scale_ks", None))
+    if len(k_list) == 1:
+        graph_tag = f"k{k_list[0]}_{sanitize_name(args.metric)}"
+    else:
+        graph_tag = f"ks{'-'.join(str(item) for item in k_list)}_{sanitize_name(args.metric)}"
     return Path(args.output_root) / args.dataset / args.split / model_tag / args.modality / graph_tag
 
 
 def load_feature_tensor(feature_dir, modality):
-    filename = {
-        "image": "img_features.pt",
-        "text": "txt_features.pt",
+    candidates = {
+        "image": ["img_features_selection.pt", "img_features.pt"],
+        "text": ["txt_features_selection.pt", "txt_features.pt"],
     }[modality]
-    path = Path(feature_dir) / filename
+    path = None
+    for filename in candidates:
+        candidate_path = Path(feature_dir) / filename
+        if candidate_path.exists():
+            path = candidate_path
+            break
+    if path is None:
+        raise FileNotFoundError(f"No cached feature file found for modality={modality} under {feature_dir}")
     features = torch.load(path, map_location="cpu")
     if torch.is_tensor(features):
         features = features.float().cpu().numpy()
@@ -69,7 +91,7 @@ def preprocess_features_for_knn(features, method="none", target_dim=None, random
         return features, {
             "pre_knn_method": "none",
             "original_dim": original_dim,
-            "knn_dim": original_dim,
+        "knn_dim": original_dim,
         }
 
     target_dim = int(target_dim)
@@ -87,6 +109,15 @@ def preprocess_features_for_knn(features, method="none", target_dim=None, random
         "original_dim": original_dim,
         "knn_dim": int(reduced.shape[1]),
     }
+
+
+def reduce_graph_features(features, method="pca", target_dim=256, random_state=0):
+    return preprocess_features_for_knn(
+        features,
+        method=method,
+        target_dim=target_dim,
+        random_state=random_state,
+    )
 
 
 def normalize_for_cosine(features, eps=1e-12):
@@ -183,6 +214,46 @@ def compute_knn(features, k, metric, n_jobs=None, backend="auto", use_gpu=False)
     raise ValueError(f"Unsupported kNN backend: {backend}")
 
 
+def compute_local_scale_knn(
+    features,
+    k,
+    metric,
+    n_jobs=None,
+    backend="auto",
+    use_gpu=False,
+    local_connectivity=1.0,
+    bandwidth=None,
+    sigma_search_steps=64,
+):
+    (knn_indices, knn_distances), resolved_backend = compute_knn(
+        features,
+        k,
+        metric,
+        n_jobs=n_jobs,
+        backend=backend,
+        use_gpu=use_gpu,
+    )
+    rho = compute_rho(knn_distances, local_connectivity=local_connectivity)
+    sigma = compute_sigmas(
+        knn_distances,
+        rho,
+        bandwidth=bandwidth,
+        n_iter=sigma_search_steps,
+        target=bandwidth if bandwidth is not None else None,
+    )
+    directed_graph = build_directed_graph(knn_indices, knn_distances, rho, sigma, features.shape[0])
+    symmetric_graph = symmetrize_graph(directed_graph)
+    return {
+        "knn_indices": knn_indices,
+        "knn_distances": knn_distances,
+        "rho": rho,
+        "sigma": sigma,
+        "directed_graph": directed_graph,
+        "symmetric_graph": symmetric_graph,
+        "resolved_backend": resolved_backend,
+    }
+
+
 def compute_rho(distances, local_connectivity=1.0):
     if distances.shape[1] == 0:
         return np.zeros(distances.shape[0], dtype=np.float32)
@@ -267,6 +338,125 @@ def symmetrize_graph(directed_graph):
     return sym
 
 
+def fuzzy_union_merge(graph_list, merge_mode="mean"):
+    if not graph_list:
+        raise ValueError("graph_list must not be empty.")
+    if len(graph_list) == 1:
+        return graph_list[0].tocsr()
+
+    if merge_mode == "max":
+        merged = graph_list[0].tocsr(copy=True)
+        for graph in graph_list[1:]:
+            merged = merged.maximum(graph.tocsr())
+    elif merge_mode == "mean":
+        merged = graph_list[0].tocsr(copy=True)
+        for graph in graph_list[1:]:
+            merged = merged + graph.tocsr()
+        merged = merged.multiply(1.0 / float(len(graph_list)))
+    elif merge_mode == "union":
+        merged = graph_list[0].tocsr(copy=True)
+        for graph in graph_list[1:]:
+            merged = merged + graph - merged.multiply(graph)
+    else:
+        raise ValueError(f"Unsupported multi-scale merge mode: {merge_mode}")
+
+    merged = merged.tocsr()
+    merged.eliminate_zeros()
+    return merged
+
+
+def add_mst_connectivity(graph, reference_distances, sigma=None, weight_scale=1.0):
+    graph = graph.tocsr(copy=True)
+    distance_graph = reference_distances.tocsr(copy=True)
+    mst = csgraph.minimum_spanning_tree(distance_graph)
+    mst = mst + mst.transpose()
+    mst = mst.tocsr()
+    mst.eliminate_zeros()
+    if mst.nnz == 0:
+        return graph
+
+    mst_weights = np.asarray(mst.data, dtype=np.float32)
+    sigma_ref = float(np.mean(sigma)) if sigma is not None and len(sigma) > 0 else 1.0
+    sigma_ref = max(sigma_ref, 1e-6)
+    mst_weights = np.exp(-(mst_weights / sigma_ref)) * float(weight_scale)
+    mst_weights = np.clip(mst_weights, 1e-6, 1.0).astype(np.float32)
+    mst_graph = sparse.csr_matrix((mst_weights, mst.indices.copy(), mst.indptr.copy()), shape=mst.shape)
+    augmented = graph.maximum(mst_graph)
+    augmented = augmented.tocsr()
+    augmented.eliminate_zeros()
+    return augmented
+
+
+def build_multiscale_fuzzy_graph(
+    features,
+    k_list,
+    metric,
+    n_jobs=None,
+    backend="auto",
+    use_gpu=False,
+    local_connectivity=1.0,
+    bandwidth=None,
+    sigma_search_steps=64,
+    merge_mode="mean",
+    use_mst_connectivity=False,
+    mst_weight_scale=1.0,
+):
+    k_list = parse_multi_scale_ks(k_list[0] if isinstance(k_list, list) and k_list else 15, k_list)
+    per_scale_outputs = []
+    directed_graphs = []
+    symmetric_graphs = []
+    reference_distances = None
+    resolved_backend = None
+
+    for k in k_list:
+        scale_output = compute_local_scale_knn(
+            features,
+            k=k,
+            metric=metric,
+            n_jobs=n_jobs,
+            backend=backend,
+            use_gpu=use_gpu,
+            local_connectivity=local_connectivity,
+            bandwidth=bandwidth,
+            sigma_search_steps=sigma_search_steps,
+        )
+        scale_output["k"] = int(k)
+        per_scale_outputs.append(scale_output)
+        directed_graphs.append(scale_output["directed_graph"])
+        symmetric_graphs.append(scale_output["symmetric_graph"])
+        resolved_backend = scale_output["resolved_backend"]
+
+        row_ids = np.repeat(np.arange(features.shape[0]), scale_output["knn_indices"].shape[1])
+        col_ids = scale_output["knn_indices"].reshape(-1)
+        dist_vals = scale_output["knn_distances"].reshape(-1).astype(np.float32)
+        local_reference = sparse.csr_matrix((dist_vals, (row_ids, col_ids)), shape=(features.shape[0], features.shape[0]))
+        local_reference = local_reference.minimum(local_reference.transpose()) + local_reference.maximum(local_reference.transpose())
+        local_reference = local_reference.tocsr()
+        local_reference.eliminate_zeros()
+        if reference_distances is None or int(k) == max(k_list):
+            reference_distances = local_reference
+
+    merged_directed = fuzzy_union_merge(directed_graphs, merge_mode=merge_mode)
+    merged_symmetric = fuzzy_union_merge(symmetric_graphs, merge_mode=merge_mode)
+    merged_symmetric = symmetrize_graph(merged_symmetric)
+
+    if use_mst_connectivity:
+        merged_symmetric = add_mst_connectivity(
+            merged_symmetric,
+            reference_distances=reference_distances,
+            sigma=per_scale_outputs[-1]["sigma"] if per_scale_outputs else None,
+            weight_scale=mst_weight_scale,
+        )
+
+    return {
+        "k_list": k_list,
+        "per_scale_outputs": per_scale_outputs,
+        "directed_graph": merged_directed,
+        "symmetric_graph": merged_symmetric,
+        "resolved_backend": resolved_backend,
+    }
+
+
 def row_normalize_graph(graph):
     degree = np.asarray(graph.sum(axis=1)).reshape(-1)
     degree = np.maximum(degree, 1e-12)
@@ -282,6 +472,37 @@ def build_laplacian(graph, normalized=True):
     laplacian = laplacian.tocsr()
     laplacian.eliminate_zeros()
     return laplacian
+
+
+def build_spectral_embedding(eigenvalues, eigenvectors, embedding_dim=None, drop_first=True):
+    if eigenvectors is None:
+        return None
+    start = 1 if drop_first and eigenvectors.shape[1] > 1 else 0
+    if embedding_dim is None:
+        end = eigenvectors.shape[1]
+    else:
+        end = min(eigenvectors.shape[1], start + int(embedding_dim))
+    embedding = eigenvectors[:, start:end].astype(np.float32)
+    if embedding.size == 0:
+        embedding = eigenvectors[:, : min(1, eigenvectors.shape[1])].astype(np.float32)
+    return embedding
+
+
+def build_graph_artifacts(graph, num_eigs, save_eigenvectors=True, embedding_dim=None):
+    transition = row_normalize_graph(graph)
+    laplacian = build_laplacian(graph, normalized=True)
+    eigenvalues, eigenvectors = compute_spectrum(laplacian, num_eigs, return_eigenvectors=save_eigenvectors or embedding_dim is not None)
+    spectral_embedding = build_spectral_embedding(eigenvalues, eigenvectors, embedding_dim=embedding_dim) if (save_eigenvectors or embedding_dim is not None) else None
+    collapse_metrics = compute_collapse_metrics(eigenvalues)
+    return {
+        "adjacency": graph,
+        "transition": transition,
+        "laplacian_sym": laplacian,
+        "eigvals": eigenvalues,
+        "eigvecs": eigenvectors,
+        "spectral_embedding": spectral_embedding,
+        "collapse_metrics": collapse_metrics,
+    }
 
 
 def compute_spectrum(laplacian, num_eigs, return_eigenvectors=False):
@@ -329,7 +550,7 @@ def compute_collapse_metrics(eigenvalues):
     }
 
 
-def summarize_results(args, features, knn_indices, sym_graph, eigenvalues, collapse_metrics):
+def summarize_results(args, features, knn_indices, sym_graph, eigenvalues, collapse_metrics, per_scale_stats=None):
     num_nodes = int(features.shape[0])
     num_edges = int(sym_graph.nnz)
     avg_degree = float(num_edges / max(num_nodes, 1))
@@ -354,12 +575,32 @@ def summarize_results(args, features, knn_indices, sym_graph, eigenvalues, colla
         "spectral_entropy": collapse_metrics["spectral_entropy"],
         "collapse_score": collapse_metrics["collapse_score"],
         "num_eigs_used": collapse_metrics["num_eigs_used"],
+        "multi_scale_ks": parse_multi_scale_ks(args.k, getattr(args, "multi_scale_ks", None)),
+        "multi_scale_merge_mode": getattr(args, "multi_scale_merge_mode", "mean"),
+        "use_mst_connectivity": bool(getattr(args, "use_mst_connectivity", False)),
+        "mst_weight_scale": float(getattr(args, "mst_weight_scale", 1.0)),
+        "per_scale_stats": per_scale_stats or [],
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
     return summary
 
 
-def save_outputs(output_dir, knn_indices, knn_distances, rho, sigma, directed_graph, sym_graph, transition_graph, laplacian, eigenvalues, eigenvectors, sample_meta, summary):
+def save_outputs(
+    output_dir,
+    knn_indices,
+    knn_distances,
+    rho,
+    sigma,
+    directed_graph,
+    sym_graph,
+    transition_graph,
+    laplacian,
+    eigenvalues,
+    eigenvectors,
+    spectral_embedding,
+    sample_meta,
+    summary,
+):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     torch.save(torch.from_numpy(knn_indices), output_dir / "knn_indices.pt")
@@ -373,13 +614,19 @@ def save_outputs(output_dir, knn_indices, knn_distances, rho, sigma, directed_gr
     )
 
     sparse.save_npz(output_dir / "directed_graph.npz", directed_graph)
+    sparse.save_npz(output_dir / "A_directed.npz", directed_graph)
     sparse.save_npz(output_dir / "symmetric_graph.npz", sym_graph)
+    sparse.save_npz(output_dir / "adjacency.npz", sym_graph)
+    sparse.save_npz(output_dir / "B_graph.npz", sym_graph)
     sparse.save_npz(output_dir / "transition_graph.npz", transition_graph)
     sparse.save_npz(output_dir / "laplacian_normalized.npz", laplacian)
+    sparse.save_npz(output_dir / "L_sym.npz", laplacian)
 
     torch.save(torch.from_numpy(eigenvalues), output_dir / "eigenvalues.pt")
     if eigenvectors is not None:
         torch.save(torch.from_numpy(eigenvectors), output_dir / "eigenvectors.pt")
+    if spectral_embedding is not None:
+        torch.save(torch.from_numpy(spectral_embedding), output_dir / "spectral_embedding.pt")
 
     with open(output_dir / "sample_meta.json", "w", encoding="utf-8") as handle:
         json.dump(sample_meta, handle, ensure_ascii=False, indent=2)
@@ -399,14 +646,18 @@ def run_topology_graph(args):
     args.original_feature_dim = int(features.shape[1])
     print(f"[topology] feature shape: {features.shape}")
 
-    reduced_features, reduction_info = preprocess_features_for_knn(
+    graph_reduce_method = getattr(args, "graph_reduce_method", getattr(args, "pre_knn_method", "none"))
+    graph_feature_dim = getattr(args, "graph_feature_dim", getattr(args, "pre_knn_dim", None))
+    reduced_features, reduction_info = reduce_graph_features(
         features,
-        method=getattr(args, "pre_knn_method", "none"),
-        target_dim=getattr(args, "pre_knn_dim", None),
+        method=graph_reduce_method,
+        target_dim=graph_feature_dim,
         random_state=getattr(args, "random_state", 0),
     )
     args.pre_knn_method = reduction_info["pre_knn_method"]
     args.pre_knn_dim = reduction_info["knn_dim"] if reduction_info["pre_knn_method"] != "none" else None
+    args.graph_reduce_method = reduction_info["pre_knn_method"]
+    args.graph_feature_dim = reduction_info["knn_dim"] if reduction_info["pre_knn_method"] != "none" else None
     args.original_feature_dim = reduction_info["original_dim"]
     if reduction_info["pre_knn_method"] != "none":
         print(
@@ -414,44 +665,61 @@ def run_topology_graph(args):
             f"{reduction_info['original_dim']} -> {reduction_info['knn_dim']}"
         )
 
+    k_list = parse_multi_scale_ks(args.k, getattr(args, "multi_scale_ks", None))
     print(
-        f"[topology] computing kNN: k={args.k}, metric={args.metric}, "
+        f"[topology] computing kNN: ks={k_list}, metric={args.metric}, "
         f"backend={getattr(args, 'knn_backend', 'auto')}, n_jobs={args.n_jobs}"
     )
-    (knn_indices, knn_distances), resolved_backend = compute_knn(
+    multiscale_outputs = build_multiscale_fuzzy_graph(
         reduced_features,
-        args.k,
-        args.metric,
+        k_list=k_list,
+        metric=args.metric,
         n_jobs=args.n_jobs,
         backend=getattr(args, "knn_backend", "auto"),
         use_gpu=bool(getattr(args, "faiss_use_gpu", False)),
-    )
-    args.resolved_knn_backend = resolved_backend
-    print(f"[topology] kNN backend resolved to: {resolved_backend}")
-    print("[topology] computing rho")
-    rho = compute_rho(knn_distances, local_connectivity=args.local_connectivity)
-    print("[topology] computing sigma")
-    sigma = compute_sigmas(
-        knn_distances,
-        rho,
+        local_connectivity=args.local_connectivity,
         bandwidth=args.bandwidth,
-        n_iter=args.sigma_search_steps,
-        target=args.bandwidth if args.bandwidth is not None else None,
+        sigma_search_steps=args.sigma_search_steps,
+        merge_mode=getattr(args, "multi_scale_merge_mode", "mean"),
+        use_mst_connectivity=bool(getattr(args, "use_mst_connectivity", False)),
+        mst_weight_scale=getattr(args, "mst_weight_scale", 1.0),
     )
+    args.resolved_knn_backend = multiscale_outputs["resolved_backend"]
+    print(f"[topology] kNN backend resolved to: {args.resolved_knn_backend}")
 
-    print("[topology] building directed graph")
-    directed_graph = build_directed_graph(knn_indices, knn_distances, rho, sigma, features.shape[0])
-    print("[topology] symmetrizing graph")
-    sym_graph = symmetrize_graph(directed_graph)
-    print("[topology] row-normalizing graph")
-    transition_graph = row_normalize_graph(sym_graph)
-    print("[topology] building laplacian")
-    laplacian = build_laplacian(sym_graph, normalized=True)
-    print(f"[topology] computing spectrum: num_eigs={args.num_eigs}")
-    eigenvalues, eigenvectors = compute_spectrum(laplacian, args.num_eigs, return_eigenvectors=args.save_eigenvectors)
-    print("[topology] computing collapse metrics")
-    collapse_metrics = compute_collapse_metrics(eigenvalues)
-    summary = summarize_results(args, features, knn_indices, sym_graph, eigenvalues, collapse_metrics)
+    per_scale_stats = []
+    for scale_output in multiscale_outputs["per_scale_outputs"]:
+        per_scale_stats.append(
+            {
+                "k": int(scale_output["k"]),
+                "knn_width": int(scale_output["knn_indices"].shape[1]),
+                "mean_rho": float(np.mean(scale_output["rho"])),
+                "mean_sigma": float(np.mean(scale_output["sigma"])),
+                "num_edges": int(scale_output["symmetric_graph"].nnz),
+            }
+        )
+
+    knn_indices = multiscale_outputs["per_scale_outputs"][-1]["knn_indices"]
+    knn_distances = multiscale_outputs["per_scale_outputs"][-1]["knn_distances"]
+    rho = multiscale_outputs["per_scale_outputs"][-1]["rho"]
+    sigma = multiscale_outputs["per_scale_outputs"][-1]["sigma"]
+    directed_graph = multiscale_outputs["directed_graph"]
+    sym_graph = multiscale_outputs["symmetric_graph"]
+
+    print("[topology] building graph artifacts")
+    graph_artifacts = build_graph_artifacts(
+        sym_graph,
+        args.num_eigs,
+        save_eigenvectors=args.save_eigenvectors,
+        embedding_dim=getattr(args, "spectral_embedding_dim", None),
+    )
+    transition_graph = graph_artifacts["transition"]
+    laplacian = graph_artifacts["laplacian_sym"]
+    eigenvalues = graph_artifacts["eigvals"]
+    eigenvectors = graph_artifacts["eigvecs"]
+    spectral_embedding = graph_artifacts["spectral_embedding"]
+    collapse_metrics = graph_artifacts["collapse_metrics"]
+    summary = summarize_results(args, features, knn_indices, sym_graph, eigenvalues, collapse_metrics, per_scale_stats=per_scale_stats)
 
     print(f"[topology] saving outputs to {output_dir}")
     save_outputs(
@@ -466,6 +734,7 @@ def run_topology_graph(args):
         laplacian,
         eigenvalues,
         eigenvectors,
+        spectral_embedding,
         sample_meta,
         summary,
     )

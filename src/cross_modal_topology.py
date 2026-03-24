@@ -5,6 +5,8 @@ from pathlib import Path
 import numpy as np
 from scipy import sparse
 
+from src.topology_graph import build_laplacian, build_spectral_embedding, compute_spectrum, parse_multi_scale_ks
+
 
 def sanitize_name(name):
     return name.replace("\\", "-").replace("/", "-").replace(" ", "_")
@@ -21,7 +23,11 @@ def get_modality_metric(args, modality):
 def build_graph_dir(args, modality):
     model_tag = f"{sanitize_name(args.image_encoder)}_{sanitize_name(args.text_encoder)}"
     modality_metric = get_modality_metric(args, modality)
-    graph_tag = f"k{args.k}_{sanitize_name(modality_metric)}"
+    k_list = parse_multi_scale_ks(args.k, getattr(args, "multi_scale_ks", None))
+    if len(k_list) == 1:
+        graph_tag = f"k{k_list[0]}_{sanitize_name(modality_metric)}"
+    else:
+        graph_tag = f"ks{'-'.join(str(item) for item in k_list)}_{sanitize_name(modality_metric)}"
     return Path(args.topology_root) / args.dataset / args.split / model_tag / modality / graph_tag
 
 
@@ -144,7 +150,27 @@ def summarize_graph(graph):
     }
 
 
-def build_summary(args, healthy_modality, image_bundle, text_bundle, corrected_summary, unified_summary):
+def build_unified_spectral_artifacts(unified_graph, num_eigs=64, embedding_dim=32, save_eigenvectors=True):
+    laplacian = build_laplacian(unified_graph, normalized=True)
+    eigenvalues, eigenvectors = compute_spectrum(
+        laplacian,
+        num_eigs=num_eigs,
+        return_eigenvectors=save_eigenvectors or embedding_dim is not None,
+    )
+    spectral_embedding = build_spectral_embedding(
+        eigenvalues,
+        eigenvectors,
+        embedding_dim=embedding_dim,
+    )
+    return {
+        "laplacian_sym": laplacian,
+        "eigvals": eigenvalues,
+        "eigvecs": eigenvectors,
+        "spectral_embedding": spectral_embedding,
+    }
+
+
+def build_summary(args, healthy_modality, image_bundle, text_bundle, corrected_summary, unified_summary, unified_spectral_artifacts):
     return {
         "dataset": args.dataset,
         "split": args.split,
@@ -162,20 +188,46 @@ def build_summary(args, healthy_modality, image_bundle, text_bundle, corrected_s
         "text_summary": text_bundle["summary"],
         "corrected_summary": corrected_summary,
         "unified_summary": unified_summary,
+        "unified_first_eigenvalues": [
+            float(x) for x in unified_spectral_artifacts["eigvals"][: min(10, len(unified_spectral_artifacts["eigvals"]))]
+        ],
+        "unified_embedding_dim": int(unified_spectral_artifacts["spectral_embedding"].shape[1]) if unified_spectral_artifacts["spectral_embedding"] is not None else 0,
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 
-def save_cross_modal_outputs(output_dir, healthy_modality, healthy_bundle, collapsed_bundle, corrected_directed, corrected_symmetric, unified_graph, summary):
+def save_cross_modal_outputs(
+    output_dir,
+    healthy_modality,
+    healthy_bundle,
+    collapsed_bundle,
+    corrected_directed,
+    corrected_symmetric,
+    unified_graph,
+    unified_spectral_artifacts,
+    summary,
+):
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    sparse.save_npz(output_dir / "B_I_or_health.npz", healthy_bundle["graph"])
+    sparse.save_npz(output_dir / "B_collapsed_raw.npz", collapsed_bundle["graph"])
     sparse.save_npz(output_dir / "healthy_graph.npz", healthy_bundle["graph"])
     sparse.save_npz(output_dir / "healthy_transition.npz", healthy_bundle["transition"])
     sparse.save_npz(output_dir / "collapsed_graph.npz", collapsed_bundle["graph"])
     sparse.save_npz(output_dir / "corrected_graph_directed.npz", corrected_directed)
     sparse.save_npz(output_dir / "corrected_graph_symmetric.npz", corrected_symmetric)
     sparse.save_npz(output_dir / "unified_graph.npz", unified_graph)
+    sparse.save_npz(output_dir / "B_star.npz", unified_graph)
     sparse.save_npz(output_dir / "unified_transition.npz", row_normalize_graph(unified_graph))
+    sparse.save_npz(output_dir / "unified_laplacian_sym.npz", unified_spectral_artifacts["laplacian_sym"])
+    sparse.save_npz(output_dir / "L_star.npz", unified_spectral_artifacts["laplacian_sym"])
+
+    np.save(output_dir / "unified_first_eigvals.npy", unified_spectral_artifacts["eigvals"])
+    if unified_spectral_artifacts["eigvecs"] is not None:
+        np.save(output_dir / "unified_eigvecs.npy", unified_spectral_artifacts["eigvecs"])
+    if unified_spectral_artifacts["spectral_embedding"] is not None:
+        np.save(output_dir / "unified_spectral_embedding.npy", unified_spectral_artifacts["spectral_embedding"])
+        np.save(output_dir / "V_full_multi.npy", unified_spectral_artifacts["spectral_embedding"])
 
     with open(output_dir / "sample_meta.json", "w", encoding="utf-8") as handle:
         json.dump(healthy_bundle["sample_meta"], handle, ensure_ascii=False, indent=2)
@@ -221,6 +273,12 @@ def run_cross_modal_topology(args):
 
     corrected_summary = summarize_graph(corrected_symmetric)
     unified_summary = summarize_graph(unified_graph)
+    unified_spectral_artifacts = build_unified_spectral_artifacts(
+        unified_graph,
+        num_eigs=getattr(args, "num_eigs", 64),
+        embedding_dim=getattr(args, "spectral_embedding_dim", 32),
+        save_eigenvectors=bool(getattr(args, "save_eigenvectors", False)),
+    )
     summary = build_summary(
         args,
         healthy_modality,
@@ -228,6 +286,7 @@ def run_cross_modal_topology(args):
         text_bundle,
         corrected_summary,
         unified_summary,
+        unified_spectral_artifacts,
     )
 
     output_dir = build_output_dir(args)
@@ -239,6 +298,7 @@ def run_cross_modal_topology(args):
         corrected_directed,
         corrected_symmetric,
         unified_graph,
+        unified_spectral_artifacts,
         summary,
     )
 

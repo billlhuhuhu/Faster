@@ -15,9 +15,13 @@ def build_parser():
     parser.add_argument("--image_metric", type=str, default=None, choices=["euclidean", "cosine"])
     parser.add_argument("--text_metric", type=str, default=None, choices=["euclidean", "cosine"])
     parser.add_argument("--k", type=int, default=15)
+    parser.add_argument("--multi_scale_ks", type=str, default=None)
     parser.add_argument("--alpha", type=float, default=1.0, help="Strength of healthy-modality correction.")
     parser.add_argument("--fusion_mode", type=str, default="intersection", choices=["intersection"])
     parser.add_argument("--prefer_healthy_modality", type=str, default=None, choices=["image", "text"])
+    parser.add_argument("--num_eigs", type=int, default=64)
+    parser.add_argument("--spectral_embedding_dim", type=int, default=32)
+    parser.add_argument("--save_eigenvectors", action="store_true")
     return parser
 
 
