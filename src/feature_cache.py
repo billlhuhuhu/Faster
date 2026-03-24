@@ -102,9 +102,11 @@ def extract_feature_cache(args):
         drop_last=False,
     )
 
-    img_features = []
-    txt_features = []
+    total_samples = len(dataset)
+    img_features = None
+    txt_features = None
     sample_meta = []
+    write_offset = 0
 
     expected_sample_idx = 0
     for batch in tqdm(dataloader, desc="Extracting features"):
@@ -124,8 +126,15 @@ def extract_feature_cache(args):
         image_batch_features = image_encoder(image_batch).detach().cpu().float()
         text_batch_features = text_encoder(captions, device=args.device).detach().cpu().float()
 
-        img_features.append(image_batch_features)
-        txt_features.append(text_batch_features)
+        batch_size = image_batch_features.shape[0]
+        if img_features is None:
+            img_features = torch.empty((total_samples, image_batch_features.shape[1]), dtype=torch.float32)
+        if txt_features is None:
+            txt_features = torch.empty((total_samples, text_batch_features.shape[1]), dtype=torch.float32)
+
+        img_features[write_offset:write_offset + batch_size] = image_batch_features
+        txt_features[write_offset:write_offset + batch_size] = text_batch_features
+        write_offset += batch_size
 
         batch_meta = collate_meta(dataset, sample_indices_list)
         for meta, img_id, caption in zip(batch_meta, img_ids.tolist(), captions):
@@ -141,9 +150,14 @@ def extract_feature_cache(args):
                 }
             )
 
+    if img_features is None or txt_features is None:
+        raise RuntimeError("No features were extracted from the dataset.")
+    if write_offset != total_samples:
+        raise RuntimeError(f"Feature write size mismatch: wrote {write_offset}, expected {total_samples}.")
+
     return {
-        "img_features": torch.cat(img_features, dim=0),
-        "txt_features": torch.cat(txt_features, dim=0),
+        "img_features": img_features,
+        "txt_features": txt_features,
         "sample_meta": sample_meta,
         "num_samples": len(sample_meta),
     }
