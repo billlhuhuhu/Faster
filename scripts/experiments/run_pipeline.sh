@@ -99,21 +99,43 @@ else
   SELECTED_INDICES_PATH="${SELECTED_INDICES_PATH}/selected_indices.json"
 fi
 
-python run_subset_train.py \
-  --dataset "$DATASET" \
-  --image_root "$IMAGE_ROOT" \
-  --ann_root "$ANN_ROOT" \
-  --selected_indices_path "$SELECTED_INDICES_PATH" \
-  --subset_ratio "$SUBSET_RATIO" \
-  --subset_tag "$METHOD" \
-  --image_encoder "$IMAGE_ENCODER" \
-  --text_encoder bert \
-  --output_root "$SUBSET_TRAIN_ROOT" \
-  --batch_size_train "$BATCH_TRAIN" \
-  --batch_size_test "$BATCH_TEST" \
-  --text_batch_size "$TEXT_BATCH_SIZE" \
-  --num_workers "$NUM_WORKERS" \
-  --epochs "$EPOCHS" \
-  --eval_interval "$EVAL_INTERVAL" \
-  --seed "$SEED" \
-  --device "$DEVICE"
+if [[ "${TRAIN_NO_AUG}" == "1" ]]; then
+  python run_subset_train.py \
+    --dataset "$DATASET" \
+    --image_root "$IMAGE_ROOT" \
+    --ann_root "$ANN_ROOT" \
+    --selected_indices_path "$SELECTED_INDICES_PATH" \
+    --subset_ratio "$SUBSET_RATIO" \
+    --subset_tag "$METHOD" \
+    --image_encoder "$IMAGE_ENCODER" \
+    --text_encoder bert \
+    --output_root "$SUBSET_TRAIN_ROOT" \
+    --batch_size_train "$BATCH_TRAIN" \
+    --batch_size_test "$BATCH_TEST" \
+    --text_batch_size "$TEXT_BATCH_SIZE" \
+    --num_workers "$NUM_WORKERS" \
+    --epochs "$EPOCHS" \
+    --eval_interval "$EVAL_INTERVAL" \
+    --seed "$SEED" \
+    --device "$DEVICE" \
+    --no_aug
+else
+  python run_subset_train.py \
+    --dataset "$DATASET" \
+    --image_root "$IMAGE_ROOT" \
+    --ann_root "$ANN_ROOT" \
+    --selected_indices_path "$SELECTED_INDICES_PATH" \
+    --subset_ratio "$SUBSET_RATIO" \
+    --subset_tag "$METHOD" \
+    --image_encoder "$IMAGE_ENCODER" \
+    --text_encoder bert \
+    --output_root "$SUBSET_TRAIN_ROOT" \
+    --batch_size_train "$BATCH_TRAIN" \
+    --batch_size_test "$BATCH_TEST" \
+    --text_batch_size "$TEXT_BATCH_SIZE" \
+    --num_workers "$NUM_WORKERS" \
+    --epochs "$EPOCHS" \
+    --eval_interval "$EVAL_INTERVAL" \
+    --seed "$SEED" \
+    --device "$DEVICE"
+fi
