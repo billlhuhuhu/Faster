@@ -1,0 +1,31 @@
+{
+  "table_name": "main_table_v1",
+  "description": "Main comparison table for Flickr30K and MS-COCO using NFNet + BERT.",
+  "datasets": ["flickr", "coco"],
+  "image_encoders": ["nfnet"],
+  "text_encoder": "bert",
+  "subset_ratios": [0.05, 0.1, 0.2],
+  "seeds": [0, 1, 2],
+  "methods": [
+    {
+      "name": "random",
+      "status": "planned"
+    },
+    {
+      "name": "kcenter",
+      "status": "planned"
+    },
+    {
+      "name": "lors",
+      "status": "planned"
+    },
+    {
+      "name": "ours_baseline",
+      "status": "ready"
+    },
+    {
+      "name": "ours_full",
+      "status": "ready"
+    }
+  ]
+}

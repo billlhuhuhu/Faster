@@ -1,0 +1,35 @@
+{
+  "table_name": "ablation_table_v1",
+  "description": "Ablation on Flickr30K with NFNet + BERT, centered on the 10% subset ratio.",
+  "datasets": ["flickr"],
+  "image_encoders": ["nfnet"],
+  "text_encoder": "bert",
+  "subset_ratios": [0.1],
+  "seeds": [0, 1, 2],
+  "variants": [
+    {
+      "name": "ours_full",
+      "status": "ready"
+    },
+    {
+      "name": "ours_baseline",
+      "status": "ready"
+    },
+    {
+      "name": "w/o_frequency_alignment",
+      "status": "planned"
+    },
+    {
+      "name": "w/o_topology_penalty",
+      "status": "planned"
+    },
+    {
+      "name": "w/o_cross_modal_correction",
+      "status": "planned"
+    },
+    {
+      "name": "nearest_neighbor_match",
+      "status": "planned"
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "table_name": "generalization_table_v1",
+  "description": "Cross-backbone generalization on retrieval evaluation.",
+  "datasets": ["flickr"],
+  "image_encoders": ["resnet-50", "vit-b/16"],
+  "text_encoder": "bert",
+  "subset_ratios": [0.05, 0.1, 0.2],
+  "seeds": [0, 1, 2],
+  "methods": [
+    {
+      "name": "lors",
+      "status": "planned"
+    },
+    {
+      "name": "ours_baseline",
+      "status": "ready"
+    },
+    {
+      "name": "ours_full",
+      "status": "ready"
+    }
+  ],
+  "optional_extension": {
+    "datasets": ["coco"]
+  }
+}
