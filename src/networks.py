@@ -807,25 +807,33 @@ class TextEncoder(nn.Module):
                 device = next(self.model.parameters()).device
             except StopIteration:
                 device = 'cpu'
+
+        def tokenize_texts(tokenizer, batch_texts):
+            if hasattr(tokenizer, "__call__"):
+                return tokenizer(batch_texts, return_tensors='pt', padding=True, truncation=True)
+            if hasattr(tokenizer, "batch_encode_plus"):
+                return tokenizer.batch_encode_plus(batch_texts, return_tensors='pt', padding=True, truncation=True)
+            raise AttributeError(f"{tokenizer.__class__.__name__} has no callable tokenizer interface.")
+
         if self.model_name == 'clip':
             output = self.model.encode_text(clip.tokenize(texts).to(device))
 
         elif self.model_name == 'bert':
             # Tokenize the input text
-            encoding = self.tokenizer.batch_encode_plus(texts, return_tensors='pt', padding=True, truncation=True)
+            encoding = tokenize_texts(self.tokenizer, texts)
             input_ids = encoding['input_ids'].to(device)
             attention_mask = encoding['attention_mask'].to(device)
             output = self.model(input_ids, attention_mask=attention_mask).last_hidden_state[:, self.target_token_idx, :]
         
         elif self.model_name == 'distilbert':
-            encoding = self.tokenizer.batch_encode_plus(texts, return_tensors='pt', padding=True, truncation=True)
+            encoding = tokenize_texts(self.tokenizer, texts)
             input_ids = encoding['input_ids'].to(device)
             attention_mask = encoding['attention_mask'].to(device)
             output = self.model(input_ids, attention_mask=attention_mask).last_hidden_state[:, self.target_token_idx, :]
 
         elif self.model_name == 'gpt1':
             self.tokenizer.pad_token = ' '
-            encoding = self.tokenizer.batch_encode_plus(texts, return_tensors='pt', padding=True, truncation=True)
+            encoding = tokenize_texts(self.tokenizer, texts)
             input_ids = encoding['input_ids'].to(device)
             attention_mask = encoding['attention_mask'].to(device)
             output = self.model(input_ids, attention_mask=attention_mask).last_hidden_state[:, self.target_token_idx, :]
