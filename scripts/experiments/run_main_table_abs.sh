@@ -6,7 +6,8 @@ source "${SCRIPT_DIR}/common.sh"
 
 DATASETS=("flickr" "coco")
 METHODS=("ours_baseline" "ours_full")
-SEEDS=("${SEEDS_DEFAULT[@]}")
+SEEDS_STR="${MAIN_TABLE_SEEDS:-0}"
+read -r -a SEEDS <<< "${SEEDS_STR}"
 BUDGETS=("${BUDGETS_ABS_DEFAULT[@]}")
 BACKBONE="nfnet"
 TEXT_ENCODER="bert"
@@ -14,6 +15,7 @@ TEXT_ENCODER="bert"
 RUN_TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
 RUN_LOG_DIR="${EXPERIMENT_LOG_ROOT}/main_table_abs_${RUN_TIMESTAMP}"
 mkdir -p "${RUN_LOG_DIR}"
+TOTAL_EXPERIMENTS=$(( ${#DATASETS[@]} * ${#METHODS[@]} * ${#BUDGETS[@]} * ${#SEEDS[@]} ))
 
 run_precompute_for_dataset() {
   local dataset="$1"
@@ -202,6 +204,8 @@ run_one_experiment() {
 for dataset in "${DATASETS[@]}"; do
   run_precompute_for_dataset "${dataset}"
 done
+
+stage_log "Main-table absolute-budget sweep: datasets=${#DATASETS[@]} methods=${#METHODS[@]} budgets=${#BUDGETS[@]} seeds=${#SEEDS[@]} total_experiments=${TOTAL_EXPERIMENTS}"
 
 for dataset in "${DATASETS[@]}"; do
   for method_name in "${METHODS[@]}"; do
