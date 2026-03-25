@@ -156,7 +156,13 @@ def summarize_graph(graph):
     }
 
 
-def build_unified_spectral_artifacts(unified_graph, num_eigs=64, embedding_dim=32, save_eigenvectors=True):
+def build_unified_spectral_artifacts(
+    unified_graph,
+    num_eigs=64,
+    embedding_dim=32,
+    save_eigenvectors=True,
+    spectrum_solver_mode="normalized_adjacency_largest",
+):
     log_cross_modal(
         f"building unified Laplacian and spectrum: num_nodes={unified_graph.shape[0]}, "
         f"num_edges={unified_graph.nnz}, num_eigs={num_eigs}, embedding_dim={embedding_dim}"
@@ -167,6 +173,7 @@ def build_unified_spectral_artifacts(unified_graph, num_eigs=64, embedding_dim=3
         laplacian,
         num_eigs=num_eigs,
         return_eigenvectors=save_eigenvectors or embedding_dim is not None,
+        solver_mode=spectrum_solver_mode,
     )
     log_cross_modal("building unified spectral embedding")
     spectral_embedding = build_spectral_embedding(
@@ -302,6 +309,7 @@ def run_cross_modal_topology(args):
         num_eigs=getattr(args, "num_eigs", 64),
         embedding_dim=getattr(args, "spectral_embedding_dim", 32),
         save_eigenvectors=bool(getattr(args, "save_eigenvectors", False)),
+        spectrum_solver_mode=getattr(args, "spectrum_solver_mode", "normalized_adjacency_largest"),
     )
     summary = build_summary(
         args,

@@ -21,6 +21,7 @@ def build_parser():
     parser.add_argument("--prefer_healthy_modality", type=str, default=None, choices=["image", "text"])
     parser.add_argument("--num_eigs", type=int, default=64)
     parser.add_argument("--spectral_embedding_dim", type=int, default=32)
+    parser.add_argument("--spectrum_solver_mode", type=str, default="normalized_adjacency_largest", choices=["normalized_adjacency_largest", "laplacian_smallest"])
     parser.add_argument("--save_eigenvectors", action="store_true")
     return parser
 

@@ -13,6 +13,8 @@ TOPOLOGY_ROOT="${TOPOLOGY_ROOT:-artifacts/topology_graph}"
 CROSS_MODAL_ROOT="${CROSS_MODAL_ROOT:-artifacts/cross_modal_topology}"
 SUBSET_SELECTION_ROOT="${SUBSET_SELECTION_ROOT:-artifacts/subset_selection}"
 SUBSET_TRAIN_ROOT="${SUBSET_TRAIN_ROOT:-artifacts/subset_train}"
+REPORT_ROOT="${REPORT_ROOT:-artifacts/reports}"
+EXPERIMENT_LOG_ROOT="${EXPERIMENT_LOG_ROOT:-artifacts/experiment_logs}"
 
 DEVICE="${DEVICE:-cuda}"
 BATCH_FEATURE="${BATCH_FEATURE:-64}"
@@ -76,6 +78,7 @@ MATCHING_COST_MODE="${MATCHING_COST_MODE:-candidate_topk}"
 
 SEEDS_DEFAULT=(0 1 2)
 RATIOS_DEFAULT=(0.05 0.1 0.2)
+BUDGETS_ABS_DEFAULT=(100 200 500)
 
 get_image_root() {
   local dataset="$1"
@@ -111,4 +114,9 @@ sanitize_component() {
 stage_log() {
   local message="$1"
   echo "[$(date '+%F %T')] ${message}"
+}
+
+format_budget_tag() {
+  local budget="$1"
+  printf "size_%04d" "$budget"
 }

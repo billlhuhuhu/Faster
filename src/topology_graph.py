@@ -11,6 +11,10 @@ from scipy.sparse.linalg import ArpackNoConvergence, eigsh
 from sklearn.decomposition import PCA
 from sklearn.neighbors import NearestNeighbors
 from sklearn.random_projection import GaussianRandomProjection
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
 
 try:
     import faiss
@@ -20,6 +24,10 @@ except ImportError:
 
 def sanitize_name(name):
     return name.replace("\\", "-").replace("/", "-").replace(" ", "_")
+
+
+def topology_log(message):
+    print(f"[topology] {message}", flush=True)
 
 
 def parse_multi_scale_ks(k, multi_scale_ks=None):
@@ -295,7 +303,11 @@ def compute_sigmas(distances, rho, bandwidth=None, n_iter=64, target=None):
         target = bandwidth
 
     sigmas = np.zeros(num_nodes, dtype=np.float32)
-    for row_idx in range(num_nodes):
+    iterator = range(num_nodes)
+    if tqdm is not None and num_nodes >= 1024:
+        iterator = tqdm(iterator, total=num_nodes, desc="[topology] sigma", leave=False)
+
+    for row_idx in iterator:
         row = distances[row_idx]
         rho_value = rho[row_idx]
 
@@ -409,6 +421,7 @@ def build_multiscale_fuzzy_graph(
     resolved_backend = None
 
     for k in k_list:
+        topology_log(f"building local fuzzy graph for k={k}")
         scale_output = compute_local_scale_knn(
             features,
             k=k,
@@ -474,6 +487,14 @@ def build_laplacian(graph, normalized=True):
     return laplacian
 
 
+def build_normalized_adjacency_from_laplacian(laplacian):
+    identity = sparse.eye(laplacian.shape[0], dtype=np.float32, format="csr")
+    normalized_adjacency = identity - laplacian
+    normalized_adjacency = normalized_adjacency.tocsr()
+    normalized_adjacency.eliminate_zeros()
+    return normalized_adjacency
+
+
 def build_spectral_embedding(eigenvalues, eigenvectors, embedding_dim=None, drop_first=True):
     if eigenvectors is None:
         return None
@@ -488,11 +509,21 @@ def build_spectral_embedding(eigenvalues, eigenvectors, embedding_dim=None, drop
     return embedding
 
 
-def build_graph_artifacts(graph, num_eigs, save_eigenvectors=True, embedding_dim=None):
+def build_graph_artifacts(graph, num_eigs, save_eigenvectors=True, embedding_dim=None, spectrum_solver_mode="normalized_adjacency_largest"):
+    topology_log("row-normalizing graph")
     transition = row_normalize_graph(graph)
+    topology_log("building symmetric normalized Laplacian")
     laplacian = build_laplacian(graph, normalized=True)
-    eigenvalues, eigenvectors = compute_spectrum(laplacian, num_eigs, return_eigenvectors=save_eigenvectors or embedding_dim is not None)
+    topology_log(f"computing spectrum with num_eigs={num_eigs}")
+    eigenvalues, eigenvectors = compute_spectrum(
+        laplacian,
+        num_eigs,
+        return_eigenvectors=save_eigenvectors or embedding_dim is not None,
+        solver_mode=spectrum_solver_mode,
+    )
+    topology_log("building spectral embedding")
     spectral_embedding = build_spectral_embedding(eigenvalues, eigenvectors, embedding_dim=embedding_dim) if (save_eigenvectors or embedding_dim is not None) else None
+    topology_log("computing collapse metrics")
     collapse_metrics = compute_collapse_metrics(eigenvalues)
     return {
         "adjacency": graph,
@@ -505,7 +536,7 @@ def build_graph_artifacts(graph, num_eigs, save_eigenvectors=True, embedding_dim
     }
 
 
-def compute_spectrum(laplacian, num_eigs, return_eigenvectors=False):
+def compute_spectrum(laplacian, num_eigs, return_eigenvectors=False, solver_mode="normalized_adjacency_largest"):
     num_nodes = laplacian.shape[0]
     if num_nodes <= 1:
         eigenvalues = np.zeros(1, dtype=np.float32)
@@ -513,27 +544,52 @@ def compute_spectrum(laplacian, num_eigs, return_eigenvectors=False):
         return eigenvalues, eigenvectors
 
     num_eigs = max(2, min(int(num_eigs), num_nodes - 1))
+    solver_mode = str(solver_mode or "normalized_adjacency_largest")
     if num_nodes <= 4096:
-        dense_laplacian = laplacian.toarray()
-        eigenvalues, eigenvectors = np.linalg.eigh(dense_laplacian)
-        eigenvalues = eigenvalues[:num_eigs].astype(np.float32)
-        eigenvectors = eigenvectors[:, :num_eigs].astype(np.float32) if return_eigenvectors else None
-        return eigenvalues, eigenvectors
+        if solver_mode == "laplacian_smallest":
+            topology_log("using dense eigh on Laplacian")
+            dense_matrix = laplacian.toarray()
+            eigenvalues, eigenvectors = np.linalg.eigh(dense_matrix)
+            eigenvalues = eigenvalues[:num_eigs].astype(np.float32)
+            eigenvectors = eigenvectors[:, :num_eigs].astype(np.float32) if return_eigenvectors else None
+            return eigenvalues, eigenvectors
+        if solver_mode == "normalized_adjacency_largest":
+            topology_log("using dense eigh on normalized adjacency")
+            dense_matrix = build_normalized_adjacency_from_laplacian(laplacian).toarray()
+            mu_values, eigenvectors = np.linalg.eigh(dense_matrix)
+            order = np.argsort(mu_values)[::-1][:num_eigs]
+            mu_values = mu_values[order]
+            eigenvalues = (1.0 - mu_values).astype(np.float32)
+            eigenvectors = eigenvectors[:, order].astype(np.float32) if return_eigenvectors else None
+            return eigenvalues, eigenvectors
+        raise ValueError(f"Unsupported spectrum solver mode: {solver_mode}")
+
+    if solver_mode == "laplacian_smallest":
+        matrix = laplacian
+        which = "SM"
+        topology_log("using sparse eigsh on Laplacian with which=SM")
+    elif solver_mode == "normalized_adjacency_largest":
+        matrix = build_normalized_adjacency_from_laplacian(laplacian)
+        which = "LA"
+        topology_log("using sparse eigsh on normalized adjacency with which=LA")
+    else:
+        raise ValueError(f"Unsupported spectrum solver mode: {solver_mode}")
 
     try:
         eigenvalues, eigenvectors = eigsh(
-            laplacian,
+            matrix,
             k=num_eigs,
-            which="SM",
+            which=which,
             return_eigenvectors=True,
         )
     except ArpackNoConvergence as exc:
+        topology_log("ARPACK did not fully converge, retrying with relaxed settings")
         try:
             retry_ncv = min(num_nodes - 1, max(2 * num_eigs + 1, 32))
             eigenvalues, eigenvectors = eigsh(
-                laplacian,
+                matrix,
                 k=num_eigs,
-                which="SM",
+                which=which,
                 return_eigenvectors=True,
                 ncv=retry_ncv,
                 maxiter=200000,
@@ -544,15 +600,16 @@ def compute_spectrum(laplacian, num_eigs, return_eigenvectors=False):
             partial_vectors = retry_exc.eigenvectors if retry_exc.eigenvectors is not None else exc.eigenvectors
             if partial_values is None or len(partial_values) < 2:
                 raise
-            print(
-                f"[topology] warning: ARPACK did not fully converge for k={num_eigs}; "
-                f"using {len(partial_values)} converged eigenpairs instead.",
-                flush=True,
-            )
+            topology_log(f"warning: ARPACK did not fully converge for k={num_eigs}; using {len(partial_values)} converged eigenpairs instead.")
             eigenvalues = partial_values
             eigenvectors = partial_vectors
-    order = np.argsort(eigenvalues)
-    eigenvalues = np.asarray(eigenvalues[order], dtype=np.float32)
+
+    if solver_mode == "normalized_adjacency_largest":
+        order = np.argsort(eigenvalues)[::-1]
+        eigenvalues = 1.0 - np.asarray(eigenvalues[order], dtype=np.float32)
+    else:
+        order = np.argsort(eigenvalues)
+        eigenvalues = np.asarray(eigenvalues[order], dtype=np.float32)
     if return_eigenvectors:
         eigenvectors = np.asarray(eigenvectors[:, order], dtype=np.float32)
     else:
@@ -609,6 +666,7 @@ def summarize_results(args, features, knn_indices, sym_graph, eigenvalues, colla
         "multi_scale_merge_mode": getattr(args, "multi_scale_merge_mode", "mean"),
         "use_mst_connectivity": bool(getattr(args, "use_mst_connectivity", False)),
         "mst_weight_scale": float(getattr(args, "mst_weight_scale", 1.0)),
+        "spectrum_solver_mode": getattr(args, "spectrum_solver_mode", "normalized_adjacency_largest"),
         "per_scale_stats": per_scale_stats or [],
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
@@ -742,6 +800,7 @@ def run_topology_graph(args):
         args.num_eigs,
         save_eigenvectors=args.save_eigenvectors,
         embedding_dim=getattr(args, "spectral_embedding_dim", None),
+        spectrum_solver_mode=getattr(args, "spectrum_solver_mode", "normalized_adjacency_largest"),
     )
     transition_graph = graph_artifacts["transition"]
     laplacian = graph_artifacts["laplacian_sym"]

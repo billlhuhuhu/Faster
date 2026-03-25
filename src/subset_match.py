@@ -31,10 +31,9 @@ def build_cross_modal_dir(args):
 def build_output_dir(args):
     model_tag = f"{sanitize_name(args.image_encoder)}_{sanitize_name(args.text_encoder)}"
     budget_tag = build_budget_tag(args)
-    base_dir = Path(args.output_root) / args.dataset / args.split / model_tag / budget_tag
-    if getattr(args, "selection_method", "baseline") != "baseline":
-        return base_dir / sanitize_name(args.selection_method)
-    return base_dir
+    method_tag = sanitize_name(getattr(args, "selection_method", "baseline"))
+    seed_tag = f"seed_{int(getattr(args, 'random_state', 0))}"
+    return Path(args.output_root) / args.dataset / args.split / model_tag / budget_tag / method_tag / seed_tag
 
 
 def load_feature_cache(feature_dir):
@@ -550,6 +549,7 @@ def compute_selection_summary(
         "num_samples": int(num_samples),
         "representation_mode": args.representation_mode,
         "selection_method": getattr(args, "selection_method", "baseline"),
+        "selection_seed": int(getattr(args, "random_state", 0)),
         "cluster_method": getattr(args, "cluster_method", None),
         "degree_weight": float(args.degree_weight),
         "mean_selected_graph_score": float(np.mean(selected_scores)) if selected_scores else 0.0,

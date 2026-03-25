@@ -23,6 +23,7 @@ def build_parser():
     parser.add_argument("--mst_weight_scale", type=float, default=1.0)
     parser.add_argument("--num_eigs", type=int, default=32)
     parser.add_argument("--spectral_embedding_dim", type=int, default=32)
+    parser.add_argument("--spectrum_solver_mode", type=str, default="normalized_adjacency_largest", choices=["normalized_adjacency_largest", "laplacian_smallest"])
     parser.add_argument("--n_jobs", type=int, default=None)
     parser.add_argument("--knn_backend", type=str, default="auto", choices=["auto", "sklearn", "faiss"])
     parser.add_argument("--faiss_use_gpu", action="store_true")
