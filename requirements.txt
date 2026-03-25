@@ -5,6 +5,7 @@ git+https://github.com/openai/CLIP.git
 kornia==0.6.3
 scikit-learn==1.1.2
 scipy==1.10.1
+scikit-image
 matplotlib==3.6.0
 transformers
 wandb

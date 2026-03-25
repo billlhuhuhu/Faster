@@ -8,6 +8,11 @@ from scipy import sparse
 from src.topology_graph import build_laplacian, build_spectral_embedding, compute_spectrum, parse_multi_scale_ks
 
 
+def log_cross_modal(message):
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[cross-modal][{timestamp}] {message}", flush=True)
+
+
 def sanitize_name(name):
     return name.replace("\\", "-").replace("/", "-").replace(" ", "_")
 
@@ -39,6 +44,7 @@ def build_output_dir(args):
 
 def load_graph_bundle(graph_dir):
     graph_dir = Path(graph_dir)
+    log_cross_modal(f"loading graph bundle from {graph_dir}")
     with open(graph_dir / "summary.json", "r", encoding="utf-8") as handle:
         summary = json.load(handle)
     graph = sparse.load_npz(graph_dir / "symmetric_graph.npz").tocsr()
@@ -151,12 +157,18 @@ def summarize_graph(graph):
 
 
 def build_unified_spectral_artifacts(unified_graph, num_eigs=64, embedding_dim=32, save_eigenvectors=True):
+    log_cross_modal(
+        f"building unified Laplacian and spectrum: num_nodes={unified_graph.shape[0]}, "
+        f"num_edges={unified_graph.nnz}, num_eigs={num_eigs}, embedding_dim={embedding_dim}"
+    )
     laplacian = build_laplacian(unified_graph, normalized=True)
+    log_cross_modal("computing unified spectrum")
     eigenvalues, eigenvectors = compute_spectrum(
         laplacian,
         num_eigs=num_eigs,
         return_eigenvectors=save_eigenvectors or embedding_dim is not None,
     )
+    log_cross_modal("building unified spectral embedding")
     spectral_embedding = build_spectral_embedding(
         eigenvalues,
         eigenvectors,
@@ -208,6 +220,7 @@ def save_cross_modal_outputs(
     summary,
 ):
     output_dir.mkdir(parents=True, exist_ok=True)
+    log_cross_modal(f"saving cross-modal artifacts to {output_dir}")
 
     sparse.save_npz(output_dir / "B_I_or_health.npz", healthy_bundle["graph"])
     sparse.save_npz(output_dir / "B_collapsed_raw.npz", collapsed_bundle["graph"])
@@ -246,31 +259,42 @@ def save_cross_modal_outputs(
 
 
 def run_cross_modal_topology(args):
+    log_cross_modal(
+        f"start cross-modal topology: dataset={args.dataset}, split={args.split}, "
+        f"image_metric={get_modality_metric(args, 'image')}, text_metric={get_modality_metric(args, 'text')}, "
+        f"k={args.k}, alpha={args.alpha}"
+    )
     image_bundle = load_graph_bundle(build_graph_dir(args, "image"))
     text_bundle = load_graph_bundle(build_graph_dir(args, "text"))
+    log_cross_modal("validating image/text graph compatibility")
     validate_modalities(image_bundle, text_bundle)
 
+    log_cross_modal("choosing healthy modality")
     healthy_modality = choose_healthy_modality(
         image_bundle["summary"],
         text_bundle["summary"],
         prefer=args.prefer_healthy_modality,
     )
+    log_cross_modal(f"healthy modality selected: {healthy_modality}")
     if healthy_modality == "image":
         healthy_bundle, collapsed_bundle = image_bundle, text_bundle
     else:
         healthy_bundle, collapsed_bundle = text_bundle, image_bundle
 
+    log_cross_modal("correcting collapsed modality graph")
     corrected_directed, corrected_symmetric = correct_collapsed_graph(
         healthy_bundle["transition"],
         collapsed_bundle["graph"],
         alpha=args.alpha,
     )
+    log_cross_modal("building unified topology B*")
     unified_graph = unify_topology(
         healthy_bundle["graph"],
         corrected_symmetric,
         mode=args.fusion_mode,
     )
 
+    log_cross_modal("summarizing corrected and unified graphs")
     corrected_summary = summarize_graph(corrected_symmetric)
     unified_summary = summarize_graph(unified_graph)
     unified_spectral_artifacts = build_unified_spectral_artifacts(
@@ -301,6 +325,7 @@ def run_cross_modal_topology(args):
         unified_spectral_artifacts,
         summary,
     )
+    log_cross_modal("cross-modal topology completed")
 
     return {
         "output_dir": str(output_dir),

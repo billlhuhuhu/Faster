@@ -73,6 +73,82 @@ def _compute_color_histogram(image_array, color_space="rgb", color_hist_bins=16)
     return np.concatenate(hist_parts, axis=0).astype(np.float32)
 
 
+def _rgb_to_gray(image_rgb):
+    return (
+        0.2989 * image_rgb[..., 0]
+        + 0.5870 * image_rgb[..., 1]
+        + 0.1140 * image_rgb[..., 2]
+    ).astype(np.float32)
+
+
+def _compute_simple_hog(
+    gray_image,
+    orientations=9,
+    pixels_per_cell=8,
+    cells_per_block=2,
+    eps=1e-6,
+):
+    """A lightweight NumPy HOG fallback used when scikit-image is unavailable.
+
+    This is intentionally simpler than skimage.feature.hog, but it preserves the
+    same high-level signal: local orientation histograms with block normalization.
+    """
+    gray_image = np.asarray(gray_image, dtype=np.float32)
+    gx = np.zeros_like(gray_image, dtype=np.float32)
+    gy = np.zeros_like(gray_image, dtype=np.float32)
+    gx[:, 1:-1] = gray_image[:, 2:] - gray_image[:, :-2]
+    gx[:, 0] = gray_image[:, 1] - gray_image[:, 0]
+    gx[:, -1] = gray_image[:, -1] - gray_image[:, -2]
+    gy[1:-1, :] = gray_image[2:, :] - gray_image[:-2, :]
+    gy[0, :] = gray_image[1, :] - gray_image[0, :]
+    gy[-1, :] = gray_image[-1, :] - gray_image[-2, :]
+
+    magnitude = np.sqrt(gx ** 2 + gy ** 2)
+    orientation = (np.degrees(np.arctan2(gy, gx)) % 180.0).astype(np.float32)
+
+    pixels_per_cell = int(pixels_per_cell)
+    cells_per_block = int(cells_per_block)
+    orientations = int(orientations)
+    if pixels_per_cell <= 0 or cells_per_block <= 0 or orientations <= 0:
+        raise ValueError("HOG parameters must be positive integers.")
+
+    n_cells_y = gray_image.shape[0] // pixels_per_cell
+    n_cells_x = gray_image.shape[1] // pixels_per_cell
+    if n_cells_y < cells_per_block or n_cells_x < cells_per_block:
+        raise ValueError("Image is too small for the requested HOG cell/block sizes.")
+
+    hist = np.zeros((n_cells_y, n_cells_x, orientations), dtype=np.float32)
+    bin_width = 180.0 / float(orientations)
+
+    for cy in range(n_cells_y):
+        for cx in range(n_cells_x):
+            y0 = cy * pixels_per_cell
+            y1 = y0 + pixels_per_cell
+            x0 = cx * pixels_per_cell
+            x1 = x0 + pixels_per_cell
+            cell_mag = magnitude[y0:y1, x0:x1].reshape(-1)
+            cell_ori = orientation[y0:y1, x0:x1].reshape(-1)
+            cell_bins = np.floor(cell_ori / bin_width).astype(np.int64)
+            cell_bins = np.clip(cell_bins, 0, orientations - 1)
+            for bin_idx in range(orientations):
+                mask = cell_bins == bin_idx
+                if np.any(mask):
+                    hist[cy, cx, bin_idx] = float(cell_mag[mask].sum())
+
+    blocks = []
+    for cy in range(n_cells_y - cells_per_block + 1):
+        for cx in range(n_cells_x - cells_per_block + 1):
+            block = hist[cy:cy + cells_per_block, cx:cx + cells_per_block, :].reshape(-1)
+            block = block / np.sqrt(np.sum(block ** 2) + eps ** 2)
+            block = np.clip(block, 0.0, 0.2)
+            block = block / np.sqrt(np.sum(block ** 2) + eps ** 2)
+            blocks.append(block.astype(np.float32))
+
+    if not blocks:
+        return hist.reshape(-1).astype(np.float32)
+    return np.concatenate(blocks, axis=0).astype(np.float32)
+
+
 def extract_hog_color_features(
     image_path,
     image_size=128,
@@ -82,24 +158,28 @@ def extract_hog_color_features(
     color_space="rgb",
     color_hist_bins=16,
 ):
+    image_array = _open_image_rgb(image_path, image_size=image_size)
     try:
         from skimage.color import rgb2gray
         from skimage.feature import hog
-    except ImportError as exc:
-        raise ImportError(
-            "extract_hog_color_features requires scikit-image. Install scikit-image in the selection-stage environment."
-        ) from exc
 
-    image_array = _open_image_rgb(image_path, image_size=image_size)
-    gray = rgb2gray(image_array)
-    hog_feat = hog(
-        gray,
-        orientations=int(hog_orientations),
-        pixels_per_cell=(int(hog_pixels_per_cell), int(hog_pixels_per_cell)),
-        cells_per_block=(int(hog_cells_per_block), int(hog_cells_per_block)),
-        block_norm="L2-Hys",
-        feature_vector=True,
-    ).astype(np.float32)
+        gray = rgb2gray(image_array)
+        hog_feat = hog(
+            gray,
+            orientations=int(hog_orientations),
+            pixels_per_cell=(int(hog_pixels_per_cell), int(hog_pixels_per_cell)),
+            cells_per_block=(int(hog_cells_per_block), int(hog_cells_per_block)),
+            block_norm="L2-Hys",
+            feature_vector=True,
+        ).astype(np.float32)
+    except ImportError:
+        gray = _rgb_to_gray(image_array)
+        hog_feat = _compute_simple_hog(
+            gray,
+            orientations=int(hog_orientations),
+            pixels_per_cell=int(hog_pixels_per_cell),
+            cells_per_block=int(hog_cells_per_block),
+        )
     color_feat = _compute_color_histogram(
         image_array,
         color_space=color_space,
