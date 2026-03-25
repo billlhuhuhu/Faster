@@ -30,7 +30,7 @@ def build_cross_modal_dir(args):
 
 def build_output_dir(args):
     model_tag = f"{sanitize_name(args.image_encoder)}_{sanitize_name(args.text_encoder)}"
-    budget_tag = f"ratio_{int(round(args.budget_ratio * 100)):02d}"
+    budget_tag = build_budget_tag(args)
     base_dir = Path(args.output_root) / args.dataset / args.split / model_tag / budget_tag
     if getattr(args, "selection_method", "baseline") != "baseline":
         return base_dir / sanitize_name(args.selection_method)
@@ -89,11 +89,26 @@ def build_reference_embedding(representation, spectral_embedding=None, mode="hyb
     raise ValueError(f"Unsupported reference embedding mode: {mode}")
 
 
-def compute_subset_size(num_samples, budget_ratio):
-    subset_size = int(round(num_samples * float(budget_ratio)))
+def resolve_subset_size(num_samples, budget_ratio=None, budget_size=None):
+    if budget_size is not None:
+        subset_size = int(budget_size)
+    elif budget_ratio is not None:
+        subset_size = int(round(num_samples * float(budget_ratio)))
+    else:
+        raise ValueError("Either budget_ratio or budget_size must be provided.")
     subset_size = max(1, subset_size)
     subset_size = min(num_samples, subset_size)
     return subset_size
+
+
+def build_budget_tag(args):
+    budget_size = getattr(args, "budget_size", None)
+    budget_ratio = getattr(args, "budget_ratio", None)
+    if budget_size is not None:
+        return f"size_{int(budget_size):04d}"
+    if budget_ratio is not None:
+        return f"ratio_{int(round(float(budget_ratio) * 100)):02d}"
+    raise ValueError("Either budget_ratio or budget_size must be provided.")
 
 
 def compute_graph_scores(unified_graph):
@@ -528,7 +543,9 @@ def compute_selection_summary(
         "split": args.split,
         "image_encoder": args.image_encoder,
         "text_encoder": args.text_encoder,
-        "budget_ratio": float(args.budget_ratio),
+        "budget_ratio": float(args.budget_ratio) if getattr(args, "budget_ratio", None) is not None else None,
+        "budget_size": int(subset_size),
+        "requested_budget_size": int(getattr(args, "budget_size", subset_size) or subset_size),
         "subset_size": int(subset_size),
         "num_samples": int(num_samples),
         "representation_mode": args.representation_mode,
@@ -630,7 +647,11 @@ def save_selection_outputs(
 
 
 def run_baseline_selection(args, representation, unified_graph):
-    subset_size = compute_subset_size(representation.shape[0], args.budget_ratio)
+    subset_size = resolve_subset_size(
+        representation.shape[0],
+        budget_ratio=getattr(args, "budget_ratio", None),
+        budget_size=getattr(args, "budget_size", None),
+    )
     graph_scores = compute_graph_scores(unified_graph)
     centers, _ = fit_proxy_centers(
         representation,
@@ -658,7 +679,11 @@ def run_baseline_selection(args, representation, unified_graph):
 
 
 def run_proxy_optimized_selection(args, representation, unified_graph):
-    subset_size = compute_subset_size(representation.shape[0], args.budget_ratio)
+    subset_size = resolve_subset_size(
+        representation.shape[0],
+        budget_ratio=getattr(args, "budget_ratio", None),
+        budget_size=getattr(args, "budget_size", None),
+    )
     reference_embedding = build_reference_embedding(
         representation,
         spectral_embedding=getattr(args, "_spectral_embedding", None),

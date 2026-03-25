@@ -10,7 +10,9 @@ def build_parser():
     parser.add_argument("--ann_root", type=str, required=True)
     parser.add_argument("--selected_indices_path", type=str, required=True)
     parser.add_argument("--output_root", type=str, default="artifacts/subset_train")
-    parser.add_argument("--subset_ratio", type=float, required=True, choices=[0.05, 0.1, 0.2])
+    budget_group = parser.add_mutually_exclusive_group(required=False)
+    budget_group.add_argument("--subset_ratio", type=float, default=None)
+    budget_group.add_argument("--subset_size", type=int, default=None)
     parser.add_argument("--subset_tag", type=str, default=None)
 
     parser.add_argument("--image_encoder", type=str, required=True, choices=["nfnet", "resnet50", "resnet-50", "vit_b16", "vit-b16", "vit-b/16"])

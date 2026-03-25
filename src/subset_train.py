@@ -38,9 +38,15 @@ def infer_subset_tag(selected_indices_path):
     return sanitize_name(selected_indices_path.parent.name)
 
 
-def build_output_dir(args):
+def build_budget_tag(subset_size, subset_ratio=None):
+    if subset_ratio is not None:
+        return f"ratio_{int(round(float(subset_ratio) * 100)):02d}"
+    return f"size_{int(subset_size):04d}"
+
+
+def build_output_dir(args, subset_size):
     model_tag = f"{sanitize_name(args.image_encoder)}_{sanitize_name(args.text_encoder)}"
-    ratio_tag = f"ratio_{int(round(float(args.subset_ratio) * 100)):02d}"
+    ratio_tag = build_budget_tag(subset_size, subset_ratio=getattr(args, "subset_ratio", None))
     subset_tag = sanitize_name(getattr(args, "subset_tag", None) or infer_subset_tag(args.selected_indices_path))
     seed_tag = f"seed_{int(args.seed)}"
     return Path(args.output_root) / args.dataset / model_tag / ratio_tag / subset_tag / seed_tag
@@ -152,7 +158,7 @@ def build_metrics_payload(args, subset_size, best_epoch, best_val_metrics, test_
         "dataset": args.dataset,
         "backbone": args.image_encoder,
         "text_encoder": args.text_encoder,
-        "subset_ratio": float(args.subset_ratio),
+        "subset_ratio": float(args.subset_ratio) if getattr(args, "subset_ratio", None) is not None else None,
         "subset_size": int(subset_size),
         "seed": int(args.seed),
         "best_epoch": int(best_epoch),
@@ -172,10 +178,11 @@ def build_metrics_payload(args, subset_size, best_epoch, best_val_metrics, test_
 def train_and_evaluate_subset(args):
     set_seed(args.seed)
     args.device = args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu")
-    output_dir = build_output_dir(args)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
     train_dataset, subset_dataset, val_dataset, test_dataset, train_loader, val_loader, test_loader, selected_indices = build_dataloaders(args)
+    if getattr(args, "subset_size", None) is None:
+        args.subset_size = int(len(subset_dataset))
+    output_dir = build_output_dir(args, subset_size=len(subset_dataset))
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     model = CLIPModel_full(args).to(args.device)
     optimizer = create_optimizer(model, args)
@@ -235,7 +242,7 @@ def train_and_evaluate_subset(args):
                         "dataset": args.dataset,
                         "image_encoder": args.image_encoder,
                         "text_encoder": args.text_encoder,
-                        "subset_ratio": float(args.subset_ratio),
+                        "subset_ratio": float(args.subset_ratio) if getattr(args, "subset_ratio", None) is not None else None,
                         "subset_size": int(len(subset_dataset)),
                         "selected_indices_path": str(args.selected_indices_path),
                         "selected_indices": selected_indices,
