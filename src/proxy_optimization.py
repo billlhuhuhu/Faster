@@ -31,6 +31,20 @@ def random_project_representation(representation, projection_dim=None, random_st
     return projected.astype(np.float32), projection.astype(np.float32)
 
 
+def project_reference_points(reference_points, projection_matrix=None):
+    if reference_points is None:
+        return None
+    reference_points = np.asarray(reference_points, dtype=np.float32)
+    if projection_matrix is not None:
+        if reference_points.shape[1] != projection_matrix.shape[0]:
+            raise ValueError(
+                "Reference points and projection matrix dimension mismatch: "
+                f"{reference_points.shape[1]} vs {projection_matrix.shape[0]}"
+            )
+        reference_points = reference_points @ projection_matrix
+    return l2_normalize(reference_points.astype(np.float32))
+
+
 def initialize_proxy_points(
     representation,
     subset_size,
@@ -290,6 +304,8 @@ def optimize_proxy_points(
         random_state=random_state,
     )
     projected_representation = l2_normalize(projected_representation.astype(np.float32))
+    projected_match_reference = project_reference_points(match_reference, projection_matrix)
+    projected_graph_reference = project_reference_points(graph_reference, projection_matrix)
 
     init_points, init_info = initialize_proxy_points(
         projected_representation,
@@ -303,10 +319,14 @@ def optimize_proxy_points(
     full_repr = torch.tensor(projected_representation, dtype=torch.float32, device=torch_device)
     proxy_init = torch.tensor(init_points, dtype=torch.float32, device=torch_device)
     proxy_points = torch.nn.Parameter(proxy_init.clone())
-    if match_reference is not None:
-        match_reference = torch.tensor(np.asarray(match_reference, dtype=np.float32), dtype=torch.float32, device=torch_device)
-    if graph_reference is not None:
-        graph_reference = torch.tensor(np.asarray(graph_reference, dtype=np.float32), dtype=torch.float32, device=torch_device)
+    if projected_match_reference is not None:
+        match_reference = torch.tensor(projected_match_reference, dtype=torch.float32, device=torch_device)
+    else:
+        match_reference = None
+    if projected_graph_reference is not None:
+        graph_reference = torch.tensor(projected_graph_reference, dtype=torch.float32, device=torch_device)
+    else:
+        graph_reference = None
 
     if tau_max is None:
         tau_max = frequency_scale
