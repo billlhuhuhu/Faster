@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from scipy import sparse
 from scipy.sparse import csgraph
-from scipy.sparse.linalg import eigsh
+from scipy.sparse.linalg import ArpackNoConvergence, eigsh
 from sklearn.decomposition import PCA
 from sklearn.neighbors import NearestNeighbors
 from sklearn.random_projection import GaussianRandomProjection
@@ -520,7 +520,37 @@ def compute_spectrum(laplacian, num_eigs, return_eigenvectors=False):
         eigenvectors = eigenvectors[:, :num_eigs].astype(np.float32) if return_eigenvectors else None
         return eigenvalues, eigenvectors
 
-    eigenvalues, eigenvectors = eigsh(laplacian, k=num_eigs, which="SM", return_eigenvectors=True)
+    try:
+        eigenvalues, eigenvectors = eigsh(
+            laplacian,
+            k=num_eigs,
+            which="SM",
+            return_eigenvectors=True,
+        )
+    except ArpackNoConvergence as exc:
+        try:
+            retry_ncv = min(num_nodes - 1, max(2 * num_eigs + 1, 32))
+            eigenvalues, eigenvectors = eigsh(
+                laplacian,
+                k=num_eigs,
+                which="SM",
+                return_eigenvectors=True,
+                ncv=retry_ncv,
+                maxiter=200000,
+                tol=1e-4,
+            )
+        except ArpackNoConvergence as retry_exc:
+            partial_values = retry_exc.eigenvalues if retry_exc.eigenvalues is not None else exc.eigenvalues
+            partial_vectors = retry_exc.eigenvectors if retry_exc.eigenvectors is not None else exc.eigenvectors
+            if partial_values is None or len(partial_values) < 2:
+                raise
+            print(
+                f"[topology] warning: ARPACK did not fully converge for k={num_eigs}; "
+                f"using {len(partial_values)} converged eigenpairs instead.",
+                flush=True,
+            )
+            eigenvalues = partial_values
+            eigenvectors = partial_vectors
     order = np.argsort(eigenvalues)
     eigenvalues = np.asarray(eigenvalues[order], dtype=np.float32)
     if return_eigenvectors:
