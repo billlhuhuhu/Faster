@@ -5,7 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 DATASETS=("flickr" "coco")
-METHODS=("ours_baseline" "ours_full")
+METHODS_STR="${MAIN_TABLE_METHODS:-ours_full}"
+read -r -a METHODS <<< "${METHODS_STR}"
 SEEDS_STR="${MAIN_TABLE_SEEDS:-0}"
 read -r -a SEEDS <<< "${SEEDS_STR}"
 BUDGETS=("${BUDGETS_ABS_DEFAULT[@]}")
@@ -205,7 +206,7 @@ for dataset in "${DATASETS[@]}"; do
   run_precompute_for_dataset "${dataset}"
 done
 
-stage_log "Main-table absolute-budget sweep: datasets=${#DATASETS[@]} methods=${#METHODS[@]} budgets=${#BUDGETS[@]} seeds=${#SEEDS[@]} total_experiments=${TOTAL_EXPERIMENTS}"
+stage_log "Main-table absolute-budget sweep: methods=${METHODS[*]} datasets=${#DATASETS[@]} methods_count=${#METHODS[@]} budgets=${#BUDGETS[@]} seeds=${#SEEDS[@]} total_experiments=${TOTAL_EXPERIMENTS}"
 
 for dataset in "${DATASETS[@]}"; do
   for method_name in "${METHODS[@]}"; do
