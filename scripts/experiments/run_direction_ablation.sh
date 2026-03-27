@@ -174,13 +174,17 @@ run_cross_stage "dir1_bidir_only" "bidirectional" "intersection"
 # dir2: confidence-aware fusion only
 run_cross_stage "dir2_conf_only" "directional" "confidence_aware"
 
+# dir3: LSRC only, reuse the old directional/intersection setting but regenerate
+# cross-modal artifacts with the current code so corrected image/text graphs exist.
+run_cross_stage "dir3_lsrc_only" "directional" "intersection"
+
 # all enabled: bidirectional correction + confidence-aware fusion
 run_cross_stage "all_enabled" "bidirectional" "confidence_aware"
 
 for budget in ${BUDGETS_STR}; do
   run_selection_and_train "dir1_bidir_only" "${ABLATION_CROSS_ROOT}/dir1_bidir_only" "${budget}" "0"
   run_selection_and_train "dir2_conf_only" "${ABLATION_CROSS_ROOT}/dir2_conf_only" "${budget}" "0"
-  run_selection_and_train "dir3_lsrc_only" "${CROSS_MODAL_ROOT}" "${budget}" "1"
+  run_selection_and_train "dir3_lsrc_only" "${ABLATION_CROSS_ROOT}/dir3_lsrc_only" "${budget}" "1"
   run_selection_and_train "all_enabled" "${ABLATION_CROSS_ROOT}/all_enabled" "${budget}" "1"
 done
 
