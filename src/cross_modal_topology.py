@@ -179,6 +179,36 @@ def build_bidirectional_correction_weights(image_transition, text_transition, rh
     return alpha_txt_to_img, alpha_img_to_txt
 
 
+def apply_directional_correction(
+    image_bundle,
+    text_bundle,
+    healthy_modality,
+    alpha=1.0,
+):
+    if healthy_modality == "image":
+        healthy_transition = image_bundle["transition"]
+        collapsed_graph = text_bundle["graph"]
+        corrected_collapsed_directed = collapsed_graph.multiply(sparse_elementwise_power(healthy_transition, alpha))
+        corrected_collapsed_symmetric = fuzzy_union_symmetrize(corrected_collapsed_directed)
+        return (
+            image_bundle["graph"],
+            image_bundle["graph"],
+            corrected_collapsed_directed.tocsr(),
+            corrected_collapsed_symmetric.tocsr(),
+        )
+
+    healthy_transition = text_bundle["transition"]
+    collapsed_graph = image_bundle["graph"]
+    corrected_collapsed_directed = collapsed_graph.multiply(sparse_elementwise_power(healthy_transition, alpha))
+    corrected_collapsed_symmetric = fuzzy_union_symmetrize(corrected_collapsed_directed)
+    return (
+        corrected_collapsed_directed.tocsr(),
+        corrected_collapsed_symmetric.tocsr(),
+        text_bundle["graph"],
+        text_bundle["graph"],
+    )
+
+
 def apply_bidirectional_correction(image_graph, text_graph, alpha_txt_to_img, alpha_img_to_txt):
     image_graph = image_graph.tocsr()
     text_graph = text_graph.tocsr()
@@ -350,6 +380,7 @@ def build_summary(
         "text_metric": get_modality_metric(args, "text"),
         "k": int(args.k),
         "alpha": float(args.alpha),
+        "correction_mode": getattr(args, "correction_mode", "bidirectional"),
         "tau_g": float(getattr(args, "tau_g", 0.5)),
         "correction_eps": float(getattr(args, "correction_eps", 1e-8)),
         "fusion_mode": args.fusion_mode,
@@ -464,25 +495,42 @@ def run_cross_modal_topology(args):
     )
     log_cross_modal(f"global confidences: rho_img={rho_img:.4f}, rho_txt={rho_txt:.4f}")
 
-    log_cross_modal("applying bidirectional graph correction")
-    alpha_txt_to_img, alpha_img_to_txt = build_bidirectional_correction_weights(
-        image_bundle["transition"],
-        text_bundle["transition"],
-        rho_img=rho_img,
-        rho_txt=rho_txt,
-        eps=getattr(args, "correction_eps", 1e-8),
-    )
-    (
-        corrected_image_directed,
-        corrected_image_symmetric,
-        corrected_text_directed,
-        corrected_text_symmetric,
-    ) = apply_bidirectional_correction(
-        image_bundle["graph"],
-        text_bundle["graph"],
-        alpha_txt_to_img,
-        alpha_img_to_txt,
-    )
+    correction_mode = getattr(args, "correction_mode", "bidirectional")
+    if correction_mode == "directional":
+        log_cross_modal("applying directional healthy-to-collapsed correction")
+        (
+            corrected_image_directed,
+            corrected_image_symmetric,
+            corrected_text_directed,
+            corrected_text_symmetric,
+        ) = apply_directional_correction(
+            image_bundle,
+            text_bundle,
+            healthy_modality=healthy_modality,
+            alpha=getattr(args, "alpha", 1.0),
+        )
+    elif correction_mode == "bidirectional":
+        log_cross_modal("applying bidirectional graph correction")
+        alpha_txt_to_img, alpha_img_to_txt = build_bidirectional_correction_weights(
+            image_bundle["transition"],
+            text_bundle["transition"],
+            rho_img=rho_img,
+            rho_txt=rho_txt,
+            eps=getattr(args, "correction_eps", 1e-8),
+        )
+        (
+            corrected_image_directed,
+            corrected_image_symmetric,
+            corrected_text_directed,
+            corrected_text_symmetric,
+        ) = apply_bidirectional_correction(
+            image_bundle["graph"],
+            text_bundle["graph"],
+            alpha_txt_to_img,
+            alpha_img_to_txt,
+        )
+    else:
+        raise ValueError(f"Unsupported correction mode: {correction_mode}")
 
     log_cross_modal("building unified topology B*")
     unified_graph = unify_topology(

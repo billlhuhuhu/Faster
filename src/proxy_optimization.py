@@ -3,6 +3,7 @@ import math
 import numpy as np
 import torch
 from sklearn.cluster import KMeans, MiniBatchKMeans
+from sklearn.neighbors import NearestNeighbors
 
 
 def l2_normalize(features, eps=1e-12):
@@ -231,6 +232,139 @@ def nearest_reference_loss(proxy_points, reference_points):
     return torch.mean(torch.min(distances, dim=1).values)
 
 
+def row_normalize_sparse_graph(graph, eps=1e-12):
+    graph = graph.tocsr().astype(np.float32)
+    row_sum = np.asarray(graph.sum(axis=1)).reshape(-1)
+    row_sum = np.maximum(row_sum, float(eps))
+    inv_row = 1.0 / row_sum.astype(np.float32)
+    return graph.multiply(inv_row[:, None]).tocsr()
+
+
+def build_union_keys(matrix_a, matrix_b):
+    matrix_a = matrix_a.tocoo()
+    matrix_b = matrix_b.tocoo()
+    num_cols = int(matrix_a.shape[1])
+    keys_a = matrix_a.row.astype(np.int64) * num_cols + matrix_a.col.astype(np.int64)
+    keys_b = matrix_b.row.astype(np.int64) * num_cols + matrix_b.col.astype(np.int64)
+    union_keys = np.unique(np.concatenate([keys_a, keys_b], axis=0))
+    rows = (union_keys // num_cols).astype(np.int64)
+    cols = (union_keys % num_cols).astype(np.int64)
+    return union_keys, rows, cols
+
+
+def gather_sparse_data_on_keys(matrix, union_keys):
+    matrix = matrix.tocoo()
+    num_cols = int(matrix.shape[1])
+    keys = matrix.row.astype(np.int64) * num_cols + matrix.col.astype(np.int64)
+    values = np.zeros(union_keys.shape[0], dtype=np.float32)
+    if keys.size == 0:
+        return values
+    positions = np.searchsorted(union_keys, keys)
+    values[positions] = matrix.data.astype(np.float32)
+    return values
+
+
+def build_lsrc_relation_graph(
+    real_points,
+    image_graph,
+    text_graph,
+    k=32,
+    tau_r=1.0,
+    eta=0.5,
+    rho_img=0.5,
+    rho_txt=0.5,
+    eps=1e-8,
+):
+    real_points = np.asarray(real_points, dtype=np.float32)
+    num_nodes = int(real_points.shape[0])
+    k = max(1, min(int(k), max(num_nodes - 1, 1)))
+    nbrs = NearestNeighbors(n_neighbors=min(k + 1, num_nodes), metric="euclidean")
+    nbrs.fit(real_points)
+    distances, indices = nbrs.kneighbors(real_points)
+
+    if indices.shape[1] > 1:
+        distances = distances[:, 1:]
+        indices = indices[:, 1:]
+
+    rows = np.repeat(np.arange(num_nodes, dtype=np.int64), indices.shape[1])
+    cols = indices.reshape(-1).astype(np.int64)
+    sqdist = (distances.reshape(-1).astype(np.float32)) ** 2
+    g = np.exp(-sqdist / max(float(tau_r), float(eps))).astype(np.float32)
+
+    image_norm = row_normalize_sparse_graph(image_graph, eps=eps).tocsr()
+    text_norm = row_normalize_sparse_graph(text_graph, eps=eps).tocsr()
+    c_img = image_norm.copy()
+    c_img.data = (c_img.data * float(rho_img)).astype(np.float32)
+    c_txt = text_norm.copy()
+    c_txt.data = (c_txt.data * float(rho_txt)).astype(np.float32)
+
+    union_keys, _, _ = build_union_keys(c_img, c_txt)
+    c_img_union = gather_sparse_data_on_keys(c_img, union_keys)
+    c_txt_union = gather_sparse_data_on_keys(c_txt, union_keys)
+    num_cols = num_nodes
+    edge_keys = rows * num_cols + cols
+    positions = np.searchsorted(union_keys, edge_keys)
+
+    sI = np.zeros(edge_keys.shape[0], dtype=np.float32)
+    sT = np.zeros(edge_keys.shape[0], dtype=np.float32)
+    valid = (positions < union_keys.shape[0]) & (union_keys[positions] == edge_keys)
+    sI[valid] = c_img_union[positions[valid]]
+    sT[valid] = c_txt_union[positions[valid]]
+
+    mixed = float(eta) * np.sqrt(np.maximum(sI, 0.0) * np.maximum(sT, 0.0))
+    mixed += (1.0 - float(eta)) * (sI + sT) / 2.0
+    weights = (g * mixed).astype(np.float32)
+
+    row_sum = np.bincount(rows, weights=weights, minlength=num_nodes).astype(np.float32)
+    row_sum = np.maximum(row_sum, float(eps))
+    normalized_weights = weights / row_sum[rows]
+
+    keep_mask = normalized_weights > 0
+    return {
+        "row_index": rows[keep_mask].astype(np.int64),
+        "col_index": cols[keep_mask].astype(np.int64),
+        "weights": normalized_weights[keep_mask].astype(np.float32),
+        "num_edges": int(np.sum(keep_mask)),
+        "num_nodes": int(num_nodes),
+    }
+
+
+def compute_direct_coverage(proxy_points, real_points, tau_c=1.0, batch_size=4096):
+    tau_c = max(float(tau_c), 1e-8)
+    coverages = []
+    for batch in real_points.split(int(batch_size), dim=0):
+        sqdist = torch.cdist(batch, proxy_points, p=2) ** 2
+        coverage = torch.exp(-sqdist / tau_c).sum(dim=1)
+        coverages.append(coverage)
+    return torch.cat(coverages, dim=0) if coverages else torch.empty(0, dtype=proxy_points.dtype, device=proxy_points.device)
+
+
+def compute_lsrc_losses(
+    proxy_points,
+    real_points,
+    relation_graph,
+    tau_c=1.0,
+    beta=0.5,
+    eps=1e-8,
+    batch_size=4096,
+):
+    coverage = compute_direct_coverage(proxy_points, real_points, tau_c=tau_c, batch_size=batch_size)
+    if relation_graph is None or relation_graph["num_edges"] <= 0:
+        indirect = coverage
+        rel_loss = torch.tensor(0.0, dtype=proxy_points.dtype, device=proxy_points.device)
+    else:
+        row_index = relation_graph["row_index"].to(device=proxy_points.device)
+        col_index = relation_graph["col_index"].to(device=proxy_points.device)
+        weights = relation_graph["weights"].to(device=proxy_points.device, dtype=proxy_points.dtype)
+        propagated = torch.zeros_like(coverage)
+        propagated.index_add_(0, row_index, weights * coverage[col_index])
+        indirect = (1.0 - float(beta)) * coverage + float(beta) * propagated
+        rel_loss = torch.mean(weights * (coverage[row_index] - coverage[col_index]) ** 2)
+
+    cov_loss = -torch.mean(torch.log(indirect + float(eps)))
+    return cov_loss, rel_loss, coverage, indirect
+
+
 def discrepancy_score(proxy_points, target_samples, frequencies, batch_size=4096):
     with torch.no_grad():
         proxy_real, proxy_imag = compute_characteristic_function(proxy_points, frequencies, batch_size=batch_size)
@@ -297,6 +431,20 @@ def optimize_proxy_points(
     tau_max=None,
     match_reference=None,
     graph_reference=None,
+    enable_lsrc=False,
+    lsrc_image_graph=None,
+    lsrc_text_graph=None,
+    lsrc_k=32,
+    lsrc_tau_r=1.0,
+    lsrc_tau_c=1.0,
+    lsrc_eta=0.5,
+    lsrc_beta=0.5,
+    lambda_lsrc_cov=0.0,
+    lambda_lsrc_rel=0.0,
+    lsrc_eps=1e-8,
+    lsrc_batch_size=4096,
+    lsrc_rho_img=0.5,
+    lsrc_rho_txt=0.5,
 ):
     projected_representation, projection_matrix = random_project_representation(
         representation,
@@ -306,6 +454,24 @@ def optimize_proxy_points(
     projected_representation = l2_normalize(projected_representation.astype(np.float32))
     projected_match_reference = project_reference_points(match_reference, projection_matrix)
     projected_graph_reference = project_reference_points(graph_reference, projection_matrix)
+    lsrc_reference = projected_representation.astype(np.float32)
+    lsrc_relation_graph = None
+    if bool(enable_lsrc):
+        if lsrc_image_graph is None or lsrc_text_graph is None:
+            raise ValueError("LSRC is enabled but image/text graphs were not provided.")
+        lsrc_relation_graph_np = build_lsrc_relation_graph(
+            lsrc_reference,
+            lsrc_image_graph,
+            lsrc_text_graph,
+            k=lsrc_k,
+            tau_r=lsrc_tau_r,
+            eta=lsrc_eta,
+            rho_img=lsrc_rho_img,
+            rho_txt=lsrc_rho_txt,
+            eps=lsrc_eps,
+        )
+    else:
+        lsrc_relation_graph_np = None
 
     init_points, init_info = initialize_proxy_points(
         projected_representation,
@@ -317,6 +483,14 @@ def optimize_proxy_points(
 
     torch_device = torch.device(device)
     full_repr = torch.tensor(projected_representation, dtype=torch.float32, device=torch_device)
+    if lsrc_relation_graph_np is not None:
+        lsrc_relation_graph = {
+            "row_index": torch.tensor(lsrc_relation_graph_np["row_index"], dtype=torch.long, device=torch_device),
+            "col_index": torch.tensor(lsrc_relation_graph_np["col_index"], dtype=torch.long, device=torch_device),
+            "weights": torch.tensor(lsrc_relation_graph_np["weights"], dtype=torch.float32, device=torch_device),
+            "num_edges": int(lsrc_relation_graph_np["num_edges"]),
+            "num_nodes": int(lsrc_relation_graph_np["num_nodes"]),
+        }
     proxy_init = torch.tensor(init_points, dtype=torch.float32, device=torch_device)
     proxy_points = torch.nn.Parameter(proxy_init.clone())
     if projected_match_reference is not None:
@@ -407,6 +581,19 @@ def optimize_proxy_points(
         ) if use_dpp or float(lambda_div) > 0 else torch.tensor(0.0, dtype=proxy_points.dtype, device=torch_device)
         match_loss = nearest_reference_loss(proxy_points, match_reference)
         graph_loss = nearest_reference_loss(proxy_points, graph_reference)
+        if bool(enable_lsrc):
+            lsrc_cov_loss, lsrc_rel_loss, _, _ = compute_lsrc_losses(
+                proxy_points,
+                full_repr,
+                lsrc_relation_graph,
+                tau_c=lsrc_tau_c,
+                beta=lsrc_beta,
+                eps=lsrc_eps,
+                batch_size=lsrc_batch_size,
+            )
+        else:
+            lsrc_cov_loss = torch.tensor(0.0, dtype=proxy_points.dtype, device=torch_device)
+            lsrc_rel_loss = torch.tensor(0.0, dtype=proxy_points.dtype, device=torch_device)
 
         loss = (
             freq_loss
@@ -414,6 +601,8 @@ def optimize_proxy_points(
             + float(lambda_div) * div_loss
             + float(lambda_match) * match_loss
             + float(lambda_graph) * graph_loss
+            + float(lambda_lsrc_cov) * lsrc_cov_loss
+            + float(lambda_lsrc_rel) * lsrc_rel_loss
         )
         loss.backward()
         optimizer.step()
@@ -428,6 +617,14 @@ def optimize_proxy_points(
                     "div_loss": float(div_loss.detach().cpu().item()),
                     "match_loss": float(match_loss.detach().cpu().item()),
                     "graph_loss": float(graph_loss.detach().cpu().item()),
+                    "lsrc_cov": float(lsrc_cov_loss.detach().cpu().item()),
+                    "lsrc_rel": float(lsrc_rel_loss.detach().cpu().item()),
+                    "lsrc_total": float(
+                        (float(lambda_lsrc_cov) * lsrc_cov_loss + float(lambda_lsrc_rel) * lsrc_rel_loss)
+                        .detach()
+                        .cpu()
+                        .item()
+                    ),
                     "pdas_stage": int(stage),
                 }
             )
@@ -454,6 +651,16 @@ def optimize_proxy_points(
         "lambda_div": float(lambda_div),
         "lambda_match": float(lambda_match),
         "lambda_graph": float(lambda_graph),
+        "enable_lsrc": bool(enable_lsrc),
+        "lsrc_k": int(lsrc_k),
+        "lsrc_tau_r": float(lsrc_tau_r),
+        "lsrc_tau_c": float(lsrc_tau_c),
+        "lsrc_eta": float(lsrc_eta),
+        "lsrc_beta": float(lsrc_beta),
+        "lambda_lsrc_cov": float(lambda_lsrc_cov),
+        "lambda_lsrc_rel": float(lambda_lsrc_rel),
+        "lsrc_eps": float(lsrc_eps),
+        "lsrc_num_edges": int(lsrc_relation_graph["num_edges"]) if lsrc_relation_graph is not None else 0,
         "init_method": init_info["init_method"],
         "initial_loss": float(history[0]["total_loss"]) if history else None,
         "final_loss": float(history[-1]["total_loss"]) if history else None,

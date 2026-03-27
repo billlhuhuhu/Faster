@@ -32,6 +32,8 @@ def build_output_dir(args):
     model_tag = f"{sanitize_name(args.image_encoder)}_{sanitize_name(args.text_encoder)}"
     budget_tag = build_budget_tag(args)
     method_tag = sanitize_name(getattr(args, "selection_method", "baseline"))
+    if bool(getattr(args, "enable_lsrc", False)):
+        method_tag = f"{method_tag}_lsrc"
     seed_tag = f"seed_{int(getattr(args, 'random_state', 0))}"
     return Path(args.output_root) / args.dataset / args.split / model_tag / budget_tag / method_tag / seed_tag
 
@@ -62,7 +64,15 @@ def load_unified_artifacts(cross_modal_dir):
     spectral_embedding = None
     if spectral_path.exists():
         spectral_embedding = np.load(spectral_path).astype(np.float32)
-    return unified_graph, spectral_embedding, summary
+    image_graph = None
+    text_graph = None
+    image_graph_path = cross_modal_dir / "corrected_image_graph_symmetric.npz"
+    text_graph_path = cross_modal_dir / "corrected_text_graph_symmetric.npz"
+    if image_graph_path.exists():
+        image_graph = sparse.load_npz(image_graph_path).tocsr()
+    if text_graph_path.exists():
+        text_graph = sparse.load_npz(text_graph_path).tocsr()
+    return unified_graph, spectral_embedding, summary, image_graph, text_graph
 
 
 def build_unified_representation(img_features, txt_features, mode="concat"):
@@ -726,6 +736,20 @@ def run_proxy_optimized_selection(args, representation, unified_graph):
         phase_weight_mode=getattr(args, "phase_weight_mode", "uniform"),
         match_reference=reference_embedding,
         graph_reference=graph_reference,
+        enable_lsrc=bool(getattr(args, "enable_lsrc", False)),
+        lsrc_image_graph=getattr(args, "_lsrc_image_graph", None),
+        lsrc_text_graph=getattr(args, "_lsrc_text_graph", None),
+        lsrc_k=getattr(args, "lsrc_k", 32),
+        lsrc_tau_r=getattr(args, "lsrc_tau_r", 1.0),
+        lsrc_tau_c=getattr(args, "lsrc_tau_c", 1.0),
+        lsrc_eta=getattr(args, "lsrc_eta", 0.5),
+        lsrc_beta=getattr(args, "lsrc_beta", 0.5),
+        lambda_lsrc_cov=getattr(args, "lambda_lsrc_cov", 0.0),
+        lambda_lsrc_rel=getattr(args, "lambda_lsrc_rel", 0.0),
+        lsrc_eps=getattr(args, "lsrc_eps", 1e-8),
+        lsrc_batch_size=getattr(args, "lsrc_batch_size", args.proxy_target_batch_size),
+        lsrc_rho_img=getattr(args, "_lsrc_rho_img", 0.5),
+        lsrc_rho_txt=getattr(args, "_lsrc_rho_txt", 0.5),
     )
     projected_representation = proxy_bundle["projected_representation"]
     topology_targets = build_topology_targets(unified_graph, projected_representation, hop_weight=args.topology_hop_weight)
@@ -774,6 +798,10 @@ def run_proxy_optimized_selection(args, representation, unified_graph):
             "proxy_reg_weight": float(args.proxy_reg_weight),
             "proxy_objective_mode": getattr(args, "proxy_objective_mode", "pd_cfd"),
             "reference_embedding_mode": getattr(args, "reference_embedding_mode", "hybrid"),
+            "enable_lsrc": bool(getattr(args, "enable_lsrc", False)),
+            "lsrc_k": int(getattr(args, "lsrc_k", 32)),
+            "lambda_lsrc_cov": float(getattr(args, "lambda_lsrc_cov", 0.0)),
+            "lambda_lsrc_rel": float(getattr(args, "lambda_lsrc_rel", 0.0)),
             "matching_top_k": int(args.matching_top_k),
             "geometry_weight": float(getattr(args, "geometry_weight", 1.0)),
             "topology_weight": float(args.topology_weight),
@@ -796,7 +824,7 @@ def run_subset_selection(args):
     output_dir = build_output_dir(args)
 
     img_features, txt_features, sample_meta = load_feature_cache(feature_dir)
-    unified_graph, spectral_embedding, cross_modal_summary = load_unified_artifacts(cross_modal_dir)
+    unified_graph, spectral_embedding, cross_modal_summary, lsrc_image_graph, lsrc_text_graph = load_unified_artifacts(cross_modal_dir)
 
     if img_features.shape[0] != txt_features.shape[0] or img_features.shape[0] != len(sample_meta):
         raise ValueError("Feature cache and sample meta length mismatch.")
@@ -807,6 +835,10 @@ def run_subset_selection(args):
 
     representation = build_unified_representation(img_features, txt_features, mode=args.representation_mode)
     args._spectral_embedding = spectral_embedding
+    args._lsrc_image_graph = lsrc_image_graph
+    args._lsrc_text_graph = lsrc_text_graph
+    args._lsrc_rho_img = float(cross_modal_summary.get("rho_img", 0.5))
+    args._lsrc_rho_txt = float(cross_modal_summary.get("rho_txt", 0.5))
     selection_method = getattr(args, "selection_method", "baseline")
 
     if selection_method == "proxy_opt":

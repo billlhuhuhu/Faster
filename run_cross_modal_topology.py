@@ -25,6 +25,7 @@ def build_parser():
     parser.add_argument("--k", type=int, default=15)
     parser.add_argument("--multi_scale_ks", type=str, default=None)
     parser.add_argument("--alpha", type=float, default=1.0, help="Compatibility coefficient kept for cross-modal correction stage.")
+    parser.add_argument("--correction_mode", type=str, default="bidirectional", choices=["directional", "bidirectional"])
     parser.add_argument("--tau_g", type=float, default=0.5, help="Temperature for turning modality collapse scores into global confidences.")
     parser.add_argument("--correction_eps", type=float, default=1e-8, help="Numerical stability epsilon used by bidirectional correction coefficients.")
     parser.add_argument("--fusion_mode", type=str, default="confidence_aware", choices=["intersection", "confidence_aware"])
