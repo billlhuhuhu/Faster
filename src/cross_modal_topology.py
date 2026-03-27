@@ -119,21 +119,70 @@ def row_normalize_graph(graph):
     return transition
 
 
-def correct_collapsed_graph(healthy_transition, collapsed_graph, alpha):
-    powered_transition = sparse_elementwise_power(healthy_transition, alpha)
-    corrected_directed = collapsed_graph.multiply(powered_transition)
-    corrected_directed = corrected_directed.tocsr()
-    corrected_directed.eliminate_zeros()
-    corrected_symmetric = fuzzy_union_symmetrize(corrected_directed)
-    corrected_symmetric.eliminate_zeros()
-    return corrected_directed, corrected_symmetric
+def compute_global_confidences(image_score, text_score, tau_g=0.5):
+    tau_g = max(float(tau_g), 1e-8)
+    logits = np.array([-float(image_score) / tau_g, -float(text_score) / tau_g], dtype=np.float64)
+    logits = logits - np.max(logits)
+    weights = np.exp(logits)
+    weights = weights / np.maximum(np.sum(weights), 1e-12)
+    return float(weights[0]), float(weights[1])
 
 
-def unify_topology(healthy_graph, corrected_graph, mode="intersection"):
+def scale_sparse_graph(graph, scalar):
+    graph = graph.tocsr(copy=True)
+    graph.data = (graph.data.astype(np.float32) * float(scalar)).astype(np.float32)
+    return graph
+
+
+def build_bidirectional_correction_weights(image_transition, text_transition, rho_img, rho_txt, eps=1e-8):
+    c_img = scale_sparse_graph(image_transition, rho_img)
+    c_txt = scale_sparse_graph(text_transition, rho_txt)
+    overlap = c_img.multiply(c_txt)
+
+    # Old logic was directional: healthy -> collapsed. New logic uses global confidences
+    # to build two edge-wise correction coefficients and updates both modalities.
+    numer_txt_to_img = c_txt - overlap
+    numer_img_to_txt = c_img - overlap
+    numer_txt_to_img.eliminate_zeros()
+    numer_img_to_txt.eliminate_zeros()
+
+    alpha_txt_to_img = numer_txt_to_img.tocsr(copy=True)
+    alpha_img_to_txt = numer_img_to_txt.tocsr(copy=True)
+    alpha_txt_to_img.data = alpha_txt_to_img.data / (alpha_txt_to_img.data + float(eps))
+    alpha_img_to_txt.data = alpha_img_to_txt.data / (alpha_img_to_txt.data + float(eps))
+    alpha_txt_to_img.eliminate_zeros()
+    alpha_img_to_txt.eliminate_zeros()
+    return alpha_txt_to_img, alpha_img_to_txt
+
+
+def apply_bidirectional_correction(image_graph, text_graph, alpha_txt_to_img, alpha_img_to_txt):
+    image_graph = image_graph.tocsr()
+    text_graph = text_graph.tocsr()
+
+    corrected_image_directed = image_graph + alpha_txt_to_img.multiply(text_graph - image_graph)
+    corrected_text_directed = text_graph + alpha_img_to_txt.multiply(image_graph - text_graph)
+    corrected_image_directed = corrected_image_directed.tocsr()
+    corrected_text_directed = corrected_text_directed.tocsr()
+    corrected_image_directed.eliminate_zeros()
+    corrected_text_directed.eliminate_zeros()
+
+    corrected_image_symmetric = fuzzy_union_symmetrize(corrected_image_directed)
+    corrected_text_symmetric = fuzzy_union_symmetrize(corrected_text_directed)
+    corrected_image_symmetric.eliminate_zeros()
+    corrected_text_symmetric.eliminate_zeros()
+    return (
+        corrected_image_directed,
+        corrected_image_symmetric,
+        corrected_text_directed,
+        corrected_text_symmetric,
+    )
+
+
+def unify_topology(image_graph, text_graph, mode="intersection"):
     if mode != "intersection":
         raise ValueError(f"Unsupported fusion mode: {mode}")
 
-    unified = healthy_graph.multiply(corrected_graph)
+    unified = image_graph.multiply(text_graph)
     unified = fuzzy_union_symmetrize(unified)
     unified.eliminate_zeros()
     return unified
@@ -189,7 +238,19 @@ def build_unified_spectral_artifacts(
     }
 
 
-def build_summary(args, healthy_modality, image_bundle, text_bundle, corrected_summary, unified_summary, unified_spectral_artifacts):
+def build_summary(
+    args,
+    healthy_modality,
+    image_bundle,
+    text_bundle,
+    rho_img,
+    rho_txt,
+    corrected_image_summary,
+    corrected_text_summary,
+    corrected_summary,
+    unified_summary,
+    unified_spectral_artifacts,
+):
     return {
         "dataset": args.dataset,
         "split": args.split,
@@ -200,11 +261,17 @@ def build_summary(args, healthy_modality, image_bundle, text_bundle, corrected_s
         "text_metric": get_modality_metric(args, "text"),
         "k": int(args.k),
         "alpha": float(args.alpha),
+        "tau_g": float(getattr(args, "tau_g", 0.5)),
+        "correction_eps": float(getattr(args, "correction_eps", 1e-8)),
         "fusion_mode": args.fusion_mode,
         "healthy_modality": healthy_modality,
         "collapsed_modality": "text" if healthy_modality == "image" else "image",
+        "rho_img": float(rho_img),
+        "rho_txt": float(rho_txt),
         "image_summary": image_bundle["summary"],
         "text_summary": text_bundle["summary"],
+        "corrected_image_summary": corrected_image_summary,
+        "corrected_text_summary": corrected_text_summary,
         "corrected_summary": corrected_summary,
         "unified_summary": unified_summary,
         "unified_first_eigenvalues": [
@@ -218,10 +285,12 @@ def build_summary(args, healthy_modality, image_bundle, text_bundle, corrected_s
 def save_cross_modal_outputs(
     output_dir,
     healthy_modality,
-    healthy_bundle,
-    collapsed_bundle,
-    corrected_directed,
-    corrected_symmetric,
+    image_bundle,
+    text_bundle,
+    corrected_image_directed,
+    corrected_image_symmetric,
+    corrected_text_directed,
+    corrected_text_symmetric,
     unified_graph,
     unified_spectral_artifacts,
     summary,
@@ -229,13 +298,24 @@ def save_cross_modal_outputs(
     output_dir.mkdir(parents=True, exist_ok=True)
     log_cross_modal(f"saving cross-modal artifacts to {output_dir}")
 
-    sparse.save_npz(output_dir / "B_I_or_health.npz", healthy_bundle["graph"])
-    sparse.save_npz(output_dir / "B_collapsed_raw.npz", collapsed_bundle["graph"])
-    sparse.save_npz(output_dir / "healthy_graph.npz", healthy_bundle["graph"])
-    sparse.save_npz(output_dir / "healthy_transition.npz", healthy_bundle["transition"])
-    sparse.save_npz(output_dir / "collapsed_graph.npz", collapsed_bundle["graph"])
-    sparse.save_npz(output_dir / "corrected_graph_directed.npz", corrected_directed)
-    sparse.save_npz(output_dir / "corrected_graph_symmetric.npz", corrected_symmetric)
+    sparse.save_npz(output_dir / "B_I_or_health.npz", image_bundle["graph"] if healthy_modality == "image" else text_bundle["graph"])
+    sparse.save_npz(output_dir / "B_collapsed_raw.npz", text_bundle["graph"] if healthy_modality == "image" else image_bundle["graph"])
+    sparse.save_npz(output_dir / "healthy_graph.npz", image_bundle["graph"] if healthy_modality == "image" else text_bundle["graph"])
+    sparse.save_npz(output_dir / "healthy_transition.npz", image_bundle["transition"] if healthy_modality == "image" else text_bundle["transition"])
+    sparse.save_npz(output_dir / "collapsed_graph.npz", text_bundle["graph"] if healthy_modality == "image" else image_bundle["graph"])
+
+    sparse.save_npz(output_dir / "corrected_image_graph_directed.npz", corrected_image_directed)
+    sparse.save_npz(output_dir / "corrected_image_graph_symmetric.npz", corrected_image_symmetric)
+    sparse.save_npz(output_dir / "corrected_text_graph_directed.npz", corrected_text_directed)
+    sparse.save_npz(output_dir / "corrected_text_graph_symmetric.npz", corrected_text_symmetric)
+    sparse.save_npz(
+        output_dir / "corrected_graph_directed.npz",
+        corrected_text_directed if healthy_modality == "image" else corrected_image_directed,
+    )
+    sparse.save_npz(
+        output_dir / "corrected_graph_symmetric.npz",
+        corrected_text_symmetric if healthy_modality == "image" else corrected_image_symmetric,
+    )
     sparse.save_npz(output_dir / "unified_graph.npz", unified_graph)
     sparse.save_npz(output_dir / "B_star.npz", unified_graph)
     sparse.save_npz(output_dir / "unified_transition.npz", row_normalize_graph(unified_graph))
@@ -250,7 +330,7 @@ def save_cross_modal_outputs(
         np.save(output_dir / "V_full_multi.npy", unified_spectral_artifacts["spectral_embedding"])
 
     with open(output_dir / "sample_meta.json", "w", encoding="utf-8") as handle:
-        json.dump(healthy_bundle["sample_meta"], handle, ensure_ascii=False, indent=2)
+        json.dump(image_bundle["sample_meta"], handle, ensure_ascii=False, indent=2)
 
     with open(output_dir / "summary.json", "w", encoding="utf-8") as handle:
         json.dump(summary, handle, ensure_ascii=False, indent=2)
@@ -258,8 +338,8 @@ def save_cross_modal_outputs(
     selection = {
         "healthy_modality": healthy_modality,
         "collapsed_modality": "text" if healthy_modality == "image" else "image",
-        "healthy_graph_dir": healthy_bundle["dir"],
-        "collapsed_graph_dir": collapsed_bundle["dir"],
+        "healthy_graph_dir": image_bundle["dir"] if healthy_modality == "image" else text_bundle["dir"],
+        "collapsed_graph_dir": text_bundle["dir"] if healthy_modality == "image" else image_bundle["dir"],
     }
     with open(output_dir / "modality_selection.json", "w", encoding="utf-8") as handle:
         json.dump(selection, handle, ensure_ascii=False, indent=2)
@@ -282,27 +362,47 @@ def run_cross_modal_topology(args):
         text_bundle["summary"],
         prefer=args.prefer_healthy_modality,
     )
-    log_cross_modal(f"healthy modality selected: {healthy_modality}")
-    if healthy_modality == "image":
-        healthy_bundle, collapsed_bundle = image_bundle, text_bundle
-    else:
-        healthy_bundle, collapsed_bundle = text_bundle, image_bundle
+    log_cross_modal(f"healthy modality selected for reporting only: {healthy_modality}")
 
-    log_cross_modal("correcting collapsed modality graph")
-    corrected_directed, corrected_symmetric = correct_collapsed_graph(
-        healthy_bundle["transition"],
-        collapsed_bundle["graph"],
-        alpha=args.alpha,
+    log_cross_modal("computing global modality confidences")
+    rho_img, rho_txt = compute_global_confidences(
+        image_bundle["summary"]["collapse_score"],
+        text_bundle["summary"]["collapse_score"],
+        tau_g=getattr(args, "tau_g", 0.5),
     )
+    log_cross_modal(f"global confidences: rho_img={rho_img:.4f}, rho_txt={rho_txt:.4f}")
+
+    log_cross_modal("applying bidirectional graph correction")
+    alpha_txt_to_img, alpha_img_to_txt = build_bidirectional_correction_weights(
+        image_bundle["transition"],
+        text_bundle["transition"],
+        rho_img=rho_img,
+        rho_txt=rho_txt,
+        eps=getattr(args, "correction_eps", 1e-8),
+    )
+    (
+        corrected_image_directed,
+        corrected_image_symmetric,
+        corrected_text_directed,
+        corrected_text_symmetric,
+    ) = apply_bidirectional_correction(
+        image_bundle["graph"],
+        text_bundle["graph"],
+        alpha_txt_to_img,
+        alpha_img_to_txt,
+    )
+
     log_cross_modal("building unified topology B*")
     unified_graph = unify_topology(
-        healthy_bundle["graph"],
-        corrected_symmetric,
+        corrected_image_symmetric,
+        corrected_text_symmetric,
         mode=args.fusion_mode,
     )
 
     log_cross_modal("summarizing corrected and unified graphs")
-    corrected_summary = summarize_graph(corrected_symmetric)
+    corrected_image_summary = summarize_graph(corrected_image_symmetric)
+    corrected_text_summary = summarize_graph(corrected_text_symmetric)
+    corrected_summary = corrected_text_summary if healthy_modality == "image" else corrected_image_summary
     unified_summary = summarize_graph(unified_graph)
     unified_spectral_artifacts = build_unified_spectral_artifacts(
         unified_graph,
@@ -316,6 +416,10 @@ def run_cross_modal_topology(args):
         healthy_modality,
         image_bundle,
         text_bundle,
+        rho_img,
+        rho_txt,
+        corrected_image_summary,
+        corrected_text_summary,
         corrected_summary,
         unified_summary,
         unified_spectral_artifacts,
@@ -325,10 +429,12 @@ def run_cross_modal_topology(args):
     save_cross_modal_outputs(
         output_dir,
         healthy_modality,
-        healthy_bundle,
-        collapsed_bundle,
-        corrected_directed,
-        corrected_symmetric,
+        image_bundle,
+        text_bundle,
+        corrected_image_directed,
+        corrected_image_symmetric,
+        corrected_text_directed,
+        corrected_text_symmetric,
         unified_graph,
         unified_spectral_artifacts,
         summary,
