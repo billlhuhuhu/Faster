@@ -134,6 +134,30 @@ def scale_sparse_graph(graph, scalar):
     return graph
 
 
+def build_union_keys(matrix_a, matrix_b):
+    matrix_a = matrix_a.tocoo()
+    matrix_b = matrix_b.tocoo()
+    num_cols = int(matrix_a.shape[1])
+    keys_a = matrix_a.row.astype(np.int64) * num_cols + matrix_a.col.astype(np.int64)
+    keys_b = matrix_b.row.astype(np.int64) * num_cols + matrix_b.col.astype(np.int64)
+    union_keys = np.unique(np.concatenate([keys_a, keys_b], axis=0))
+    rows = (union_keys // num_cols).astype(np.int32)
+    cols = (union_keys % num_cols).astype(np.int32)
+    return union_keys, rows, cols
+
+
+def gather_sparse_data_on_keys(matrix, union_keys):
+    matrix = matrix.tocoo()
+    num_cols = int(matrix.shape[1])
+    keys = matrix.row.astype(np.int64) * num_cols + matrix.col.astype(np.int64)
+    values = np.zeros(union_keys.shape[0], dtype=np.float32)
+    if keys.size == 0:
+        return values
+    positions = np.searchsorted(union_keys, keys)
+    values[positions] = matrix.data.astype(np.float32)
+    return values
+
+
 def build_bidirectional_correction_weights(image_transition, text_transition, rho_img, rho_txt, eps=1e-8):
     c_img = scale_sparse_graph(image_transition, rho_img)
     c_txt = scale_sparse_graph(text_transition, rho_txt)
@@ -178,14 +202,79 @@ def apply_bidirectional_correction(image_graph, text_graph, alpha_txt_to_img, al
     )
 
 
-def unify_topology(image_graph, text_graph, mode="intersection"):
-    if mode != "intersection":
-        raise ValueError(f"Unsupported fusion mode: {mode}")
+def build_confidence_aware_fusion(
+    image_graph,
+    text_graph,
+    rho_img,
+    rho_txt,
+    lambda_f=1.0,
+    mu_f=1.0,
+    eps=1e-8,
+):
+    image_graph = image_graph.tocsr()
+    text_graph = text_graph.tocsr()
 
-    unified = image_graph.multiply(text_graph)
+    image_norm = row_normalize_graph(image_graph)
+    text_norm = row_normalize_graph(text_graph)
+    c_img = scale_sparse_graph(image_norm, rho_img)
+    c_txt = scale_sparse_graph(text_norm, rho_txt)
+
+    union_keys, rows, cols = build_union_keys(image_graph, text_graph)
+    image_data = gather_sparse_data_on_keys(image_graph, union_keys)
+    text_data = gather_sparse_data_on_keys(text_graph, union_keys)
+    c_img_data = gather_sparse_data_on_keys(c_img, union_keys)
+    c_txt_data = gather_sparse_data_on_keys(c_txt, union_keys)
+
+    lambda_f = float(lambda_f)
+    mu_f = float(mu_f)
+    eps = float(eps)
+
+    c_img_pow = np.power(np.clip(c_img_data, 0.0, None), lambda_f, dtype=np.float32)
+    c_txt_pow = np.power(np.clip(c_txt_data, 0.0, None), lambda_f, dtype=np.float32)
+    denom = c_img_pow + c_txt_pow + eps
+    alpha = c_img_pow / denom
+    beta = c_txt_pow / denom
+
+    fused = alpha * image_data + beta * text_data
+
+    # Old logic used hard intersection. The new default keeps edge support soft by
+    # applying confidence-aware weighted fusion plus soft consistency gating.
+    gate = np.power(c_img_data * c_txt_data + eps, mu_f, dtype=np.float32)
+    unified_data = gate * fused
+
+    unified = sparse.csr_matrix((unified_data.astype(np.float32), (rows, cols)), shape=image_graph.shape)
+    unified.eliminate_zeros()
     unified = fuzzy_union_symmetrize(unified)
     unified.eliminate_zeros()
     return unified
+
+
+def unify_topology(
+    image_graph,
+    text_graph,
+    mode="confidence_aware",
+    rho_img=0.5,
+    rho_txt=0.5,
+    lambda_f=1.0,
+    mu_f=1.0,
+    eps=1e-8,
+):
+    if mode == "intersection":
+        unified = image_graph.multiply(text_graph)
+        unified = fuzzy_union_symmetrize(unified)
+        unified.eliminate_zeros()
+        return unified
+    if mode == "confidence_aware":
+        return build_confidence_aware_fusion(
+            image_graph,
+            text_graph,
+            rho_img=rho_img,
+            rho_txt=rho_txt,
+            lambda_f=lambda_f,
+            mu_f=mu_f,
+            eps=eps,
+        )
+    raise ValueError(f"Unsupported fusion mode: {mode}")
 
 
 def summarize_graph(graph):
@@ -264,6 +353,9 @@ def build_summary(
         "tau_g": float(getattr(args, "tau_g", 0.5)),
         "correction_eps": float(getattr(args, "correction_eps", 1e-8)),
         "fusion_mode": args.fusion_mode,
+        "lambda_f": float(getattr(args, "lambda_f", 1.0)),
+        "mu_f": float(getattr(args, "mu_f", 1.0)),
+        "fusion_eps": float(getattr(args, "fusion_eps", 1e-8)),
         "healthy_modality": healthy_modality,
         "collapsed_modality": "text" if healthy_modality == "image" else "image",
         "rho_img": float(rho_img),
@@ -397,6 +489,11 @@ def run_cross_modal_topology(args):
         corrected_image_symmetric,
         corrected_text_symmetric,
         mode=args.fusion_mode,
+        rho_img=rho_img,
+        rho_txt=rho_txt,
+        lambda_f=getattr(args, "lambda_f", 1.0),
+        mu_f=getattr(args, "mu_f", 1.0),
+        eps=getattr(args, "fusion_eps", 1e-8),
     )
 
     log_cross_modal("summarizing corrected and unified graphs")
