@@ -134,6 +134,58 @@ def scale_sparse_graph(graph, scalar):
     return graph
 
 
+def compute_local_node_confidence(graph, eps=1e-8, tau_l=0.25, kappa_min=0.05):
+    graph = graph.tocsr().astype(np.float32)
+    num_nodes = int(graph.shape[0])
+    kappa = np.full(num_nodes, float(kappa_min), dtype=np.float32)
+    eps = float(eps)
+    tau_l = max(float(tau_l), eps)
+    kappa_min = float(kappa_min)
+
+    indptr = graph.indptr
+    data = graph.data
+    for node_idx in range(num_nodes):
+        start = indptr[node_idx]
+        end = indptr[node_idx + 1]
+        num_neighbors = int(end - start)
+        if num_neighbors <= 1:
+            continue
+
+        p = np.clip(data[start:end].astype(np.float64), eps, None)
+        entropy = -np.sum(p * np.log(p + eps))
+        entropy = entropy / max(np.log(float(num_neighbors) + eps), eps)
+        entropy = float(np.clip(entropy, 0.0, 1.0))
+        chi = 1.0 - entropy
+        kappa[node_idx] = np.float32(
+            kappa_min + (1.0 - kappa_min) * np.exp(-chi / tau_l)
+        )
+    return kappa.astype(np.float32)
+
+
+def summarize_vector(values):
+    values = np.asarray(values, dtype=np.float32)
+    if values.size == 0:
+        return {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0}
+    return {
+        "mean": float(np.mean(values)),
+        "std": float(np.std(values)),
+        "min": float(np.min(values)),
+        "max": float(np.max(values)),
+    }
+
+
+def scale_sparse_graph_with_node_confidence(graph, scalar, node_confidence=None):
+    graph = graph.tocoo(copy=True)
+    edge_scale = np.full(graph.data.shape[0], float(scalar), dtype=np.float32)
+    if node_confidence is not None:
+        node_confidence = np.asarray(node_confidence, dtype=np.float32)
+        edge_scale = edge_scale * np.sqrt(node_confidence[graph.row] * node_confidence[graph.col]).astype(np.float32)
+    graph.data = (graph.data.astype(np.float32) * edge_scale).astype(np.float32)
+    scaled = graph.tocsr()
+    scaled.eliminate_zeros()
+    return scaled
+
+
 def build_union_keys(matrix_a, matrix_b):
     matrix_a = matrix_a.tocoo()
     matrix_b = matrix_b.tocoo()
@@ -158,9 +210,35 @@ def gather_sparse_data_on_keys(matrix, union_keys):
     return values
 
 
-def build_bidirectional_correction_weights(image_transition, text_transition, rho_img, rho_txt, eps=1e-8):
-    c_img = scale_sparse_graph(image_transition, rho_img)
-    c_txt = scale_sparse_graph(text_transition, rho_txt)
+def build_bidirectional_correction_weights(
+    image_transition,
+    text_transition,
+    rho_img,
+    rho_txt,
+    eps=1e-8,
+    enable_local_node_confidence=False,
+    tau_l=0.25,
+    kappa_min=0.05,
+    local_conf_eps=1e-8,
+):
+    image_kappa = None
+    text_kappa = None
+    if bool(enable_local_node_confidence):
+        image_kappa = compute_local_node_confidence(
+            image_transition,
+            eps=local_conf_eps,
+            tau_l=tau_l,
+            kappa_min=kappa_min,
+        )
+        text_kappa = compute_local_node_confidence(
+            text_transition,
+            eps=local_conf_eps,
+            tau_l=tau_l,
+            kappa_min=kappa_min,
+        )
+
+    c_img = scale_sparse_graph_with_node_confidence(image_transition, rho_img, node_confidence=image_kappa)
+    c_txt = scale_sparse_graph_with_node_confidence(text_transition, rho_txt, node_confidence=text_kappa)
     overlap = c_img.multiply(c_txt)
 
     # Old logic was directional: healthy -> collapsed. New logic uses global confidences
@@ -176,7 +254,7 @@ def build_bidirectional_correction_weights(image_transition, text_transition, rh
     alpha_img_to_txt.data = alpha_img_to_txt.data / (alpha_img_to_txt.data + float(eps))
     alpha_txt_to_img.eliminate_zeros()
     alpha_img_to_txt.eliminate_zeros()
-    return alpha_txt_to_img, alpha_img_to_txt
+    return alpha_txt_to_img, alpha_img_to_txt, image_kappa, text_kappa
 
 
 def apply_directional_correction(
@@ -364,6 +442,8 @@ def build_summary(
     text_bundle,
     rho_img,
     rho_txt,
+    image_kappa_stats,
+    text_kappa_stats,
     corrected_image_summary,
     corrected_text_summary,
     corrected_summary,
@@ -383,6 +463,10 @@ def build_summary(
         "correction_mode": getattr(args, "correction_mode", "bidirectional"),
         "tau_g": float(getattr(args, "tau_g", 0.5)),
         "correction_eps": float(getattr(args, "correction_eps", 1e-8)),
+        "enable_local_node_confidence": bool(getattr(args, "enable_local_node_confidence", False)),
+        "tau_l": float(getattr(args, "tau_l", 0.25)),
+        "kappa_min": float(getattr(args, "kappa_min", 0.05)),
+        "local_conf_eps": float(getattr(args, "local_conf_eps", 1e-8)),
         "fusion_mode": args.fusion_mode,
         "lambda_f": float(getattr(args, "lambda_f", 1.0)),
         "mu_f": float(getattr(args, "mu_f", 1.0)),
@@ -391,6 +475,8 @@ def build_summary(
         "collapsed_modality": "text" if healthy_modality == "image" else "image",
         "rho_img": float(rho_img),
         "rho_txt": float(rho_txt),
+        "image_kappa_stats": image_kappa_stats,
+        "text_kappa_stats": text_kappa_stats,
         "image_summary": image_bundle["summary"],
         "text_summary": text_bundle["summary"],
         "corrected_image_summary": corrected_image_summary,
@@ -494,6 +580,8 @@ def run_cross_modal_topology(args):
         tau_g=getattr(args, "tau_g", 0.5),
     )
     log_cross_modal(f"global confidences: rho_img={rho_img:.4f}, rho_txt={rho_txt:.4f}")
+    image_kappa_stats = None
+    text_kappa_stats = None
 
     correction_mode = getattr(args, "correction_mode", "bidirectional")
     if correction_mode == "directional":
@@ -511,13 +599,32 @@ def run_cross_modal_topology(args):
         )
     elif correction_mode == "bidirectional":
         log_cross_modal("applying bidirectional graph correction")
-        alpha_txt_to_img, alpha_img_to_txt = build_bidirectional_correction_weights(
+        (
+            alpha_txt_to_img,
+            alpha_img_to_txt,
+            image_kappa,
+            text_kappa,
+        ) = build_bidirectional_correction_weights(
             image_bundle["transition"],
             text_bundle["transition"],
             rho_img=rho_img,
             rho_txt=rho_txt,
             eps=getattr(args, "correction_eps", 1e-8),
+            enable_local_node_confidence=bool(getattr(args, "enable_local_node_confidence", False)),
+            tau_l=getattr(args, "tau_l", 0.25),
+            kappa_min=getattr(args, "kappa_min", 0.05),
+            local_conf_eps=getattr(args, "local_conf_eps", 1e-8),
         )
+        if image_kappa is not None and text_kappa is not None:
+            image_kappa_stats = summarize_vector(image_kappa)
+            text_kappa_stats = summarize_vector(text_kappa)
+            log_cross_modal(
+                "local node confidence enabled: "
+                f"image(mean={image_kappa_stats['mean']:.4f}, std={image_kappa_stats['std']:.4f}, "
+                f"min={image_kappa_stats['min']:.4f}, max={image_kappa_stats['max']:.4f}), "
+                f"text(mean={text_kappa_stats['mean']:.4f}, std={text_kappa_stats['std']:.4f}, "
+                f"min={text_kappa_stats['min']:.4f}, max={text_kappa_stats['max']:.4f})"
+            )
         (
             corrected_image_directed,
             corrected_image_symmetric,
@@ -563,6 +670,8 @@ def run_cross_modal_topology(args):
         text_bundle,
         rho_img,
         rho_txt,
+        image_kappa_stats,
+        text_kappa_stats,
         corrected_image_summary,
         corrected_text_summary,
         corrected_summary,

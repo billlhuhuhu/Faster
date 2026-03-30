@@ -55,10 +55,24 @@ def find_metrics_path(root, dataset, model_tag, budget, variant, seed):
     candidates = [
         Path(root) / dataset / model_tag / budget_tag / variant / f"seed_{int(seed)}" / "metrics.json",
         Path(root) / variant / dataset / model_tag / budget_tag / variant / f"seed_{int(seed)}" / "metrics.json",
+        Path(root) / variant / dataset / model_tag / budget_tag / f"seed_{int(seed)}" / "metrics.json",
     ]
     for path in candidates:
         if path.exists():
             return path
+
+    search_roots = [
+        Path(root) / dataset / model_tag / budget_tag,
+        Path(root) / variant / dataset / model_tag / budget_tag,
+    ]
+    target_seed = f"seed_{int(seed)}"
+    for search_root in search_roots:
+        if not search_root.exists():
+            continue
+        matches = sorted(search_root.glob(f"**/{target_seed}/metrics.json"))
+        for path in matches:
+            return path
+
     return candidates[-1]
 
 
