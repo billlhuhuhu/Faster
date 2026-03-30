@@ -541,6 +541,7 @@ if __name__ == '__main__':
 
     parser.add_argument('--data_path', type=str, default='./data/Flickr30k/', help='dataset path')
     parser.add_argument('--buffer_path', type=str, default='./buffers', help='buffer path')
+    parser.add_argument('--model_checkpoint_root', type=str, default=None, help='root directory for legacy LoRS pretrained checkpoints')
 
     parser.add_argument('--expert_epochs', type=int, default=3, help='how many expert epochs the target params are')
     parser.add_argument('--syn_steps', type=int, default=20, help='how many steps to take on synthetic data')

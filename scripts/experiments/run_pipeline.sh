@@ -116,72 +116,133 @@ fi
 "${TEXT_TOPOLOGY_CMD[@]}"
 stage_log "Stage 3/8 topology graph (text) done"
 
-stage_log "Stage 4/8 cross-modal topology"
-CROSS_MODAL_CMD=(
-  python run_cross_modal_topology.py
-  --dataset "$DATASET"
-  --split train
-  --image_encoder "$IMAGE_ENCODER"
-  --text_encoder bert
-  --topology_root "$TOPOLOGY_ROOT"
-  --output_root "$CROSS_MODAL_ROOT"
-  --metric "$TOPOLOGY_METRIC_IMAGE"
-  --image_metric "$TOPOLOGY_METRIC_IMAGE"
-  --text_metric "$TOPOLOGY_METRIC_TEXT"
-  --k "$K_NEIGHBORS"
-  --alpha "$ALPHA"
-  --num_eigs "$CROSS_MODAL_NUM_EIGS"
-  --spectral_embedding_dim "$CROSS_MODAL_EMBED_DIM"
-)
-if [[ -n "${TOPOLOGY_MULTI_SCALE_KS}" ]]; then
-  CROSS_MODAL_CMD+=(--multi_scale_ks "$TOPOLOGY_MULTI_SCALE_KS")
-fi
-"${CROSS_MODAL_CMD[@]}"
-stage_log "Stage 4/8 cross-modal topology done"
+if [[ "${ENABLE_SELECTION_EFFICIENCY_BENCHMARK}" == "1" ]]; then
+  BENCHMARK_OUTPUT_DIR="${SELECTION_EFFICIENCY_ROOT}/${DATASET}/${MODEL_TAG}/${RATIO_TAG}/${METHOD}/seed_${SEED}"
+  stage_log "Stage 4-5/8 selection-only benchmark (cross+selection)"
+  BENCHMARK_CMD=(
+    python run_selection_efficiency_benchmark.py
+    --dataset "$DATASET"
+    --split train
+    --image_encoder "$IMAGE_ENCODER"
+    --text_encoder bert
+    --feature_cache_root "$FEATURE_CACHE_ROOT"
+    --topology_root "$TOPOLOGY_ROOT"
+    --cross_output_root "$CROSS_MODAL_ROOT"
+    --selection_output_root "$SUBSET_SELECTION_ROOT"
+    --metric "$TOPOLOGY_METRIC_IMAGE"
+    --image_metric "$TOPOLOGY_METRIC_IMAGE"
+    --text_metric "$TOPOLOGY_METRIC_TEXT"
+    --k "$K_NEIGHBORS"
+    --alpha "$ALPHA"
+    --budget_ratio "$SUBSET_RATIO"
+    --selection_method "$SELECTION_METHOD"
+    --device "$DEVICE"
+    --reference_embedding_mode "$SUBSET_REFERENCE_EMBEDDING_MODE"
+    --spectral_weight "$SUBSET_SPECTRAL_WEIGHT"
+    --proxy_objective_mode "$PROXY_OBJECTIVE_MODE"
+    --lambda_phase "$PROXY_LAMBDA_PHASE"
+    --pdas_num_stages "$PROXY_PDAS_NUM_STAGES"
+    --pdas_schedule_mode "$PROXY_PDAS_SCHEDULE"
+    --num_freq_pool "$PROXY_NUM_FREQ_POOL"
+    --tau_min "$PROXY_TAU_MIN"
+    --tau_max "$PROXY_TAU_MAX"
+    --lambda_div "$PROXY_LAMBDA_DIV"
+    --lambda_match "$PROXY_LAMBDA_MATCH"
+    --lambda_graph "$PROXY_LAMBDA_GRAPH"
+    --diversity_sigma "$PROXY_DIVERSITY_SIGMA"
+    --geometry_weight "$PROXY_GEOMETRY_WEIGHT"
+    --matching_cost_mode "$MATCHING_COST_MODE"
+    --enable_selection_efficiency_benchmark
+    --energy_backend "$SELECTION_EFFICIENCY_BACKEND"
+    --poll_interval_ms "$SELECTION_EFFICIENCY_POLL_INTERVAL_MS"
+    --benchmark_output_dir "$BENCHMARK_OUTPUT_DIR"
+    --variant_name "$METHOD"
+  )
+  if [[ -n "${SELECTION_EFFICIENCY_BASELINE_SUMMARY}" ]]; then
+    BENCHMARK_CMD+=(--baseline_summary "$SELECTION_EFFICIENCY_BASELINE_SUMMARY")
+  fi
+  if [[ -n "${TOPOLOGY_MULTI_SCALE_KS}" ]]; then
+    BENCHMARK_CMD+=(--multi_scale_ks "$TOPOLOGY_MULTI_SCALE_KS")
+  fi
+  if [[ "${PROXY_USE_PDAS}" == "1" ]]; then
+    BENCHMARK_CMD+=(--use_pdas)
+  fi
+  if [[ "${PROXY_USE_PDCFD}" == "1" ]]; then
+    BENCHMARK_CMD+=(--use_pdcfd)
+  fi
+  if [[ "${PROXY_USE_DPP}" == "1" ]]; then
+    BENCHMARK_CMD+=(--use_dpp)
+  fi
+  "${BENCHMARK_CMD[@]}"
+  stage_log "Stage 4-5/8 selection-only benchmark done"
+else
+  stage_log "Stage 4/8 cross-modal topology"
+  CROSS_MODAL_CMD=(
+    python run_cross_modal_topology.py
+    --dataset "$DATASET"
+    --split train
+    --image_encoder "$IMAGE_ENCODER"
+    --text_encoder bert
+    --topology_root "$TOPOLOGY_ROOT"
+    --output_root "$CROSS_MODAL_ROOT"
+    --metric "$TOPOLOGY_METRIC_IMAGE"
+    --image_metric "$TOPOLOGY_METRIC_IMAGE"
+    --text_metric "$TOPOLOGY_METRIC_TEXT"
+    --k "$K_NEIGHBORS"
+    --alpha "$ALPHA"
+    --num_eigs "$CROSS_MODAL_NUM_EIGS"
+    --spectral_embedding_dim "$CROSS_MODAL_EMBED_DIM"
+  )
+  if [[ -n "${TOPOLOGY_MULTI_SCALE_KS}" ]]; then
+    CROSS_MODAL_CMD+=(--multi_scale_ks "$TOPOLOGY_MULTI_SCALE_KS")
+  fi
+  "${CROSS_MODAL_CMD[@]}"
+  stage_log "Stage 4/8 cross-modal topology done"
 
-stage_log "Stage 5/8 subset selection: method=${SELECTION_METHOD}"
-SUBSET_SELECTION_CMD=(
-  python run_subset_selection.py
-  --dataset "$DATASET"
-  --split train
-  --image_encoder "$IMAGE_ENCODER"
-  --text_encoder bert
-  --feature_cache_root "$FEATURE_CACHE_ROOT"
-  --cross_modal_root "$CROSS_MODAL_ROOT"
-  --output_root "$SUBSET_SELECTION_ROOT"
-  --metric "$TOPOLOGY_METRIC_IMAGE"
-  --k "$K_NEIGHBORS"
-  --alpha "$ALPHA"
-  --budget_ratio "$SUBSET_RATIO"
-  --selection_method "$SELECTION_METHOD"
-  --device "$DEVICE"
-  --reference_embedding_mode "$SUBSET_REFERENCE_EMBEDDING_MODE"
-  --spectral_weight "$SUBSET_SPECTRAL_WEIGHT"
-  --proxy_objective_mode "$PROXY_OBJECTIVE_MODE"
-  --lambda_phase "$PROXY_LAMBDA_PHASE"
-  --pdas_num_stages "$PROXY_PDAS_NUM_STAGES"
-  --pdas_schedule_mode "$PROXY_PDAS_SCHEDULE"
-  --num_freq_pool "$PROXY_NUM_FREQ_POOL"
-  --tau_min "$PROXY_TAU_MIN"
-  --tau_max "$PROXY_TAU_MAX"
-  --lambda_div "$PROXY_LAMBDA_DIV"
-  --lambda_match "$PROXY_LAMBDA_MATCH"
-  --lambda_graph "$PROXY_LAMBDA_GRAPH"
-  --diversity_sigma "$PROXY_DIVERSITY_SIGMA"
-  --geometry_weight "$PROXY_GEOMETRY_WEIGHT"
-  --matching_cost_mode "$MATCHING_COST_MODE"
-)
-if [[ "${PROXY_USE_PDAS}" == "1" ]]; then
-  SUBSET_SELECTION_CMD+=(--use_pdas)
+  stage_log "Stage 5/8 subset selection: method=${SELECTION_METHOD}"
+  SUBSET_SELECTION_CMD=(
+    python run_subset_selection.py
+    --dataset "$DATASET"
+    --split train
+    --image_encoder "$IMAGE_ENCODER"
+    --text_encoder bert
+    --feature_cache_root "$FEATURE_CACHE_ROOT"
+    --cross_modal_root "$CROSS_MODAL_ROOT"
+    --output_root "$SUBSET_SELECTION_ROOT"
+    --metric "$TOPOLOGY_METRIC_IMAGE"
+    --k "$K_NEIGHBORS"
+    --alpha "$ALPHA"
+    --budget_ratio "$SUBSET_RATIO"
+    --selection_method "$SELECTION_METHOD"
+    --device "$DEVICE"
+    --reference_embedding_mode "$SUBSET_REFERENCE_EMBEDDING_MODE"
+    --spectral_weight "$SUBSET_SPECTRAL_WEIGHT"
+    --proxy_objective_mode "$PROXY_OBJECTIVE_MODE"
+    --lambda_phase "$PROXY_LAMBDA_PHASE"
+    --pdas_num_stages "$PROXY_PDAS_NUM_STAGES"
+    --pdas_schedule_mode "$PROXY_PDAS_SCHEDULE"
+    --num_freq_pool "$PROXY_NUM_FREQ_POOL"
+    --tau_min "$PROXY_TAU_MIN"
+    --tau_max "$PROXY_TAU_MAX"
+    --lambda_div "$PROXY_LAMBDA_DIV"
+    --lambda_match "$PROXY_LAMBDA_MATCH"
+    --lambda_graph "$PROXY_LAMBDA_GRAPH"
+    --diversity_sigma "$PROXY_DIVERSITY_SIGMA"
+    --geometry_weight "$PROXY_GEOMETRY_WEIGHT"
+    --matching_cost_mode "$MATCHING_COST_MODE"
+  )
+  if [[ "${PROXY_USE_PDAS}" == "1" ]]; then
+    SUBSET_SELECTION_CMD+=(--use_pdas)
+  fi
+  if [[ "${PROXY_USE_PDCFD}" == "1" ]]; then
+    SUBSET_SELECTION_CMD+=(--use_pdcfd)
+  fi
+  if [[ "${PROXY_USE_DPP}" == "1" ]]; then
+    SUBSET_SELECTION_CMD+=(--use_dpp)
+  fi
+  "${SUBSET_SELECTION_CMD[@]}"
+  stage_log "Stage 5/8 subset selection done"
 fi
-if [[ "${PROXY_USE_PDCFD}" == "1" ]]; then
-  SUBSET_SELECTION_CMD+=(--use_pdcfd)
-fi
-if [[ "${PROXY_USE_DPP}" == "1" ]]; then
-  SUBSET_SELECTION_CMD+=(--use_dpp)
-fi
-"${SUBSET_SELECTION_CMD[@]}"
-stage_log "Stage 5/8 subset selection done"
 
 SELECTED_INDICES_PATH="${SUBSET_SELECTION_ROOT}/${DATASET}/train/${MODEL_TAG}/${RATIO_TAG}"
 

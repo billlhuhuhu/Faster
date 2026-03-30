@@ -37,6 +37,11 @@ run_cross_stage() {
     return 0
   fi
 
+  if [[ "${ENABLE_SELECTION_EFFICIENCY_BENCHMARK}" == "1" ]]; then
+    stage_log "Skip standalone cross-modal (${variant}): benchmark mode will wrap cross+selection together"
+    return 0
+  fi
+
   stage_log "Cross-modal start: variant=${variant} fusion=${fusion_mode} local_conf=on"
   python "${PROJECT_ROOT}/run_cross_modal_topology.py" \
     --dataset "${DATASET}" \
@@ -72,6 +77,7 @@ run_selection_and_train() {
   local cross_root="$2"
   local budget="$3"
   local enable_lsrc="$4"
+  local fusion_mode="$5"
   local budget_tag
   budget_tag="$(format_budget_tag "${budget}")"
 
@@ -86,10 +92,12 @@ run_selection_and_train() {
   local metrics_path="${train_root}/${DATASET}/${MODEL_TAG}/${budget_tag}/${variant}/seed_${SEED}/metrics.json"
   local select_log="${RUN_LOG_DIR}/${variant}_${budget_tag}_select.log"
   local train_log="${RUN_LOG_DIR}/${variant}_${budget_tag}_train.log"
+  local benchmark_output_dir="${SELECTION_EFFICIENCY_ROOT}/direction1_localconf/${variant}/${DATASET}/${MODEL_TAG}/${budget_tag}/seed_${SEED}"
+  local benchmark_summary_path="${benchmark_output_dir}/selection_efficiency_summary.json"
 
-  if [[ ! -f "${selected_indices_path}" ]]; then
+  if [[ ! -f "${selected_indices_path}" || ( "${ENABLE_SELECTION_EFFICIENCY_BENCHMARK}" == "1" && ! -f "${benchmark_summary_path}" ) ]]; then
     stage_log "Selection start: variant=${variant} budget=${budget}"
-    selection_extra_args=()
+    local selection_extra_args=()
     if [[ "${enable_lsrc}" == "1" ]]; then
       selection_extra_args+=(
         --enable_lsrc
@@ -105,38 +113,105 @@ run_selection_and_train() {
       )
     fi
 
-    python "${PROJECT_ROOT}/run_subset_selection.py" \
-      --dataset "${DATASET}" \
-      --split train \
-      --image_encoder "${BACKBONE}" \
-      --text_encoder "${TEXT_ENCODER}" \
-      --feature_cache_root "${FEATURE_CACHE_ROOT}" \
-      --cross_modal_root "${cross_root}" \
-      --output_root "${selection_root}" \
-      --metric "${TOPOLOGY_METRIC_IMAGE}" \
-      --k "${K_NEIGHBORS}" \
-      --alpha "${ALPHA}" \
-      --budget_size "${budget}" \
-      --selection_method proxy_opt \
-      --reference_embedding_mode "${SUBSET_REFERENCE_EMBEDDING_MODE}" \
-      --spectral_weight "${SUBSET_SPECTRAL_WEIGHT}" \
-      --random_state "${SEED}" \
-      --device "${DEVICE}" \
-      --geometry_weight "${PROXY_GEOMETRY_WEIGHT}" \
-      --matching_cost_mode "${MATCHING_COST_MODE}" \
-      --proxy_objective_mode "${PROXY_OBJECTIVE_MODE}" \
-      --lambda_div "${PROXY_LAMBDA_DIV}" \
-      --lambda_match "${PROXY_LAMBDA_MATCH}" \
-      --lambda_graph "${PROXY_LAMBDA_GRAPH}" \
-      --lambda_phase "${PROXY_LAMBDA_PHASE}" \
-      --num_freq_pool "${PROXY_NUM_FREQ_POOL}" \
-      --tau_min "${PROXY_TAU_MIN}" \
-      --tau_max "${PROXY_TAU_MAX}" \
-      $( [[ "${PROXY_USE_PDAS}" == "1" ]] && echo --use_pdas ) \
-      $( [[ "${PROXY_USE_PDCFD}" == "1" ]] && echo --use_pdcfd ) \
-      $( [[ "${PROXY_USE_DPP}" == "1" ]] && echo --use_dpp ) \
-      "${selection_extra_args[@]}" \
-      > "${select_log}" 2>&1
+    if [[ "${ENABLE_SELECTION_EFFICIENCY_BENCHMARK}" == "1" ]]; then
+      local benchmark_cmd=(
+        python "${PROJECT_ROOT}/run_selection_efficiency_benchmark.py"
+        --dataset "${DATASET}"
+        --split train
+        --image_encoder "${BACKBONE}"
+        --text_encoder "${TEXT_ENCODER}"
+        --feature_cache_root "${FEATURE_CACHE_ROOT}"
+        --topology_root "${TOPOLOGY_ROOT}"
+        --cross_output_root "${cross_root}"
+        --selection_output_root "${selection_root}"
+        --metric "${TOPOLOGY_METRIC_IMAGE}"
+        --image_metric "${TOPOLOGY_METRIC_IMAGE}"
+        --text_metric "${TOPOLOGY_METRIC_TEXT}"
+        --k "${K_NEIGHBORS}"
+        --alpha "${ALPHA}"
+        --correction_mode bidirectional
+        --enable_local_node_confidence
+        --tau_l "${LOCALCONF_TAU_L}"
+        --kappa_min "${LOCALCONF_KAPPA_MIN}"
+        --local_conf_eps "${LOCALCONF_EPS}"
+        --tau_g 0.5
+        --correction_eps 1e-8
+        --fusion_mode "${fusion_mode}"
+        --lambda_f 1.0
+        --mu_f 1.0
+        --fusion_eps 1e-8
+        --num_eigs "${CROSS_MODAL_NUM_EIGS}"
+        --spectral_embedding_dim "${CROSS_MODAL_EMBED_DIM}"
+        --spectrum_solver_mode normalized_adjacency_largest
+        --budget_size "${budget}"
+        --selection_method proxy_opt
+        --reference_embedding_mode "${SUBSET_REFERENCE_EMBEDDING_MODE}"
+        --spectral_weight "${SUBSET_SPECTRAL_WEIGHT}"
+        --random_state "${SEED}"
+        --device "${DEVICE}"
+        --geometry_weight "${PROXY_GEOMETRY_WEIGHT}"
+        --matching_cost_mode "${MATCHING_COST_MODE}"
+        --proxy_objective_mode "${PROXY_OBJECTIVE_MODE}"
+        --lambda_div "${PROXY_LAMBDA_DIV}"
+        --lambda_match "${PROXY_LAMBDA_MATCH}"
+        --lambda_graph "${PROXY_LAMBDA_GRAPH}"
+        --lambda_phase "${PROXY_LAMBDA_PHASE}"
+        --num_freq_pool "${PROXY_NUM_FREQ_POOL}"
+        --tau_min "${PROXY_TAU_MIN}"
+        --tau_max "${PROXY_TAU_MAX}"
+        --variant_name "${variant}"
+        --benchmark_output_dir "${benchmark_output_dir}"
+        --enable_selection_efficiency_benchmark
+        --energy_backend "${SELECTION_EFFICIENCY_BACKEND}"
+        --poll_interval_ms "${SELECTION_EFFICIENCY_POLL_INTERVAL_MS}"
+      )
+      if [[ -n "${SELECTION_EFFICIENCY_BASELINE_SUMMARY}" ]]; then
+        benchmark_cmd+=(--baseline_summary "${SELECTION_EFFICIENCY_BASELINE_SUMMARY}")
+      fi
+      if [[ "${PROXY_USE_PDAS}" == "1" ]]; then
+        benchmark_cmd+=(--use_pdas)
+      fi
+      if [[ "${PROXY_USE_PDCFD}" == "1" ]]; then
+        benchmark_cmd+=(--use_pdcfd)
+      fi
+      if [[ "${PROXY_USE_DPP}" == "1" ]]; then
+        benchmark_cmd+=(--use_dpp)
+      fi
+      "${benchmark_cmd[@]}" "${selection_extra_args[@]}" > "${select_log}" 2>&1
+    else
+      python "${PROJECT_ROOT}/run_subset_selection.py" \
+        --dataset "${DATASET}" \
+        --split train \
+        --image_encoder "${BACKBONE}" \
+        --text_encoder "${TEXT_ENCODER}" \
+        --feature_cache_root "${FEATURE_CACHE_ROOT}" \
+        --cross_modal_root "${cross_root}" \
+        --output_root "${selection_root}" \
+        --metric "${TOPOLOGY_METRIC_IMAGE}" \
+        --k "${K_NEIGHBORS}" \
+        --alpha "${ALPHA}" \
+        --budget_size "${budget}" \
+        --selection_method proxy_opt \
+        --reference_embedding_mode "${SUBSET_REFERENCE_EMBEDDING_MODE}" \
+        --spectral_weight "${SUBSET_SPECTRAL_WEIGHT}" \
+        --random_state "${SEED}" \
+        --device "${DEVICE}" \
+        --geometry_weight "${PROXY_GEOMETRY_WEIGHT}" \
+        --matching_cost_mode "${MATCHING_COST_MODE}" \
+        --proxy_objective_mode "${PROXY_OBJECTIVE_MODE}" \
+        --lambda_div "${PROXY_LAMBDA_DIV}" \
+        --lambda_match "${PROXY_LAMBDA_MATCH}" \
+        --lambda_graph "${PROXY_LAMBDA_GRAPH}" \
+        --lambda_phase "${PROXY_LAMBDA_PHASE}" \
+        --num_freq_pool "${PROXY_NUM_FREQ_POOL}" \
+        --tau_min "${PROXY_TAU_MIN}" \
+        --tau_max "${PROXY_TAU_MAX}" \
+        $( [[ "${PROXY_USE_PDAS}" == "1" ]] && echo --use_pdas ) \
+        $( [[ "${PROXY_USE_PDCFD}" == "1" ]] && echo --use_pdcfd ) \
+        $( [[ "${PROXY_USE_DPP}" == "1" ]] && echo --use_dpp ) \
+        "${selection_extra_args[@]}" \
+        > "${select_log}" 2>&1
+    fi
   else
     stage_log "Skip selection (${variant}, ${budget}): ${selected_indices_path} already exists"
   fi
@@ -180,8 +255,8 @@ run_cross_stage "dir1_localconf_only" "intersection"
 run_cross_stage "all_enabled_localconf" "confidence_aware"
 
 for budget in ${BUDGETS_STR}; do
-  run_selection_and_train "dir1_localconf_only" "${LOCALCONF_CROSS_ROOT}/dir1_localconf_only" "${budget}" "0"
-  run_selection_and_train "all_enabled_localconf" "${LOCALCONF_CROSS_ROOT}/all_enabled_localconf" "${budget}" "1"
+  run_selection_and_train "dir1_localconf_only" "${LOCALCONF_CROSS_ROOT}/dir1_localconf_only" "${budget}" "0" "intersection"
+  run_selection_and_train "all_enabled_localconf" "${LOCALCONF_CROSS_ROOT}/all_enabled_localconf" "${budget}" "1" "confidence_aware"
 done
 
 stage_log "Direction1-localconf pipeline completed"

@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/common.sh"
+
+LORS_DATASET="${LORS_DATASET:-flickr}"
+LORS_IMAGE_ENCODER="${LORS_IMAGE_ENCODER:-nfnet}"
+LORS_TEXT_ENCODER="${LORS_TEXT_ENCODER:-bert}"
+LORS_LOSS_TYPE="${LORS_LOSS_TYPE:-InfoNCE}"
+LORS_MODEL_CHECKPOINT_ROOT="${LORS_MODEL_CHECKPOINT_ROOT:-${LORS_CHECKPOINT_ROOT:-${PROJECT_ROOT}/distill_utils/checkpoints}}"
+LORS_BUFFER_ROOT="${LORS_BUFFER_ROOT:-buffers}"
+LORS_LOG_ROOT="${LORS_LOG_ROOT:-logged_files}"
+LORS_NUM_EXPERTS="${LORS_NUM_EXPERTS:-100}"
+LORS_TRAIN_EPOCHS="${LORS_TRAIN_EPOCHS:-50}"
+LORS_EVAL_FREQ="${LORS_EVAL_FREQ:-5}"
+LORS_NUM_QUERIES="${LORS_NUM_QUERIES:-100}"
+LORS_MINI_BATCH_SIZE="${LORS_MINI_BATCH_SIZE:-100}"
+LORS_ITERATION="${LORS_ITERATION:-3000}"
+LORS_EVAL_IT="${LORS_EVAL_IT:-50}"
+LORS_NUM_EVAL="${LORS_NUM_EVAL:-1}"
+LORS_BATCH_TRAIN="${LORS_BATCH_TRAIN:-128}"
+LORS_BATCH_TEST="${LORS_BATCH_TEST:-128}"
+LORS_SIM_TYPE="${LORS_SIM_TYPE:-full}"
+LORS_NO_AUG="${LORS_NO_AUG:-1}"
+LORS_DISABLED_WANDB="${LORS_DISABLED_WANDB:-True}"
+LORS_PIX_INIT="${LORS_PIX_INIT:-real}"
+LORS_TXT_INIT="${LORS_TXT_INIT:-real}"
+LORS_RUN_TAG="${LORS_RUN_TAG:-}"
+
+IMAGE_ROOT="$(get_image_root "${LORS_DATASET}")"
+MODEL_TAG="$(sanitize_component "${LORS_IMAGE_ENCODER}")_$(sanitize_component "${LORS_TEXT_ENCODER}")"
+LOSS_TAG="${LORS_LOSS_TYPE}"
+if [[ "${LORS_NO_AUG}" == "1" ]]; then
+  LOSS_TAG="${LOSS_TAG}_NoAug"
+fi
+BUFFER_LEAF_DIR="${LORS_BUFFER_ROOT}/${LORS_DATASET}/${MODEL_TAG}/${LOSS_TAG}"
+
+RUN_TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
+RUN_NAME_DEFAULT="lors_${LORS_DATASET}_${MODEL_TAG}_${LOSS_TAG}_${RUN_TIMESTAMP}"
+LORS_RUN_NAME="${LORS_RUN_NAME:-${RUN_NAME_DEFAULT}}"
+RUN_LOG_DIR="${EXPERIMENT_LOG_ROOT}/lors_baseline_${LORS_DATASET}_${RUN_TIMESTAMP}"
+mkdir -p "${RUN_LOG_DIR}" "${LORS_BUFFER_ROOT}" "${LORS_LOG_ROOT}"
+
+require_checkpoint_file() {
+  local path="$1"
+  if [[ ! -e "${path}" ]]; then
+    echo "Required checkpoint path does not exist: ${path}" >&2
+    exit 1
+  fi
+}
+
+find_latest_distilled_checkpoint() {
+  local dataset="$1"
+  local iteration="$2"
+  local search_root="${LORS_LOG_ROOT}/${dataset}"
+  if [[ ! -d "${search_root}" ]]; then
+    return 1
+  fi
+  find "${search_root}" -type f -name "distilled_${iteration}.pt" -printf '%T@ %p\n' 2>/dev/null \
+    | sort -nr \
+    | head -n 1 \
+    | cut -d' ' -f2-
+}
+
+run_buffer_stage() {
+  local log_path="${RUN_LOG_DIR}/buffer.log"
+  if compgen -G "${BUFFER_LEAF_DIR}/img_replay_buffer_*.pt" > /dev/null && compgen -G "${BUFFER_LEAF_DIR}/txt_replay_buffer_*.pt" > /dev/null; then
+    stage_log "Skip buffer: existing replay buffers found in ${BUFFER_LEAF_DIR}"
+    return 0
+  fi
+
+  stage_log "LoRS buffer start: dataset=${LORS_DATASET} model=${MODEL_TAG} loss=${LORS_LOSS_TYPE}"
+  buffer_extra_args=()
+  if [[ "${LORS_NO_AUG}" == "1" ]]; then
+    buffer_extra_args+=(--no_aug)
+  fi
+
+  python "${PROJECT_ROOT}/buffer.py" \
+    --dataset "${LORS_DATASET}" \
+    --image_root "${IMAGE_ROOT}" \
+    --ann_root "${ANN_ROOT}" \
+    --model_checkpoint_root "${LORS_MODEL_CHECKPOINT_ROOT}" \
+    --buffer_path "${LORS_BUFFER_ROOT}" \
+    --image_encoder "${LORS_IMAGE_ENCODER}" \
+    --text_encoder "${LORS_TEXT_ENCODER}" \
+    --loss_type "${LORS_LOSS_TYPE}" \
+    --num_experts "${LORS_NUM_EXPERTS}" \
+    --train_epochs "${LORS_TRAIN_EPOCHS}" \
+    --eval_freq "${LORS_EVAL_FREQ}" \
+    --batch_size_train "${LORS_BATCH_TRAIN}" \
+    --batch_size_test "${LORS_BATCH_TEST}" \
+    --disabled_wandb "${LORS_DISABLED_WANDB}" \
+    "${buffer_extra_args[@]}" \
+    > "${log_path}" 2>&1
+  stage_log "LoRS buffer done: ${BUFFER_LEAF_DIR}"
+}
+
+run_distill_stage() {
+  local log_path="${RUN_LOG_DIR}/distill.log"
+  stage_log "LoRS distill start: run_name=${LORS_RUN_NAME}"
+  distill_extra_args=()
+  if [[ "${LORS_NO_AUG}" == "1" ]]; then
+    distill_extra_args+=(--no_aug)
+  fi
+
+  python "${PROJECT_ROOT}/distill_tesla_lors.py" \
+    --dataset "${LORS_DATASET}" \
+    --image_root "${IMAGE_ROOT}" \
+    --ann_root "${ANN_ROOT}" \
+    --model_checkpoint_root "${LORS_MODEL_CHECKPOINT_ROOT}" \
+    --buffer_path "${BUFFER_LEAF_DIR}" \
+    --image_encoder "${LORS_IMAGE_ENCODER}" \
+    --text_encoder "${LORS_TEXT_ENCODER}" \
+    --loss_type "${LORS_LOSS_TYPE}" \
+    --num_queries "${LORS_NUM_QUERIES}" \
+    --mini_batch_size "${LORS_MINI_BATCH_SIZE}" \
+    --Iteration "${LORS_ITERATION}" \
+    --eval_it "${LORS_EVAL_IT}" \
+    --num_eval "${LORS_NUM_EVAL}" \
+    --batch_size_train "${LORS_BATCH_TRAIN}" \
+    --batch_size_test "${LORS_BATCH_TEST}" \
+    --pix_init "${LORS_PIX_INIT}" \
+    --txt_init "${LORS_TXT_INIT}" \
+    --sim_type "${LORS_SIM_TYPE}" \
+    --name "${LORS_RUN_NAME}" \
+    --disabled_wandb "${LORS_DISABLED_WANDB}" \
+    "${distill_extra_args[@]}" \
+    > "${log_path}" 2>&1
+  stage_log "LoRS distill done"
+}
+
+run_evaluate_stage() {
+  local ckpt_path="$1"
+  local log_path="${RUN_LOG_DIR}/evaluate.log"
+  stage_log "LoRS evaluate start: ckpt=${ckpt_path}"
+  eval_extra_args=()
+  if [[ "${LORS_NO_AUG}" == "1" ]]; then
+    eval_extra_args+=(--no_aug)
+  fi
+
+  python "${PROJECT_ROOT}/evaluate_only.py" \
+    --dataset "${LORS_DATASET}" \
+    --image_root "${IMAGE_ROOT}" \
+    --ann_root "${ANN_ROOT}" \
+    --model_checkpoint_root "${LORS_MODEL_CHECKPOINT_ROOT}" \
+    --image_encoder "${LORS_IMAGE_ENCODER}" \
+    --text_encoder "${LORS_TEXT_ENCODER}" \
+    --loss_type "${LORS_LOSS_TYPE}" \
+    --ckpt_path "${ckpt_path}" \
+    --num_eval "${LORS_NUM_EVAL}" \
+    --batch_size_train "${LORS_BATCH_TRAIN}" \
+    --batch_size_test "${LORS_BATCH_TEST}" \
+    --disabled_wandb "${LORS_DISABLED_WANDB}" \
+    "${eval_extra_args[@]}" \
+    > "${log_path}" 2>&1
+  stage_log "LoRS evaluate done"
+}
+
+stage_log "LoRS baseline pipeline start: dataset=${LORS_DATASET} model=${MODEL_TAG} loss=${LORS_LOSS_TYPE}"
+require_checkpoint_file "${LORS_MODEL_CHECKPOINT_ROOT}/bert-base-uncased"
+if [[ "${LORS_IMAGE_ENCODER}" == "nfnet" ]]; then
+  require_checkpoint_file "${LORS_MODEL_CHECKPOINT_ROOT}/nfnet_l0_ra2-45c6688d.pth"
+fi
+
+run_buffer_stage
+run_distill_stage
+
+LATEST_CKPT="$(find_latest_distilled_checkpoint "${LORS_DATASET}" "${LORS_ITERATION}" || true)"
+if [[ -z "${LATEST_CKPT}" ]]; then
+  echo "Unable to locate distilled_${LORS_ITERATION}.pt under ${LORS_LOG_ROOT}/${LORS_DATASET}" >&2
+  echo "Check distill log: ${RUN_LOG_DIR}/distill.log" >&2
+  exit 1
+fi
+
+run_evaluate_stage "${LATEST_CKPT}"
+
+stage_log "LoRS baseline pipeline completed"
+stage_log "Buffer dir: ${BUFFER_LEAF_DIR}"
+stage_log "Checkpoint: ${LATEST_CKPT}"
+stage_log "Logs: ${RUN_LOG_DIR}"

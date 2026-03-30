@@ -95,20 +95,24 @@ run_precompute_for_dataset() {
     --mst_weight_scale "${TOPOLOGY_MST_WEIGHT_SCALE}" \
     "${topology_extra_args[@]}"
 
-  python "${PROJECT_ROOT}/run_cross_modal_topology.py" \
-    --dataset "${dataset}" \
-    --split train \
-    --image_encoder "${BACKBONE}" \
-    --text_encoder "${TEXT_ENCODER}" \
-    --topology_root "${TOPOLOGY_ROOT}" \
-    --output_root "${CROSS_MODAL_ROOT}" \
-    --metric "${TOPOLOGY_METRIC_IMAGE}" \
-    --image_metric "${TOPOLOGY_METRIC_IMAGE}" \
-    --text_metric "${TOPOLOGY_METRIC_TEXT}" \
-    --k "${K_NEIGHBORS}" \
-    --alpha "${ALPHA}" \
-    --num_eigs "${CROSS_MODAL_NUM_EIGS}" \
-    --spectral_embedding_dim "${CROSS_MODAL_EMBED_DIM}"
+  if [[ "${ENABLE_SELECTION_EFFICIENCY_BENCHMARK}" != "1" ]]; then
+    python "${PROJECT_ROOT}/run_cross_modal_topology.py" \
+      --dataset "${dataset}" \
+      --split train \
+      --image_encoder "${BACKBONE}" \
+      --text_encoder "${TEXT_ENCODER}" \
+      --topology_root "${TOPOLOGY_ROOT}" \
+      --output_root "${CROSS_MODAL_ROOT}" \
+      --metric "${TOPOLOGY_METRIC_IMAGE}" \
+      --image_metric "${TOPOLOGY_METRIC_IMAGE}" \
+      --text_metric "${TOPOLOGY_METRIC_TEXT}" \
+      --k "${K_NEIGHBORS}" \
+      --alpha "${ALPHA}" \
+      --num_eigs "${CROSS_MODAL_NUM_EIGS}" \
+      --spectral_embedding_dim "${CROSS_MODAL_EMBED_DIM}"
+  else
+    stage_log "Precompute skip cross-modal for benchmarked run: dataset=${dataset}"
+  fi
 
   stage_log "Precompute done: dataset=${dataset}"
 }
@@ -147,35 +151,80 @@ run_one_experiment() {
   fi
 
   stage_log "Selection start: dataset=${dataset} method=${method_name} budget=${budget} seed=${seed}"
-  python "${PROJECT_ROOT}/run_subset_selection.py" \
-    --dataset "${dataset}" \
-    --split train \
-    --image_encoder "${BACKBONE}" \
-    --text_encoder "${TEXT_ENCODER}" \
-    --feature_cache_root "${FEATURE_CACHE_ROOT}" \
-    --cross_modal_root "${CROSS_MODAL_ROOT}" \
-    --output_root "${SUBSET_SELECTION_ROOT}" \
-    --metric "${TOPOLOGY_METRIC_IMAGE}" \
-    --k "${K_NEIGHBORS}" \
-    --alpha "${ALPHA}" \
-    --budget_size "${budget}" \
-    --selection_method "${selection_method}" \
-    --reference_embedding_mode "${SUBSET_REFERENCE_EMBEDDING_MODE}" \
-    --spectral_weight "${SUBSET_SPECTRAL_WEIGHT}" \
-    --random_state "${seed}" \
-    --device "${DEVICE}" \
-    --geometry_weight "${PROXY_GEOMETRY_WEIGHT}" \
-    --matching_cost_mode "${MATCHING_COST_MODE}" \
-    --proxy_objective_mode "${PROXY_OBJECTIVE_MODE}" \
-    --lambda_div "${PROXY_LAMBDA_DIV}" \
-    --lambda_match "${PROXY_LAMBDA_MATCH}" \
-    --lambda_graph "${PROXY_LAMBDA_GRAPH}" \
-    --lambda_phase "${PROXY_LAMBDA_PHASE}" \
-    --num_freq_pool "${PROXY_NUM_FREQ_POOL}" \
-    --tau_min "${PROXY_TAU_MIN}" \
-    --tau_max "${PROXY_TAU_MAX}" \
-    "${selection_extra_args[@]}" \
-    > "${select_log}" 2>&1
+  if [[ "${ENABLE_SELECTION_EFFICIENCY_BENCHMARK}" == "1" ]]; then
+    local benchmark_output_dir="${SELECTION_EFFICIENCY_ROOT}/main_table_abs/${dataset}/${BACKBONE}_${TEXT_ENCODER}/${budget_tag}/${method_name}/seed_${seed}"
+    BENCHMARK_CMD=(
+      python "${PROJECT_ROOT}/run_selection_efficiency_benchmark.py"
+      --dataset "${dataset}"
+      --split train
+      --image_encoder "${BACKBONE}"
+      --text_encoder "${TEXT_ENCODER}"
+      --feature_cache_root "${FEATURE_CACHE_ROOT}"
+      --topology_root "${TOPOLOGY_ROOT}"
+      --cross_output_root "${CROSS_MODAL_ROOT}"
+      --selection_output_root "${SUBSET_SELECTION_ROOT}"
+      --metric "${TOPOLOGY_METRIC_IMAGE}"
+      --image_metric "${TOPOLOGY_METRIC_IMAGE}"
+      --text_metric "${TOPOLOGY_METRIC_TEXT}"
+      --k "${K_NEIGHBORS}"
+      --alpha "${ALPHA}"
+      --budget_size "${budget}"
+      --selection_method "${selection_method}"
+      --reference_embedding_mode "${SUBSET_REFERENCE_EMBEDDING_MODE}"
+      --spectral_weight "${SUBSET_SPECTRAL_WEIGHT}"
+      --random_state "${seed}"
+      --device "${DEVICE}"
+      --geometry_weight "${PROXY_GEOMETRY_WEIGHT}"
+      --matching_cost_mode "${MATCHING_COST_MODE}"
+      --proxy_objective_mode "${PROXY_OBJECTIVE_MODE}"
+      --lambda_div "${PROXY_LAMBDA_DIV}"
+      --lambda_match "${PROXY_LAMBDA_MATCH}"
+      --lambda_graph "${PROXY_LAMBDA_GRAPH}"
+      --lambda_phase "${PROXY_LAMBDA_PHASE}"
+      --num_freq_pool "${PROXY_NUM_FREQ_POOL}"
+      --tau_min "${PROXY_TAU_MIN}"
+      --tau_max "${PROXY_TAU_MAX}"
+      --variant_name "${method_name}"
+      --benchmark_output_dir "${benchmark_output_dir}"
+      --enable_selection_efficiency_benchmark
+      --energy_backend "${SELECTION_EFFICIENCY_BACKEND}"
+      --poll_interval_ms "${SELECTION_EFFICIENCY_POLL_INTERVAL_MS}"
+    )
+    if [[ -n "${SELECTION_EFFICIENCY_BASELINE_SUMMARY}" ]]; then
+      BENCHMARK_CMD+=(--baseline_summary "${SELECTION_EFFICIENCY_BASELINE_SUMMARY}")
+    fi
+    "${BENCHMARK_CMD[@]}" "${selection_extra_args[@]}" > "${select_log}" 2>&1
+  else
+    python "${PROJECT_ROOT}/run_subset_selection.py" \
+      --dataset "${dataset}" \
+      --split train \
+      --image_encoder "${BACKBONE}" \
+      --text_encoder "${TEXT_ENCODER}" \
+      --feature_cache_root "${FEATURE_CACHE_ROOT}" \
+      --cross_modal_root "${CROSS_MODAL_ROOT}" \
+      --output_root "${SUBSET_SELECTION_ROOT}" \
+      --metric "${TOPOLOGY_METRIC_IMAGE}" \
+      --k "${K_NEIGHBORS}" \
+      --alpha "${ALPHA}" \
+      --budget_size "${budget}" \
+      --selection_method "${selection_method}" \
+      --reference_embedding_mode "${SUBSET_REFERENCE_EMBEDDING_MODE}" \
+      --spectral_weight "${SUBSET_SPECTRAL_WEIGHT}" \
+      --random_state "${seed}" \
+      --device "${DEVICE}" \
+      --geometry_weight "${PROXY_GEOMETRY_WEIGHT}" \
+      --matching_cost_mode "${MATCHING_COST_MODE}" \
+      --proxy_objective_mode "${PROXY_OBJECTIVE_MODE}" \
+      --lambda_div "${PROXY_LAMBDA_DIV}" \
+      --lambda_match "${PROXY_LAMBDA_MATCH}" \
+      --lambda_graph "${PROXY_LAMBDA_GRAPH}" \
+      --lambda_phase "${PROXY_LAMBDA_PHASE}" \
+      --num_freq_pool "${PROXY_NUM_FREQ_POOL}" \
+      --tau_min "${PROXY_TAU_MIN}" \
+      --tau_max "${PROXY_TAU_MAX}" \
+      "${selection_extra_args[@]}" \
+      > "${select_log}" 2>&1
+  fi
   stage_log "Selection done: dataset=${dataset} method=${method_name} budget=${budget} seed=${seed}"
 
   stage_log "Training start: dataset=${dataset} method=${method_name} budget=${budget} seed=${seed}"

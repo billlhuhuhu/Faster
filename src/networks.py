@@ -3,6 +3,7 @@
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
+import os
 # from collections import OrderedDict
 # from typing import Tuple, Union
 try:
@@ -22,10 +23,23 @@ from .similarity_mining import MultilabelContrastiveLoss
 
 # Caching text models, by Yue Xu
 
+DEFAULT_LEGACY_CHECKPOINT_ROOT = "./distill_utils/checkpoints"
+
+
+def resolve_legacy_checkpoint_root(checkpoint_root=None):
+    if checkpoint_root is not None and str(checkpoint_root).strip():
+        return checkpoint_root
+    env_root = os.environ.get("LORS_CHECKPOINT_ROOT")
+    if env_root and env_root.strip():
+        return env_root
+    return DEFAULT_LEGACY_CHECKPOINT_ROOT
+
 @functools.lru_cache(maxsize=128)
-def get_bert_stuff():
-    tokenizer = BertTokenizer.from_pretrained('./distill_utils/checkpoints/bert-base-uncased')
-    BERT_model = BertModel.from_pretrained('./distill_utils/checkpoints/bert-base-uncased')
+def get_bert_stuff(checkpoint_root=None):
+    checkpoint_root = resolve_legacy_checkpoint_root(checkpoint_root)
+    bert_root = os.path.join(checkpoint_root, 'bert-base-uncased')
+    tokenizer = BertTokenizer.from_pretrained(bert_root)
+    BERT_model = BertModel.from_pretrained(bert_root)
     return BERT_model, tokenizer
 
 @functools.lru_cache(maxsize=128)
@@ -36,8 +50,9 @@ def get_distilbert_stuff():
     return DistilBERT_model, DistilBERT_tokenizer
 
 @functools.lru_cache(maxsize=128)
-def get_gpt1_stuff():
-    model_name = './distill_utils/checkpoints/openai-gpt'
+def get_gpt1_stuff(checkpoint_root=None):
+    checkpoint_root = resolve_legacy_checkpoint_root(checkpoint_root)
+    model_name = os.path.join(checkpoint_root, 'openai-gpt')
     model = OpenAIGPTModel.from_pretrained(model_name)
     tokenizer = OpenAIGPTTokenizer.from_pretrained(model_name)
     return model, tokenizer
@@ -677,8 +692,9 @@ class ProjectionHead(nn.Module):
 
 
 @functools.lru_cache(maxsize=128)
-def load_from_timm(model_name, pretrained):
+def load_from_timm(model_name, pretrained, checkpoint_root=None):
     model_name = canonical_image_encoder_name(model_name)
+    checkpoint_root = resolve_legacy_checkpoint_root(checkpoint_root)
     if model_name == 'clip':
         if clip is None:
             raise ImportError("The 'clip' package is required when image_encoder='clip'.")
@@ -691,7 +707,7 @@ def load_from_timm(model_name, pretrained):
 
     elif model_name == 'nfnet':
         model = timm.create_model('nfnet_l0', pretrained=pretrained, num_classes=0, global_pool="avg",
-                                        pretrained_cfg_overlay=dict(file='distill_utils/checkpoints/nfnet_l0_ra2-45c6688d.pth'),)
+                                        pretrained_cfg_overlay=dict(file=os.path.join(checkpoint_root, 'nfnet_l0_ra2-45c6688d.pth')),)
     elif model_name == 'vit':
         model = timm.create_model('vit_tiny_patch16_224', pretrained=True)
     elif model_name == 'vit_base_patch16_224':
@@ -748,8 +764,9 @@ class ImageEncoder(nn.Module):
         self.model_name = canonical_image_encoder_name(args.image_encoder)
         self.pretrained = args.image_pretrained
         self.trainable = args.image_trainable
+        self.checkpoint_root = resolve_legacy_checkpoint_root(getattr(args, "model_checkpoint_root", None))
 
-        self.model = copy.deepcopy(load_from_timm(self.model_name, self.pretrained))
+        self.model = copy.deepcopy(load_from_timm(self.model_name, self.pretrained, self.checkpoint_root))
         # use cached pretrained model
 
         for p in self.model.parameters():
@@ -776,13 +793,14 @@ class TextEncoder(nn.Module):
         self.pretrained = args.text_pretrained
         self.trainable = args.text_trainable
         self.model_name = args.text_encoder
+        self.checkpoint_root = resolve_legacy_checkpoint_root(getattr(args, "model_checkpoint_root", None))
         
         if self.model_name == 'clip':
             if clip is None:
                 raise ImportError("The 'clip' package is required when text_encoder='clip'.")
-            self.model, preprocess = clip.load("ViT-B/32", device='cuda', download_root="distill_utils/checkpoints")
+            self.model, preprocess = clip.load("ViT-B/32", device='cuda', download_root=self.checkpoint_root)
         elif self.model_name == 'bert':
-            pt_model, self.tokenizer = get_bert_stuff()
+            pt_model, self.tokenizer = get_bert_stuff(self.checkpoint_root)
             if args.text_pretrained:
                 self.model = pt_model
             else:
@@ -791,7 +809,7 @@ class TextEncoder(nn.Module):
         elif self.model_name == 'distilbert':
             self.model, self.tokenizer = get_distilbert_stuff()
         elif self.model_name == 'gpt1':
-            self.model, self.tokenizer = get_gpt1_stuff()
+            self.model, self.tokenizer = get_gpt1_stuff(self.checkpoint_root)
         else:
             raise NotImplementedError(self.model_name)
 
