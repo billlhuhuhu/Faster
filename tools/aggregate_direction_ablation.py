@@ -52,8 +52,14 @@ def read_json(path):
 
 def find_metrics_path(root, dataset, model_tag, budget, variant, seed):
     budget_tag = f"size_{int(budget):04d}"
-    path = Path(root) / dataset / model_tag / budget_tag / variant / f"seed_{int(seed)}" / "metrics.json"
-    return path
+    candidates = [
+        Path(root) / dataset / model_tag / budget_tag / variant / f"seed_{int(seed)}" / "metrics.json",
+        Path(root) / variant / dataset / model_tag / budget_tag / variant / f"seed_{int(seed)}" / "metrics.json",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[-1]
 
 
 def main():
