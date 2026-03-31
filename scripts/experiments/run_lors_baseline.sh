@@ -19,6 +19,10 @@ LORS_MINI_BATCH_SIZE="${LORS_MINI_BATCH_SIZE:-100}"
 LORS_ITERATION="${LORS_ITERATION:-3000}"
 LORS_EVAL_IT="${LORS_EVAL_IT:-50}"
 LORS_NUM_EVAL="${LORS_NUM_EVAL:-1}"
+LORS_EPOCH_EVAL_TRAIN="${LORS_EPOCH_EVAL_TRAIN:-100}"
+LORS_EXPERT_EPOCHS="${LORS_EXPERT_EPOCHS:-3}"
+LORS_SYN_STEPS="${LORS_SYN_STEPS:-20}"
+LORS_MAX_START_EPOCH="${LORS_MAX_START_EPOCH:-25}"
 LORS_BATCH_TRAIN="${LORS_BATCH_TRAIN:-128}"
 LORS_BATCH_TEST="${LORS_BATCH_TEST:-128}"
 LORS_SIM_TYPE="${LORS_SIM_TYPE:-full}"
@@ -118,6 +122,11 @@ run_distill_stage() {
     --Iteration "${LORS_ITERATION}" \
     --eval_it "${LORS_EVAL_IT}" \
     --num_eval "${LORS_NUM_EVAL}" \
+    --epoch_eval_train "${LORS_EPOCH_EVAL_TRAIN}" \
+    --expert_epochs "${LORS_EXPERT_EPOCHS}" \
+    --syn_steps "${LORS_SYN_STEPS}" \
+    --max_start_epoch "${LORS_MAX_START_EPOCH}" \
+    --batch_train "${LORS_BATCH_TRAIN}" \
     --batch_size_train "${LORS_BATCH_TRAIN}" \
     --batch_size_test "${LORS_BATCH_TEST}" \
     --pix_init "${LORS_PIX_INIT}" \
@@ -149,6 +158,7 @@ run_evaluate_stage() {
     --loss_type "${LORS_LOSS_TYPE}" \
     --ckpt_path "${ckpt_path}" \
     --num_eval "${LORS_NUM_EVAL}" \
+    --batch_train "${LORS_BATCH_TRAIN}" \
     --batch_size_train "${LORS_BATCH_TRAIN}" \
     --batch_size_test "${LORS_BATCH_TEST}" \
     --disabled_wandb "${LORS_DISABLED_WANDB}" \
