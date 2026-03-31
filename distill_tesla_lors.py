@@ -30,6 +30,18 @@ def make_timestamp(prefix: str="", suffix: str="") -> str:
     return prefix + tmstamp + suffix
 
 
+def sample_valid_start_epoch(expert_trajectory, expert_epochs, max_start_epoch):
+    trajectory_length = len(expert_trajectory)
+    max_valid_start = trajectory_length - int(expert_epochs) - 1
+    if max_valid_start < 0:
+        raise ValueError(
+            "Expert trajectory is too short for the requested expert_epochs: "
+            f"trajectory_length={trajectory_length}, expert_epochs={expert_epochs}"
+        )
+    capped_max_start = min(int(max_start_epoch), max_valid_start)
+    return int(np.random.randint(0, capped_max_start + 1))
+
+
 
 
 def main(args):
@@ -307,7 +319,11 @@ def main(args):
                 img_buffer = torch.load(img_expert_files[file_idx])
                 txt_buffer = torch.load(txt_expert_files[file_idx])
 
-        start_epoch = np.random.randint(0, args.max_start_epoch)
+        start_epoch = sample_valid_start_epoch(
+            img_expert_trajectory,
+            expert_epochs=args.expert_epochs,
+            max_start_epoch=args.max_start_epoch,
+        )
         img_starting_params = img_expert_trajectory[start_epoch]
         txt_starting_params = txt_expert_trajectory[start_epoch]
 
