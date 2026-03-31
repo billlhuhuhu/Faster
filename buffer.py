@@ -15,6 +15,20 @@ import numpy as np
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
+
+def apply_legacy_dataset_defaults(args):
+    # Keep old LoRS defaults for backwards compatibility, but do not
+    # override explicit CLI paths passed by the caller.
+    default_image_root = {
+        'flickr': "distill_utils/data/Flickr30k/",
+        'coco': "distill_utils/data/COCO/",
+    }[args.dataset]
+    if not getattr(args, "image_root", None):
+        args.image_root = default_image_root
+    if not getattr(args, "ann_root", None):
+        args.ann_root = './data/Flickr30k_ann/'
+    return args
+
 def main(args):
     no_aug_suffix = "_NoAug" if args.no_aug else ""
     if args.disabled_wandb == True:
@@ -193,10 +207,5 @@ def make_buffer_parser():
 if __name__ == '__main__':
     parser = make_buffer_parser()
     args = parser.parse_args()
-
-    args.image_root = {
-        'flickr': "distill_utils/data/Flickr30k/",
-        'coco': "distill_utils/data/COCO/",
-    }[args.dataset]
-
+    args = apply_legacy_dataset_defaults(args)
     main(args)
