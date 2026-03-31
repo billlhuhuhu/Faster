@@ -7,6 +7,9 @@ source "${SCRIPT_DIR}/common.sh"
 LORS_SWEEP_DATASET="${LORS_SWEEP_DATASET:-flickr}"
 LORS_SWEEP_BUDGETS="${LORS_SWEEP_BUDGETS:-100 200 500}"
 LORS_SWEEP_DEVICE="${LORS_SWEEP_DEVICE:-0}"
+LORS_SWEEP_BUFFER_ROOT="${LORS_SWEEP_BUFFER_ROOT:-buffers_formal}"
+LORS_SWEEP_LOG_ROOT="${LORS_SWEEP_LOG_ROOT:-logged_files_formal}"
+LORS_SWEEP_FORCE_REBUILD_BUFFER="${LORS_SWEEP_FORCE_REBUILD_BUFFER:-0}"
 
 # Stable defaults for running LoRS on the current codebase without immediately OOM'ing.
 # Override any of these from the shell if you want a heavier setting.
@@ -34,10 +37,12 @@ CSV_PATH="${SWEEP_REPORT_DIR}/lors_budget_sweep.csv"
 mkdir -p "${SWEEP_REPORT_DIR}"
 
 stage_log "LoRS budget sweep start: dataset=${LORS_SWEEP_DATASET} budgets=${LORS_SWEEP_BUDGETS}"
+stage_log "LoRS budget sweep roots: buffer=${LORS_SWEEP_BUFFER_ROOT} log=${LORS_SWEEP_LOG_ROOT} force_buffer=${LORS_SWEEP_FORCE_REBUILD_BUFFER}"
 
 MANIFEST_TMP="${SWEEP_REPORT_DIR}/manifest.tmp.jsonl"
 : > "${MANIFEST_TMP}"
 
+FORCE_BUFFER_THIS_ROUND="${LORS_SWEEP_FORCE_REBUILD_BUFFER}"
 for budget in ${LORS_SWEEP_BUDGETS}; do
   stage_log "LoRS sweep start: budget=${budget}"
   run_tag="budget_${budget}"
@@ -50,6 +55,9 @@ for budget in ${LORS_SWEEP_BUDGETS}; do
     CUDA_VISIBLE_DEVICES="${LORS_SWEEP_DEVICE}" \
     PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF}" \
     LORS_DATASET="${LORS_SWEEP_DATASET}" \
+    LORS_BUFFER_ROOT="${LORS_SWEEP_BUFFER_ROOT}" \
+    LORS_LOG_ROOT="${LORS_SWEEP_LOG_ROOT}" \
+    LORS_FORCE_REBUILD_BUFFER="${FORCE_BUFFER_THIS_ROUND}" \
     LORS_RUN_TAG="${run_tag}" \
     LORS_RUN_NAME="${run_name}" \
     LORS_NUM_QUERIES="${budget}" \
@@ -71,7 +79,7 @@ for budget in ${LORS_SWEEP_BUDGETS}; do
     bash "${SCRIPT_DIR}/run_lors_baseline.sh"
 
   latest_log_dir="$(find "${EXPERIMENT_LOG_ROOT}" -maxdepth 1 -type d -name "lors_baseline_${LORS_SWEEP_DATASET}_${run_tag}_*" | sort | tail -n 1)"
-  checkpoint_path="${PROJECT_ROOT}/logged_files/${LORS_SWEEP_DATASET}/${run_name}/distilled_${LORS_ITERATION}.pt"
+  checkpoint_path="${PROJECT_ROOT}/${LORS_SWEEP_LOG_ROOT}/${LORS_SWEEP_DATASET}/${run_name}/distilled_${LORS_ITERATION}.pt"
   evaluate_log_path="${latest_log_dir}/evaluate.log"
 
   python - "${MANIFEST_TMP}" "${budget}" "${run_name}" "${latest_log_dir}" "${checkpoint_path}" "${evaluate_log_path}" <<'PY'
@@ -92,6 +100,7 @@ with manifest_tmp.open("a", encoding="utf-8") as handle:
 PY
 
   rm -f "${before_logs}"
+  FORCE_BUFFER_THIS_ROUND=0
   stage_log "LoRS sweep done: budget=${budget}"
 done
 

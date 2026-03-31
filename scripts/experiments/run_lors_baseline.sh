@@ -11,6 +11,7 @@ LORS_LOSS_TYPE="${LORS_LOSS_TYPE:-InfoNCE}"
 LORS_MODEL_CHECKPOINT_ROOT="${LORS_MODEL_CHECKPOINT_ROOT:-${LORS_CHECKPOINT_ROOT:-${PROJECT_ROOT}/distill_utils/checkpoints}}"
 LORS_BUFFER_ROOT="${LORS_BUFFER_ROOT:-buffers}"
 LORS_LOG_ROOT="${LORS_LOG_ROOT:-logged_files}"
+LORS_FORCE_REBUILD_BUFFER="${LORS_FORCE_REBUILD_BUFFER:-0}"
 LORS_NUM_EXPERTS="${LORS_NUM_EXPERTS:-100}"
 LORS_TRAIN_EPOCHS="${LORS_TRAIN_EPOCHS:-50}"
 LORS_EVAL_FREQ="${LORS_EVAL_FREQ:-5}"
@@ -78,7 +79,7 @@ find_latest_distilled_checkpoint() {
 
 run_buffer_stage() {
   local log_path="${RUN_LOG_DIR}/buffer.log"
-  if compgen -G "${BUFFER_LEAF_DIR}/img_replay_buffer_*.pt" > /dev/null && compgen -G "${BUFFER_LEAF_DIR}/txt_replay_buffer_*.pt" > /dev/null; then
+  if [[ "${LORS_FORCE_REBUILD_BUFFER}" != "1" ]] && compgen -G "${BUFFER_LEAF_DIR}/img_replay_buffer_*.pt" > /dev/null && compgen -G "${BUFFER_LEAF_DIR}/txt_replay_buffer_*.pt" > /dev/null; then
     stage_log "Skip buffer: existing replay buffers found in ${BUFFER_LEAF_DIR}"
     return 0
   fi
