@@ -43,7 +43,11 @@ BUFFER_LEAF_DIR="${LORS_BUFFER_ROOT}/${LORS_DATASET}/${MODEL_TAG}/${LOSS_TAG}"
 RUN_TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
 RUN_NAME_DEFAULT="lors_${LORS_DATASET}_${MODEL_TAG}_${LOSS_TAG}_${RUN_TIMESTAMP}"
 LORS_RUN_NAME="${LORS_RUN_NAME:-${RUN_NAME_DEFAULT}}"
-RUN_LOG_DIR="${EXPERIMENT_LOG_ROOT}/lors_baseline_${LORS_DATASET}_${RUN_TIMESTAMP}"
+RUN_TAG_SUFFIX=""
+if [[ -n "${LORS_RUN_TAG}" ]]; then
+  RUN_TAG_SUFFIX="_$(sanitize_component "${LORS_RUN_TAG}")"
+fi
+RUN_LOG_DIR="${EXPERIMENT_LOG_ROOT}/lors_baseline_${LORS_DATASET}${RUN_TAG_SUFFIX}_${RUN_TIMESTAMP}"
 mkdir -p "${RUN_LOG_DIR}" "${LORS_BUFFER_ROOT}" "${LORS_LOG_ROOT}"
 
 require_checkpoint_file() {
@@ -57,6 +61,11 @@ require_checkpoint_file() {
 find_latest_distilled_checkpoint() {
   local dataset="$1"
   local iteration="$2"
+  local exact_candidate="${LORS_LOG_ROOT}/${dataset}/${LORS_RUN_NAME}/distilled_${iteration}.pt"
+  if [[ -f "${exact_candidate}" ]]; then
+    echo "${exact_candidate}"
+    return 0
+  fi
   local search_root="${LORS_LOG_ROOT}/${dataset}"
   if [[ ! -d "${search_root}" ]]; then
     return 1
