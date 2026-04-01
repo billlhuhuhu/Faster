@@ -8,6 +8,7 @@ SEED="${ALL_ENABLED_RATIO_SEED:-0}"
 BACKBONE="${ALL_ENABLED_RATIO_BACKBONE:-nfnet}"
 TEXT_ENCODER="${ALL_ENABLED_RATIO_TEXT_ENCODER:-bert}"
 RATIOS_STR="${ALL_ENABLED_RATIO_RATIOS:-0.1 0.2 0.3}"
+TRAIN_BACKBONES_STR="${ALL_ENABLED_RATIO_TRAIN_BACKBONES:-nfnet resnet50 vit_b16}"
 VARIANT="${ALL_ENABLED_RATIO_VARIANT:-all_enabled_ratio}"
 MODEL_TAG="$(sanitize_component "${BACKBONE}")_$(sanitize_component "${TEXT_ENCODER}")"
 FUSION_TAG="k${K_NEIGHBORS}_$(sanitize_component "${TOPOLOGY_METRIC_IMAGE}")_a$(sanitize_component "${ALPHA}")"
@@ -21,6 +22,8 @@ ALL_ENABLED_RATIO_TRAIN_ROOT="${ALL_ENABLED_RATIO_TRAIN_ROOT:-artifacts/subset_t
 TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
 RUN_LOG_DIR="${EXPERIMENT_LOG_ROOT}/all_enabled_ratio_${DATASET}_${TIMESTAMP}"
 mkdir -p "${RUN_LOG_DIR}" "${REPORT_ROOT}"
+REPORT_CSV_PATH="${REPORT_ROOT}/all_enabled_ratio_${DATASET}_seed${SEED}_${TIMESTAMP}.csv"
+REPORT_MISSING_PATH="${REPORT_ROOT}/all_enabled_ratio_${DATASET}_seed${SEED}_${TIMESTAMP}_missing.txt"
 
 format_ratio_tag_local() {
   local ratio="$1"
@@ -77,12 +80,9 @@ run_selection_and_train() {
   ratio_tag="$(format_ratio_tag_local "${ratio}")"
   local cross_root="${ALL_ENABLED_RATIO_CROSS_ROOT}/all_enabled"
   local selection_root="${ALL_ENABLED_RATIO_SELECTION_ROOT}/${VARIANT}"
-  local train_root="${ALL_ENABLED_RATIO_TRAIN_ROOT}/${VARIANT}"
   local selection_method_tag="proxy_opt_lsrc"
   local selected_indices_path="${selection_root}/${DATASET}/train/${MODEL_TAG}/${ratio_tag}/${selection_method_tag}/seed_${SEED}/selected_indices.json"
-  local metrics_path="${train_root}/${DATASET}/${MODEL_TAG}/${ratio_tag}/${VARIANT}/seed_${SEED}/metrics.json"
   local select_log="${RUN_LOG_DIR}/${ratio_tag}_select.log"
-  local train_log="${RUN_LOG_DIR}/${ratio_tag}_train.log"
   local benchmark_output_dir="${SELECTION_EFFICIENCY_ROOT}/all_enabled_ratio/${DATASET}/${MODEL_TAG}/${ratio_tag}/seed_${SEED}"
   local benchmark_summary_path="${benchmark_output_dir}/selection_efficiency_summary.json"
 
@@ -200,45 +200,139 @@ run_selection_and_train() {
     stage_log "Skip selection (${ratio_tag}): ${selected_indices_path} already exists"
   fi
 
-  if [[ -f "${metrics_path}" ]]; then
-    stage_log "Skip train (${ratio_tag}): ${metrics_path} already exists"
-    return 0
-  fi
+  local train_backbone
+  for train_backbone in ${TRAIN_BACKBONES_STR}; do
+    local train_model_tag
+    train_model_tag="$(sanitize_component "${train_backbone}")_$(sanitize_component "${TEXT_ENCODER}")"
+    local train_root="${ALL_ENABLED_RATIO_TRAIN_ROOT}/${VARIANT}"
+    local metrics_path="${train_root}/${DATASET}/${train_model_tag}/${ratio_tag}/${VARIANT}/seed_${SEED}/metrics.json"
+    local train_log="${RUN_LOG_DIR}/${ratio_tag}_train_${train_model_tag}.log"
 
-  stage_log "Train start: variant=${VARIANT} ratio=${ratio}"
-  local train_extra_args=()
-  if [[ "${TRAIN_NO_AUG}" == "1" ]]; then
-    train_extra_args+=(--no_aug)
-  fi
+    if [[ -f "${metrics_path}" ]]; then
+      stage_log "Skip train (${ratio_tag}, ${train_backbone}): ${metrics_path} already exists"
+      continue
+    fi
 
-  python "${PROJECT_ROOT}/run_subset_train.py" \
-    --dataset "${DATASET}" \
-    --image_root "${IMAGE_ROOT}" \
-    --ann_root "${ANN_ROOT}" \
-    --selected_indices_path "${selected_indices_path}" \
-    --subset_ratio "${ratio}" \
-    --subset_tag "${VARIANT}" \
-    --image_encoder "${BACKBONE}" \
-    --text_encoder "${TEXT_ENCODER}" \
-    --output_root "${train_root}" \
-    --batch_size_train "${BATCH_TRAIN}" \
-    --batch_size_test "${BATCH_TEST}" \
-    --text_batch_size "${TEXT_BATCH_SIZE}" \
-    --num_workers "${NUM_WORKERS}" \
-    --epochs "${EPOCHS}" \
-    --eval_interval "${EVAL_INTERVAL}" \
-    --seed "${SEED}" \
-    --device "${DEVICE}" \
-    "${train_extra_args[@]}" \
-    > "${train_log}" 2>&1
+    stage_log "Train start: variant=${VARIANT} ratio=${ratio} backbone=${train_backbone}"
+    local train_extra_args=()
+    if [[ "${TRAIN_NO_AUG}" == "1" ]]; then
+      train_extra_args+=(--no_aug)
+    fi
+
+    python "${PROJECT_ROOT}/run_subset_train.py" \
+      --dataset "${DATASET}" \
+      --image_root "${IMAGE_ROOT}" \
+      --ann_root "${ANN_ROOT}" \
+      --selected_indices_path "${selected_indices_path}" \
+      --subset_ratio "${ratio}" \
+      --subset_tag "${VARIANT}" \
+      --image_encoder "${train_backbone}" \
+      --text_encoder "${TEXT_ENCODER}" \
+      --output_root "${train_root}" \
+      --batch_size_train "${BATCH_TRAIN}" \
+      --batch_size_test "${BATCH_TEST}" \
+      --text_batch_size "${TEXT_BATCH_SIZE}" \
+      --num_workers "${NUM_WORKERS}" \
+      --epochs "${EPOCHS}" \
+      --eval_interval "${EVAL_INTERVAL}" \
+      --seed "${SEED}" \
+      --device "${DEVICE}" \
+      "${train_extra_args[@]}" \
+      > "${train_log}" 2>&1
+  done
 }
 
-stage_log "All-enabled ratio pipeline start: dataset=${DATASET} ratios=${RATIOS_STR} seed=${SEED}"
+stage_log "All-enabled ratio pipeline start: dataset=${DATASET} ratios=${RATIOS_STR} seed=${SEED} train_backbones=${TRAIN_BACKBONES_STR}"
 
 run_cross_stage
 
 for ratio in ${RATIOS_STR}; do
   run_selection_and_train "${ratio}"
 done
+
+stage_log "Aggregate start: ${REPORT_CSV_PATH}"
+python - <<PY
+import csv
+import json
+from pathlib import Path
+
+dataset = "${DATASET}"
+seed = int("${SEED}")
+text_encoder = "${TEXT_ENCODER}"
+ratios = "${RATIOS_STR}".split()
+train_backbones = "${TRAIN_BACKBONES_STR}".split()
+train_root = Path(r"${ALL_ENABLED_RATIO_TRAIN_ROOT}") / "${VARIANT}"
+report_csv_path = Path(r"${REPORT_CSV_PATH}")
+report_missing_path = Path(r"${REPORT_MISSING_PATH}")
+
+
+def sanitize_name(name):
+    return str(name).replace("\\\\", "-").replace("/", "-").replace(" ", "_")
+
+
+def ratio_tag(ratio_str):
+    return f"ratio_{int(round(float(ratio_str) * 100)):02d}"
+
+
+rows = []
+missing = []
+
+for ratio in ratios:
+    budget_tag = ratio_tag(ratio)
+    for backbone in train_backbones:
+        model_tag = f"{sanitize_name(backbone)}_{sanitize_name(text_encoder)}"
+        metrics_path = train_root / dataset / model_tag / budget_tag / "${VARIANT}" / f"seed_{seed}" / "metrics.json"
+        row = {
+            "dataset": dataset,
+            "subset_ratio": float(ratio),
+            "ratio_tag": budget_tag,
+            "image_encoder": backbone,
+            "text_encoder": text_encoder,
+            "variant": "${VARIANT}",
+            "i2t_r1": None,
+            "i2t_r5": None,
+            "i2t_r10": None,
+            "t2i_r1": None,
+            "t2i_r5": None,
+            "t2i_r10": None,
+            "mean_recall": None,
+            "metrics_path": str(metrics_path),
+        }
+        if metrics_path.exists():
+            with open(metrics_path, "r", encoding="utf-8") as f:
+                metrics = json.load(f)
+            row.update({
+                "i2t_r1": metrics.get("i2t_r1"),
+                "i2t_r5": metrics.get("i2t_r5"),
+                "i2t_r10": metrics.get("i2t_r10"),
+                "t2i_r1": metrics.get("t2i_r1"),
+                "t2i_r5": metrics.get("t2i_r5"),
+                "t2i_r10": metrics.get("t2i_r10"),
+                "mean_recall": metrics.get("mean_recall"),
+            })
+        else:
+            missing.append(str(metrics_path))
+        rows.append(row)
+
+report_csv_path.parent.mkdir(parents=True, exist_ok=True)
+with open(report_csv_path, "w", encoding="utf-8", newline="") as f:
+    writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+    writer.writeheader()
+    writer.writerows(rows)
+
+with open(report_missing_path, "w", encoding="utf-8") as f:
+    if missing:
+        for item in missing:
+            f.write(item + "\\n")
+    else:
+        f.write("")
+
+print(f"saved csv: {report_csv_path}")
+if missing:
+    print(f"missing count: {len(missing)}")
+    print(f"missing list: {report_missing_path}")
+else:
+    print("all 9 metrics found")
+PY
 
 stage_log "All-enabled ratio pipeline completed"
