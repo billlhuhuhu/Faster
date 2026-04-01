@@ -1,5 +1,5 @@
 # import pdb
-# import warnings
+import warnings
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
@@ -33,6 +33,73 @@ def resolve_legacy_checkpoint_root(checkpoint_root=None):
     if env_root and env_root.strip():
         return env_root
     return DEFAULT_LEGACY_CHECKPOINT_ROOT
+
+
+def allow_timm_downloads():
+    value = os.environ.get("LORS_ALLOW_TIMM_DOWNLOADS", "0")
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def find_local_timm_checkpoint(model_name, checkpoint_root=None):
+    checkpoint_root = resolve_legacy_checkpoint_root(checkpoint_root)
+    model_name = canonical_image_encoder_name(model_name)
+    candidate_names = {
+        "resnet50": [
+            "resnet50.pth",
+            "resnet50.bin",
+            "resnet50.safetensors",
+            "resnet50_a1_in1k.pth",
+            "resnet50.a1_in1k.pth",
+            "resnet50_a1_in1k.bin",
+            "resnet50.a1_in1k.safetensors",
+        ],
+        "vit_base_patch16_224": [
+            "vit_base_patch16_224.pth",
+            "vit_base_patch16_224.bin",
+            "vit_base_patch16_224.safetensors",
+            "vit_base_patch16_224.augreg_in21k_ft_in1k.pth",
+            "vit_base_patch16_224.augreg_in21k_ft_in1k.bin",
+            "vit_base_patch16_224.augreg_in21k_ft_in1k.safetensors",
+        ],
+    }
+    for candidate_name in candidate_names.get(model_name, []):
+        candidate_path = os.path.join(checkpoint_root, candidate_name)
+        if os.path.isfile(candidate_path):
+            return candidate_path
+    return None
+
+
+def create_timm_model_local_first(model_name, pretrained=False, checkpoint_root=None, **kwargs):
+    checkpoint_root = resolve_legacy_checkpoint_root(checkpoint_root)
+    local_checkpoint = find_local_timm_checkpoint(model_name, checkpoint_root=checkpoint_root)
+    if local_checkpoint is not None:
+        return timm.create_model(
+            model_name,
+            pretrained=False,
+            checkpoint_path=local_checkpoint,
+            **kwargs,
+        )
+
+    if not pretrained:
+        return timm.create_model(model_name, pretrained=False, **kwargs)
+
+    if allow_timm_downloads():
+        try:
+            return timm.create_model(model_name, pretrained=True, **kwargs)
+        except Exception as exc:
+            warnings.warn(
+                f"Falling back to randomly initialized {model_name} because pretrained download failed: {exc}",
+                RuntimeWarning,
+            )
+            return timm.create_model(model_name, pretrained=False, **kwargs)
+
+    warnings.warn(
+        f"No local checkpoint found for {model_name} under {checkpoint_root}; "
+        "skipping remote download and using random initialization. "
+        "Set LORS_ALLOW_TIMM_DOWNLOADS=1 to allow timm/Hugging Face downloads.",
+        RuntimeWarning,
+    )
+    return timm.create_model(model_name, pretrained=False, **kwargs)
 
 @functools.lru_cache(maxsize=128)
 def get_bert_stuff(checkpoint_root=None):
@@ -709,17 +776,28 @@ def load_from_timm(model_name, pretrained, checkpoint_root=None):
         model = timm.create_model('nfnet_l0', pretrained=pretrained, num_classes=0, global_pool="avg",
                                         pretrained_cfg_overlay=dict(file=os.path.join(checkpoint_root, 'nfnet_l0_ra2-45c6688d.pth')),)
     elif model_name == 'vit':
-        model = timm.create_model('vit_tiny_patch16_224', pretrained=True)
+        model = create_timm_model_local_first('vit_tiny_patch16_224', pretrained=pretrained, checkpoint_root=checkpoint_root)
     elif model_name == 'vit_base_patch16_224':
-        model = timm.create_model('vit_base_patch16_224', pretrained=True, num_classes=0)
+        model = create_timm_model_local_first(
+            'vit_base_patch16_224',
+            pretrained=pretrained,
+            checkpoint_root=checkpoint_root,
+            num_classes=0,
+        )
     elif model_name == 'nf_resnet50':
-        model = timm.create_model('nf_resnet50', pretrained=True)
+        model = create_timm_model_local_first('nf_resnet50', pretrained=pretrained, checkpoint_root=checkpoint_root)
     elif model_name == 'nf_regnet':
-        model = timm.create_model('nf_regnet_b1', pretrained=True)
+        model = create_timm_model_local_first('nf_regnet_b1', pretrained=pretrained, checkpoint_root=checkpoint_root)
     elif model_name=="efficientvit_m5":
-            model = timm.create_model(model_name, num_classes=0, pretrained=True)
+            model = create_timm_model_local_first(model_name, num_classes=0, pretrained=pretrained, checkpoint_root=checkpoint_root)
     else:
-        model = timm.create_model(model_name, num_classes=0, pretrained=True, global_pool="avg")
+        model = create_timm_model_local_first(
+            model_name,
+            num_classes=0,
+            pretrained=pretrained,
+            checkpoint_root=checkpoint_root,
+            global_pool="avg",
+        )
 
 
     return model

@@ -90,6 +90,11 @@ run_selection_and_train() {
     stage_log "Selection start: variant=${VARIANT} ratio=${ratio}"
     local selection_extra_args=(
       --enable_lsrc
+      --proxy_projection_dim "${PROXY_PROJECTION_DIM}"
+      --proxy_num_frequencies "${PROXY_NUM_FREQUENCIES}"
+      --proxy_num_steps "${PROXY_NUM_STEPS}"
+      --proxy_target_batch_size "${PROXY_TARGET_BATCH_SIZE}"
+      --proxy_batch_size "${PROXY_BATCH_SIZE}"
       --lsrc_k 32
       --lsrc_tau_r 1.0
       --lsrc_tau_c 1.0
@@ -98,7 +103,7 @@ run_selection_and_train() {
       --lambda_lsrc_cov 0.1
       --lambda_lsrc_rel 0.05
       --lsrc_eps 1e-8
-      --lsrc_batch_size 4096
+      --lsrc_batch_size "${PROXY_LSRC_BATCH_SIZE}"
     )
 
     if [[ "${ENABLE_SELECTION_EFFICIENCY_BENCHMARK}" == "1" ]]; then
@@ -133,9 +138,14 @@ run_selection_and_train() {
         --spectral_weight "${SUBSET_SPECTRAL_WEIGHT}"
         --random_state "${SEED}"
         --device "${DEVICE}"
+        --proxy_projection_dim "${PROXY_PROJECTION_DIM}"
         --geometry_weight "${PROXY_GEOMETRY_WEIGHT}"
         --matching_cost_mode "${MATCHING_COST_MODE}"
         --proxy_objective_mode "${PROXY_OBJECTIVE_MODE}"
+        --proxy_num_frequencies "${PROXY_NUM_FREQUENCIES}"
+        --proxy_num_steps "${PROXY_NUM_STEPS}"
+        --proxy_target_batch_size "${PROXY_TARGET_BATCH_SIZE}"
+        --proxy_batch_size "${PROXY_BATCH_SIZE}"
         --lambda_div "${PROXY_LAMBDA_DIV}"
         --lambda_match "${PROXY_LAMBDA_MATCH}"
         --lambda_graph "${PROXY_LAMBDA_GRAPH}"
