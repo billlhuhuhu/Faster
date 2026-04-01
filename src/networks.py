@@ -10,6 +10,10 @@ try:
     import clip
 except ImportError:
     clip = None
+try:
+    from safetensors.torch import load_file as safe_load_file
+except ImportError:
+    safe_load_file = None
 # from transformers import ViTConfig, ViTModel, AutoTokenizer, CLIPTextModel, CLIPTextConfig, CLIPProcessor, CLIPConfig
 import numpy as np
 from transformers import BertTokenizer, BertModel, DistilBertModel, DistilBertTokenizer, OpenAIGPTTokenizer, OpenAIGPTModel
@@ -69,16 +73,54 @@ def find_local_timm_checkpoint(model_name, checkpoint_root=None):
     return None
 
 
+def load_local_timm_state_dict(checkpoint_path):
+    if str(checkpoint_path).endswith(".safetensors"):
+        if safe_load_file is None:
+            raise ImportError(
+                "safetensors is required to load local .safetensors checkpoints."
+            )
+        state_dict = safe_load_file(checkpoint_path)
+    else:
+        payload = torch.load(checkpoint_path, map_location="cpu")
+        if isinstance(payload, dict):
+            for key in ("state_dict", "model", "model_state_dict"):
+                maybe_state_dict = payload.get(key)
+                if isinstance(maybe_state_dict, dict):
+                    state_dict = maybe_state_dict
+                    break
+            else:
+                state_dict = payload
+        else:
+            state_dict = payload
+
+    cleaned_state_dict = {}
+    for key, value in state_dict.items():
+        cleaned_key = str(key)
+        if cleaned_key.startswith("module."):
+            cleaned_key = cleaned_key[len("module."):]
+        cleaned_state_dict[cleaned_key] = value
+    return cleaned_state_dict
+
+
 def create_timm_model_local_first(model_name, pretrained=False, checkpoint_root=None, **kwargs):
     checkpoint_root = resolve_legacy_checkpoint_root(checkpoint_root)
     local_checkpoint = find_local_timm_checkpoint(model_name, checkpoint_root=checkpoint_root)
     if local_checkpoint is not None:
-        return timm.create_model(
+        model = timm.create_model(
             model_name,
             pretrained=False,
-            checkpoint_path=local_checkpoint,
             **kwargs,
         )
+        state_dict = load_local_timm_state_dict(local_checkpoint)
+        incompatible = model.load_state_dict(state_dict, strict=False)
+        if getattr(incompatible, "unexpected_keys", None) or getattr(incompatible, "missing_keys", None):
+            warnings.warn(
+                f"Loaded local checkpoint for {model_name} with relaxed matching; "
+                f"missing={list(getattr(incompatible, 'missing_keys', []))[:8]}, "
+                f"unexpected={list(getattr(incompatible, 'unexpected_keys', []))[:8]}",
+                RuntimeWarning,
+            )
+        return model
 
     if not pretrained:
         return timm.create_model(model_name, pretrained=False, **kwargs)
