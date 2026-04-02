@@ -10,6 +10,7 @@ TABLE_LINE_PATTERN = re.compile(r"([-+]?\d+(?:\.\d+)?)")
 
 def parse_eval_metrics(evaluate_log_path):
     lines = Path(evaluate_log_path).read_text(encoding="utf-8", errors="ignore").splitlines()
+    fallback_metrics = None
     for line in reversed(lines):
         if "|" not in line:
             continue
@@ -17,7 +18,7 @@ def parse_eval_metrics(evaluate_log_path):
         if len(numbers) < 7:
             continue
         values = [float(x) for x in numbers[-7:]]
-        return {
+        metrics = {
             "img_r1": values[0],
             "img_r5": values[1],
             "img_r10": values[2],
@@ -26,7 +27,11 @@ def parse_eval_metrics(evaluate_log_path):
             "txt_r10": values[5],
             "r_mean": values[6],
         }
-    return None
+        if fallback_metrics is None:
+            fallback_metrics = metrics
+        if any(value != 0.0 for value in values):
+            return metrics
+    return fallback_metrics
 
 
 def main():
