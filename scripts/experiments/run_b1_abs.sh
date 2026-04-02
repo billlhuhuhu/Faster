@@ -67,6 +67,9 @@ mkdir -p "${RUN_LOG_DIR}"
 MODEL_TAG="$(sanitize_component "${BACKBONE}")_$(sanitize_component "${TEXT_ENCODER}")"
 IMAGE_ROOT="$(get_image_root "${DATASET}")"
 FUSION_TAG="k${K_NEIGHBORS}_$(sanitize_component "${TOPOLOGY_METRIC_IMAGE}")_a$(sanitize_component "${ALPHA}")"
+FEATURE_CACHE_DIR="${FEATURE_CACHE_ROOT}/${DATASET}/train/${MODEL_TAG}"
+IMAGE_TOPOLOGY_DIR="${TOPOLOGY_ROOT}/${DATASET}/train/${MODEL_TAG}/image/k${K_NEIGHBORS}_$(sanitize_component "${TOPOLOGY_METRIC_IMAGE}")"
+TEXT_TOPOLOGY_DIR="${TOPOLOGY_ROOT}/${DATASET}/train/${MODEL_TAG}/text/k${K_NEIGHBORS}_$(sanitize_component "${TOPOLOGY_METRIC_TEXT}")"
 CROSS_SUMMARY_PATH="${CROSS_OUTPUT_ROOT}/${DATASET}/train/${MODEL_TAG}/${FUSION_TAG}/summary.json"
 
 run_precompute_if_needed() {
@@ -86,73 +89,85 @@ run_precompute_if_needed() {
     return 0
   fi
 
-  stage_log "Feature cache start: dataset=${DATASET} backbone=${BACKBONE}"
-  python "${PROJECT_ROOT}/run_feature_cache.py" \
-    --dataset "${DATASET}" \
-    --image_encoder "${BACKBONE}" \
-    --text_encoder "${TEXT_ENCODER}" \
-    --selection_image_repr_method "${SELECTION_IMAGE_REPR_METHOD}" \
-    --selection_text_repr_method "${SELECTION_TEXT_REPR_METHOD}" \
-    --image_root "${IMAGE_ROOT}" \
-    --ann_root "${ANN_ROOT}" \
-    --cache_root "${FEATURE_CACHE_ROOT}" \
-    --selection_image_size "${SELECTION_IMAGE_SIZE}" \
-    --selection_raw_resize_size "${SELECTION_RAW_RESIZE_SIZE}" \
-    --selection_raw_pca_dim "${SELECTION_RAW_PCA_DIM}" \
-    --selection_image_batch_size "${SELECTION_IMAGE_BATCH_SIZE}" \
-    --selection_text_batch_size "${SELECTION_TEXT_BATCH_SIZE}" \
-    --hog_orientations "${HOG_ORIENTATIONS}" \
-    --hog_pixels_per_cell "${HOG_PIXELS_PER_CELL}" \
-    --hog_cells_per_block "${HOG_CELLS_PER_BLOCK}" \
-    --color_hist_bins "${COLOR_HIST_BINS}" \
-    --color_space "${COLOR_SPACE}" \
-    --device "${DEVICE}" \
-    > "${RUN_LOG_DIR}/feature_cache.log" 2>&1
-  stage_log "Feature cache done"
+  if [[ -f "${FEATURE_CACHE_DIR}/img_features_selection.pt" && -f "${FEATURE_CACHE_DIR}/txt_features_selection.pt" && -f "${FEATURE_CACHE_DIR}/sample_meta.json" ]]; then
+    stage_log "Skip feature cache: existing cache found at ${FEATURE_CACHE_DIR}"
+  else
+    stage_log "Feature cache start: dataset=${DATASET} backbone=${BACKBONE}"
+    python "${PROJECT_ROOT}/run_feature_cache.py" \
+      --dataset "${DATASET}" \
+      --image_encoder "${BACKBONE}" \
+      --text_encoder "${TEXT_ENCODER}" \
+      --selection_image_repr_method "${SELECTION_IMAGE_REPR_METHOD}" \
+      --selection_text_repr_method "${SELECTION_TEXT_REPR_METHOD}" \
+      --image_root "${IMAGE_ROOT}" \
+      --ann_root "${ANN_ROOT}" \
+      --cache_root "${FEATURE_CACHE_ROOT}" \
+      --selection_image_size "${SELECTION_IMAGE_SIZE}" \
+      --selection_raw_resize_size "${SELECTION_RAW_RESIZE_SIZE}" \
+      --selection_raw_pca_dim "${SELECTION_RAW_PCA_DIM}" \
+      --selection_image_batch_size "${SELECTION_IMAGE_BATCH_SIZE}" \
+      --selection_text_batch_size "${SELECTION_TEXT_BATCH_SIZE}" \
+      --hog_orientations "${HOG_ORIENTATIONS}" \
+      --hog_pixels_per_cell "${HOG_PIXELS_PER_CELL}" \
+      --hog_cells_per_block "${HOG_CELLS_PER_BLOCK}" \
+      --color_hist_bins "${COLOR_HIST_BINS}" \
+      --color_space "${COLOR_SPACE}" \
+      --device "${DEVICE}" \
+      > "${RUN_LOG_DIR}/feature_cache.log" 2>&1
+    stage_log "Feature cache done"
+  fi
 
-  stage_log "Topology graph start: dataset=${DATASET} modality=image"
-  python "${PROJECT_ROOT}/run_topology_graph.py" \
-    --dataset "${DATASET}" \
-    --split train \
-    --image_encoder "${BACKBONE}" \
-    --text_encoder "${TEXT_ENCODER}" \
-    --modality image \
-    --feature_cache_root "${FEATURE_CACHE_ROOT}" \
-    --output_root "${TOPOLOGY_ROOT}" \
-    --metric "${TOPOLOGY_METRIC_IMAGE}" \
-    --knn_k "${K_NEIGHBORS}" \
-    --graph_reduce_method "${TOPOLOGY_GRAPH_REDUCE_METHOD}" \
-    --graph_feature_dim "${TOPOLOGY_GRAPH_FEATURE_DIM}" \
-    --num_eigs 32 \
-    --spectral_embedding_dim 32 \
-    --n_jobs "${TOPOLOGY_N_JOBS}" \
-    --knn_backend "${TOPOLOGY_KNN_BACKEND}" \
-    --mst_weight_scale "${TOPOLOGY_MST_WEIGHT_SCALE}" \
-    "${topology_extra_args[@]}" \
-    > "${RUN_LOG_DIR}/topology_image.log" 2>&1
-  stage_log "Topology graph done: modality=image"
+  if [[ -f "${IMAGE_TOPOLOGY_DIR}/summary.json" ]]; then
+    stage_log "Skip topology graph: existing image graph found at ${IMAGE_TOPOLOGY_DIR}"
+  else
+    stage_log "Topology graph start: dataset=${DATASET} modality=image"
+    python "${PROJECT_ROOT}/run_topology_graph.py" \
+      --dataset "${DATASET}" \
+      --split train \
+      --image_encoder "${BACKBONE}" \
+      --text_encoder "${TEXT_ENCODER}" \
+      --modality image \
+      --feature_cache_root "${FEATURE_CACHE_ROOT}" \
+      --output_root "${TOPOLOGY_ROOT}" \
+      --metric "${TOPOLOGY_METRIC_IMAGE}" \
+      --knn_k "${K_NEIGHBORS}" \
+      --graph_reduce_method "${TOPOLOGY_GRAPH_REDUCE_METHOD}" \
+      --graph_feature_dim "${TOPOLOGY_GRAPH_FEATURE_DIM}" \
+      --num_eigs 32 \
+      --spectral_embedding_dim 32 \
+      --n_jobs "${TOPOLOGY_N_JOBS}" \
+      --knn_backend "${TOPOLOGY_KNN_BACKEND}" \
+      --mst_weight_scale "${TOPOLOGY_MST_WEIGHT_SCALE}" \
+      "${topology_extra_args[@]}" \
+      > "${RUN_LOG_DIR}/topology_image.log" 2>&1
+    stage_log "Topology graph done: modality=image"
+  fi
 
-  stage_log "Topology graph start: dataset=${DATASET} modality=text"
-  python "${PROJECT_ROOT}/run_topology_graph.py" \
-    --dataset "${DATASET}" \
-    --split train \
-    --image_encoder "${BACKBONE}" \
-    --text_encoder "${TEXT_ENCODER}" \
-    --modality text \
-    --feature_cache_root "${FEATURE_CACHE_ROOT}" \
-    --output_root "${TOPOLOGY_ROOT}" \
-    --metric "${TOPOLOGY_METRIC_TEXT}" \
-    --knn_k "${K_NEIGHBORS}" \
-    --graph_reduce_method "${TOPOLOGY_GRAPH_REDUCE_METHOD}" \
-    --graph_feature_dim "${TOPOLOGY_GRAPH_FEATURE_DIM}" \
-    --num_eigs 32 \
-    --spectral_embedding_dim 32 \
-    --n_jobs "${TOPOLOGY_N_JOBS}" \
-    --knn_backend "${TOPOLOGY_KNN_BACKEND}" \
-    --mst_weight_scale "${TOPOLOGY_MST_WEIGHT_SCALE}" \
-    "${topology_extra_args[@]}" \
-    > "${RUN_LOG_DIR}/topology_text.log" 2>&1
-  stage_log "Topology graph done: modality=text"
+  if [[ -f "${TEXT_TOPOLOGY_DIR}/summary.json" ]]; then
+    stage_log "Skip topology graph: existing text graph found at ${TEXT_TOPOLOGY_DIR}"
+  else
+    stage_log "Topology graph start: dataset=${DATASET} modality=text"
+    python "${PROJECT_ROOT}/run_topology_graph.py" \
+      --dataset "${DATASET}" \
+      --split train \
+      --image_encoder "${BACKBONE}" \
+      --text_encoder "${TEXT_ENCODER}" \
+      --modality text \
+      --feature_cache_root "${FEATURE_CACHE_ROOT}" \
+      --output_root "${TOPOLOGY_ROOT}" \
+      --metric "${TOPOLOGY_METRIC_TEXT}" \
+      --knn_k "${K_NEIGHBORS}" \
+      --graph_reduce_method "${TOPOLOGY_GRAPH_REDUCE_METHOD}" \
+      --graph_feature_dim "${TOPOLOGY_GRAPH_FEATURE_DIM}" \
+      --num_eigs 32 \
+      --spectral_embedding_dim 32 \
+      --n_jobs "${TOPOLOGY_N_JOBS}" \
+      --knn_backend "${TOPOLOGY_KNN_BACKEND}" \
+      --mst_weight_scale "${TOPOLOGY_MST_WEIGHT_SCALE}" \
+      "${topology_extra_args[@]}" \
+      > "${RUN_LOG_DIR}/topology_text.log" 2>&1
+    stage_log "Topology graph done: modality=text"
+  fi
 
   local cross_extra_args=()
   if [[ -n "${TOPOLOGY_MULTI_SCALE_KS}" ]]; then
