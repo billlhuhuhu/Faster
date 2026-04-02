@@ -274,6 +274,7 @@ def build_lsrc_relation_graph(
     rho_img=0.5,
     rho_txt=0.5,
     eps=1e-8,
+    use_global_confidence=False,
 ):
     real_points = np.asarray(real_points, dtype=np.float32)
     num_nodes = int(real_points.shape[0])
@@ -293,10 +294,14 @@ def build_lsrc_relation_graph(
 
     image_norm = row_normalize_sparse_graph(image_graph, eps=eps).tocsr()
     text_norm = row_normalize_sparse_graph(text_graph, eps=eps).tocsr()
-    c_img = image_norm.copy()
-    c_img.data = (c_img.data * float(rho_img)).astype(np.float32)
-    c_txt = text_norm.copy()
-    c_txt.data = (c_txt.data * float(rho_txt)).astype(np.float32)
+    if bool(use_global_confidence):
+        c_img = image_norm.copy()
+        c_img.data = (c_img.data * float(rho_img)).astype(np.float32)
+        c_txt = text_norm.copy()
+        c_txt.data = (c_txt.data * float(rho_txt)).astype(np.float32)
+    else:
+        c_img = image_norm
+        c_txt = text_norm
 
     union_keys, _, _ = build_union_keys(c_img, c_txt)
     c_img_union = gather_sparse_data_on_keys(c_img, union_keys)
@@ -329,12 +334,16 @@ def build_lsrc_relation_graph(
     }
 
 
-def compute_direct_coverage(proxy_points, real_points, tau_c=1.0, batch_size=4096):
+def compute_direct_coverage(proxy_points, real_points, tau_c=1.0, batch_size=4096, coverage_mode="mean"):
     tau_c = max(float(tau_c), 1e-8)
     coverages = []
     for batch in real_points.split(int(batch_size), dim=0):
         sqdist = torch.cdist(batch, proxy_points, p=2) ** 2
         coverage = torch.exp(-sqdist / tau_c).sum(dim=1)
+        if coverage_mode == "mean":
+            coverage = coverage / max(int(proxy_points.shape[0]), 1)
+        elif coverage_mode != "sum":
+            raise ValueError(f"Unsupported LSRC coverage mode: {coverage_mode}")
         coverages.append(coverage)
     return torch.cat(coverages, dim=0) if coverages else torch.empty(0, dtype=proxy_points.dtype, device=proxy_points.device)
 
@@ -347,8 +356,16 @@ def compute_lsrc_losses(
     beta=0.5,
     eps=1e-8,
     batch_size=4096,
+    coverage_mode="mean",
+    rel_loss_mode="weight_mean",
 ):
-    coverage = compute_direct_coverage(proxy_points, real_points, tau_c=tau_c, batch_size=batch_size)
+    coverage = compute_direct_coverage(
+        proxy_points,
+        real_points,
+        tau_c=tau_c,
+        batch_size=batch_size,
+        coverage_mode=coverage_mode,
+    )
     if relation_graph is None or relation_graph["num_edges"] <= 0:
         indirect = coverage
         rel_loss = torch.tensor(0.0, dtype=proxy_points.dtype, device=proxy_points.device)
@@ -359,7 +376,13 @@ def compute_lsrc_losses(
         propagated = torch.zeros_like(coverage)
         propagated.index_add_(0, row_index, weights * coverage[col_index])
         indirect = (1.0 - float(beta)) * coverage + float(beta) * propagated
-        rel_loss = torch.mean(weights * (coverage[row_index] - coverage[col_index]) ** 2)
+        diff_sq = (coverage[row_index] - coverage[col_index]) ** 2
+        if rel_loss_mode == "weight_mean":
+            rel_loss = torch.sum(weights * diff_sq) / torch.clamp(torch.sum(weights), min=float(eps))
+        elif rel_loss_mode == "edge_mean":
+            rel_loss = torch.mean(weights * diff_sq)
+        else:
+            raise ValueError(f"Unsupported LSRC relation loss mode: {rel_loss_mode}")
 
     cov_loss = -torch.mean(torch.log(indirect + float(eps)))
     return cov_loss, rel_loss, coverage, indirect
@@ -445,6 +468,9 @@ def optimize_proxy_points(
     lsrc_batch_size=4096,
     lsrc_rho_img=0.5,
     lsrc_rho_txt=0.5,
+    lsrc_use_global_confidence=False,
+    lsrc_coverage_mode="mean",
+    lsrc_rel_loss_mode="weight_mean",
 ):
     projected_representation, projection_matrix = random_project_representation(
         representation,
@@ -469,6 +495,7 @@ def optimize_proxy_points(
             rho_img=lsrc_rho_img,
             rho_txt=lsrc_rho_txt,
             eps=lsrc_eps,
+            use_global_confidence=lsrc_use_global_confidence,
         )
     else:
         lsrc_relation_graph_np = None
@@ -590,6 +617,8 @@ def optimize_proxy_points(
                 beta=lsrc_beta,
                 eps=lsrc_eps,
                 batch_size=lsrc_batch_size,
+                coverage_mode=lsrc_coverage_mode,
+                rel_loss_mode=lsrc_rel_loss_mode,
             )
         else:
             lsrc_cov_loss = torch.tensor(0.0, dtype=proxy_points.dtype, device=torch_device)
@@ -661,6 +690,9 @@ def optimize_proxy_points(
         "lambda_lsrc_rel": float(lambda_lsrc_rel),
         "lsrc_eps": float(lsrc_eps),
         "lsrc_num_edges": int(lsrc_relation_graph["num_edges"]) if lsrc_relation_graph is not None else 0,
+        "lsrc_use_global_confidence": bool(lsrc_use_global_confidence),
+        "lsrc_coverage_mode": lsrc_coverage_mode,
+        "lsrc_rel_loss_mode": lsrc_rel_loss_mode,
         "init_method": init_info["init_method"],
         "initial_loss": float(history[0]["total_loss"]) if history else None,
         "final_loss": float(history[-1]["total_loss"]) if history else None,

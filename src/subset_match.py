@@ -750,6 +750,9 @@ def run_proxy_optimized_selection(args, representation, unified_graph):
         lsrc_batch_size=getattr(args, "lsrc_batch_size", args.proxy_target_batch_size),
         lsrc_rho_img=getattr(args, "_lsrc_rho_img", 0.5),
         lsrc_rho_txt=getattr(args, "_lsrc_rho_txt", 0.5),
+        lsrc_use_global_confidence=bool(getattr(args, "lsrc_use_global_confidence", False)),
+        lsrc_coverage_mode=getattr(args, "lsrc_coverage_mode", "mean"),
+        lsrc_rel_loss_mode=getattr(args, "lsrc_rel_loss_mode", "weight_mean"),
     )
     projected_representation = proxy_bundle["projected_representation"]
     topology_targets = build_topology_targets(unified_graph, projected_representation, hop_weight=args.topology_hop_weight)

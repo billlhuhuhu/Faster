@@ -32,6 +32,7 @@ LORS_DISABLED_WANDB="${LORS_DISABLED_WANDB:-True}"
 LORS_PIX_INIT="${LORS_PIX_INIT:-real}"
 LORS_TXT_INIT="${LORS_TXT_INIT:-real}"
 LORS_RUN_TAG="${LORS_RUN_TAG:-}"
+LORS_FORCE_REDISTILL="${LORS_FORCE_REDISTILL:-0}"
 
 IMAGE_ROOT="$(get_image_root "${LORS_DATASET}")"
 MODEL_TAG="$(sanitize_component "${LORS_IMAGE_ENCODER}")_$(sanitize_component "${LORS_TEXT_ENCODER}")"
@@ -59,22 +60,102 @@ require_checkpoint_file() {
   fi
 }
 
+normalize_checkpoint_path() {
+  local raw_path="$1"
+  if [[ -z "${raw_path}" ]]; then
+    return 1
+  fi
+  if [[ "${raw_path}" = ./* ]]; then
+    echo "${PROJECT_ROOT}/${raw_path#./}"
+  elif [[ "${raw_path}" = /* ]]; then
+    echo "${raw_path}"
+  else
+    echo "${PROJECT_ROOT}/${raw_path}"
+  fi
+}
+
+extract_checkpoint_dir_from_log() {
+  local log_path="$1"
+  if [[ ! -f "${log_path}" ]]; then
+    return 1
+  fi
+  python - "${log_path}" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+log_path = Path(sys.argv[1])
+text = log_path.read_text(encoding="utf-8", errors="ignore")
+matches = re.findall(r"Saving to (.+)", text)
+if matches:
+    print(matches[-1].strip())
+PY
+}
+
+find_existing_checkpoint_from_logs() {
+  local iteration="$1"
+  local candidate_dir
+  for candidate_dir in $(find "${EXPERIMENT_LOG_ROOT}" -maxdepth 1 -type d -name "lors_baseline_${LORS_DATASET}${RUN_TAG_SUFFIX}_*" | sort -r); do
+    if [[ "${candidate_dir}" == "${RUN_LOG_DIR}" ]]; then
+      continue
+    fi
+    local distill_log="${candidate_dir}/distill.log"
+    local saved_dir_raw
+    saved_dir_raw="$(extract_checkpoint_dir_from_log "${distill_log}" || true)"
+    if [[ -z "${saved_dir_raw}" ]]; then
+      continue
+    fi
+    local saved_dir
+    saved_dir="$(normalize_checkpoint_path "${saved_dir_raw}")"
+    local ckpt="${saved_dir}/distilled_${iteration}.pt"
+    if [[ -f "${ckpt}" ]]; then
+      echo "${ckpt}"
+      return 0
+    fi
+  done
+  return 1
+}
+
 find_latest_distilled_checkpoint() {
   local dataset="$1"
   local iteration="$2"
+  local current_log_candidate
+  current_log_candidate="$(extract_checkpoint_dir_from_log "${RUN_LOG_DIR}/distill.log" || true)"
+  if [[ -n "${current_log_candidate}" ]]; then
+    local normalized_current
+    normalized_current="$(normalize_checkpoint_path "${current_log_candidate}")"
+    if [[ -f "${normalized_current}/distilled_${iteration}.pt" ]]; then
+      echo "${normalized_current}/distilled_${iteration}.pt"
+      return 0
+    fi
+  fi
+
   local exact_candidate="${LORS_LOG_ROOT}/${dataset}/${LORS_RUN_NAME}/distilled_${iteration}.pt"
   if [[ -f "${exact_candidate}" ]]; then
     echo "${exact_candidate}"
     return 0
   fi
-  local search_root="${LORS_LOG_ROOT}/${dataset}"
-  if [[ ! -d "${search_root}" ]]; then
-    return 1
+
+  local existing_from_logs
+  existing_from_logs="$(find_existing_checkpoint_from_logs "${iteration}" || true)"
+  if [[ -n "${existing_from_logs}" ]]; then
+    echo "${existing_from_logs}"
+    return 0
   fi
-  find "${search_root}" -type f -name "distilled_${iteration}.pt" -printf '%T@ %p\n' 2>/dev/null \
-    | sort -nr \
-    | head -n 1 \
-    | cut -d' ' -f2-
+
+  local search_root
+  for search_root in "${LORS_LOG_ROOT}/${dataset}" "${PROJECT_ROOT}/logged_files/${dataset}"; do
+    if [[ ! -d "${search_root}" ]]; then
+      continue
+    fi
+    local found
+    found="$(find "${search_root}" -type f -name "distilled_${iteration}.pt" -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)"
+    if [[ -n "${found}" ]]; then
+      echo "${found}"
+      return 0
+    fi
+  done
+  return 1
 }
 
 run_buffer_stage() {
@@ -112,6 +193,16 @@ run_buffer_stage() {
 
 run_distill_stage() {
   local log_path="${RUN_LOG_DIR}/distill.log"
+  if [[ "${LORS_FORCE_REDISTILL}" != "1" ]]; then
+    local existing_ckpt
+    existing_ckpt="$(find_existing_checkpoint_from_logs "${LORS_ITERATION}" || true)"
+    if [[ -n "${existing_ckpt}" ]]; then
+      stage_log "Skip distill: existing checkpoint found at ${existing_ckpt}"
+      printf 'Reusing existing distilled checkpoint: %s\n' "${existing_ckpt}" > "${log_path}"
+      return 0
+    fi
+  fi
+
   stage_log "LoRS distill start: run_name=${LORS_RUN_NAME}"
   distill_extra_args=()
   if [[ "${LORS_NO_AUG}" == "1" ]]; then

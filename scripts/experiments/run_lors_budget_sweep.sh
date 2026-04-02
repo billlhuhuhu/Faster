@@ -29,6 +29,7 @@ LORS_MAX_START_EPOCH="${LORS_MAX_START_EPOCH:-3}"
 LORS_DISABLED_WANDB="${LORS_DISABLED_WANDB:-True}"
 LORS_NO_AUG="${LORS_NO_AUG:-1}"
 PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+LORS_FORCE_REDISTILL="${LORS_FORCE_REDISTILL:-0}"
 
 RUN_TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
 SWEEP_REPORT_DIR="${REPORT_ROOT}/lors_budget_sweep_${LORS_SWEEP_DATASET}_${RUN_TIMESTAMP}"
@@ -58,6 +59,7 @@ for budget in ${LORS_SWEEP_BUDGETS}; do
     LORS_BUFFER_ROOT="${LORS_SWEEP_BUFFER_ROOT}" \
     LORS_LOG_ROOT="${LORS_SWEEP_LOG_ROOT}" \
     LORS_FORCE_REBUILD_BUFFER="${FORCE_BUFFER_THIS_ROUND}" \
+    LORS_FORCE_REDISTILL="${LORS_FORCE_REDISTILL}" \
     LORS_RUN_TAG="${run_tag}" \
     LORS_RUN_NAME="${run_name}" \
     LORS_NUM_QUERIES="${budget}" \
@@ -79,7 +81,32 @@ for budget in ${LORS_SWEEP_BUDGETS}; do
     bash "${SCRIPT_DIR}/run_lors_baseline.sh"
 
   latest_log_dir="$(find "${EXPERIMENT_LOG_ROOT}" -maxdepth 1 -type d -name "lors_baseline_${LORS_SWEEP_DATASET}_${run_tag}_*" | sort | tail -n 1)"
-  checkpoint_path="${PROJECT_ROOT}/${LORS_SWEEP_LOG_ROOT}/${LORS_SWEEP_DATASET}/${run_name}/distilled_${LORS_ITERATION}.pt"
+  checkpoint_path="$(python - "${latest_log_dir}/distill.log" "${PROJECT_ROOT}" "${LORS_ITERATION}" "${LORS_SWEEP_LOG_ROOT}" "${LORS_SWEEP_DATASET}" "${run_name}" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+log_path = Path(sys.argv[1])
+project_root = Path(sys.argv[2])
+iteration = sys.argv[3]
+log_root = sys.argv[4]
+dataset = sys.argv[5]
+run_name = sys.argv[6]
+if log_path.exists():
+    text = log_path.read_text(encoding="utf-8", errors="ignore")
+    matches = re.findall(r"Saving to (.+)", text)
+    if matches:
+        raw_dir = matches[-1].strip()
+        save_dir = Path(raw_dir)
+        if not save_dir.is_absolute():
+            save_dir = project_root / save_dir
+        candidate = save_dir / f"distilled_{iteration}.pt"
+        if candidate.exists():
+            print(candidate)
+            raise SystemExit(0)
+print(project_root / log_root / dataset / run_name / f"distilled_{iteration}.pt")
+PY
+)"
   evaluate_log_path="${latest_log_dir}/evaluate.log"
 
   python - "${MANIFEST_TMP}" "${budget}" "${run_name}" "${latest_log_dir}" "${checkpoint_path}" "${evaluate_log_path}" <<'PY'
