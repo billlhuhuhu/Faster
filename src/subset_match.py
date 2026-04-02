@@ -10,6 +10,7 @@ from sklearn.cluster import KMeans, MiniBatchKMeans
 from sklearn.neighbors import NearestNeighbors
 
 from data.subset_dataset import save_selected_indices
+from src.graph_wavelet import build_multi_scale_wavelet_signatures, parse_wavelet_scales
 from src.proxy_optimization import l2_normalize, optimize_proxy_points
 
 
@@ -200,6 +201,72 @@ def build_topology_targets(unified_graph, representation, hop_weight=0.5):
     return l2_normalize(topology_targets.astype(np.float32))
 
 
+def summarize_numeric(values):
+    values = np.asarray(values, dtype=np.float32).reshape(-1)
+    if values.size == 0:
+        return {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0}
+    return {
+        "mean": float(np.mean(values)),
+        "std": float(np.std(values)),
+        "min": float(np.min(values)),
+        "max": float(np.max(values)),
+    }
+
+
+def build_topology_node_cost(unified_graph):
+    graph_scores = compute_graph_scores(unified_graph)
+    topo_cost = 1.0 - graph_scores.astype(np.float32)
+    return topo_cost.astype(np.float32), graph_scores.astype(np.float32)
+
+
+def resolve_wavelet_signature_bundle(proxy_bundle, unified_graph, representation, top_k=8):
+    summary = proxy_bundle.get("summary", {})
+    if not bool(summary.get("use_wavelet_multiscale", False)):
+        return None
+    scales = parse_wavelet_scales(summary.get("wavelet_scales", [1, 2, 4]))
+    history = summary.get("history", [])
+    final_history = history[-1] if history else {}
+    active_scales = final_history.get("active_scales", scales)
+    if not active_scales:
+        active_scales = scales
+    raw_weights = final_history.get("wavelet_scale_weights", {})
+    if raw_weights:
+        scale_weights = {int(scale): float(raw_weights.get(str(scale), raw_weights.get(scale, 0.0))) for scale in active_scales}
+    else:
+        default_weight = 1.0 / max(len(active_scales), 1)
+        scale_weights = {int(scale): float(default_weight) for scale in active_scales}
+
+    all_signatures = build_multi_scale_wavelet_signatures(unified_graph, representation, scales, normalize=True)
+    node_signature = np.zeros_like(next(iter(all_signatures.values())), dtype=np.float32)
+    for scale in active_scales:
+        node_signature += float(scale_weights[int(scale)]) * all_signatures[int(scale)]
+
+    proxy_points = np.asarray(proxy_bundle["proxy_points"], dtype=np.float32)
+    reference_points = np.asarray(representation, dtype=np.float32)
+    top_k = max(1, min(int(top_k), int(reference_points.shape[0])))
+    knn = NearestNeighbors(n_neighbors=top_k, metric="euclidean")
+    knn.fit(reference_points)
+    distances, indices = knn.kneighbors(proxy_points)
+    sqdist = (distances.astype(np.float32)) ** 2
+    positive = sqdist[sqdist > 0]
+    tau = float(np.median(positive)) if positive.size > 0 else 1.0
+    tau = max(tau, 1e-6)
+    logits = -sqdist / tau
+    logits = logits - np.max(logits, axis=1, keepdims=True)
+    weights = np.exp(logits).astype(np.float32)
+    weights = weights / np.maximum(np.sum(weights, axis=1, keepdims=True), 1e-12)
+    proxy_signature = np.sum(weights[..., None] * node_signature[indices], axis=1).astype(np.float32)
+
+    return {
+        "node_signature": node_signature.astype(np.float32),
+        "proxy_signature": proxy_signature.astype(np.float32),
+        "active_scales": [int(scale) for scale in active_scales],
+        "scale_weights": {str(scale): float(scale_weights[int(scale)]) for scale in active_scales},
+        "interpolation_top_k": int(top_k),
+        "interpolation_tau": float(tau),
+    }
+
+
 def compute_candidate_neighbors(representation, proxy_points, top_k):
     top_k = max(1, min(int(top_k), int(representation.shape[0])))
     knn = NearestNeighbors(n_neighbors=top_k, metric="euclidean")
@@ -211,88 +278,205 @@ def compute_candidate_neighbors(representation, proxy_points, top_k):
 def compute_proxy_sample_costs(
     proxy_points,
     candidate_points,
-    topology_points,
-    graph_scores,
-    degree_weight,
-    topology_weight,
-    geometry_weight=1.0,
+    candidate_topo_cost,
+    proxy_wavelet_signatures=None,
+    candidate_wavelet_signatures=None,
+    candidate_q=None,
+    cost_alpha_diff=1.0,
+    cost_beta_wavelet=0.25,
+    cost_gamma_topo=0.1,
+    cost_eta_lsrc=0.1,
 ):
-    geometry_cost = np.sum((proxy_points - candidate_points) ** 2, axis=-1).astype(np.float32)
-    topology_cost = np.sum((proxy_points - topology_points) ** 2, axis=-1).astype(np.float32)
+    diffusion_cost = np.sum((proxy_points - candidate_points) ** 2, axis=-1).astype(np.float32)
+    if proxy_wavelet_signatures is not None and candidate_wavelet_signatures is not None:
+        wavelet_cost = np.sum((proxy_wavelet_signatures - candidate_wavelet_signatures) ** 2, axis=-1).astype(np.float32)
+    else:
+        wavelet_cost = np.zeros_like(diffusion_cost, dtype=np.float32)
+    topology_cost = candidate_topo_cost.astype(np.float32)
+    if candidate_q is None:
+        lsrc_reward = np.zeros_like(diffusion_cost, dtype=np.float32)
+    else:
+        lsrc_reward = candidate_q.astype(np.float32)
     total_cost = (
-        float(geometry_weight) * geometry_cost
-        + float(topology_weight) * topology_cost
-        - float(degree_weight) * graph_scores.astype(np.float32)
+        float(cost_alpha_diff) * diffusion_cost
+        + float(cost_beta_wavelet) * wavelet_cost
+        + float(cost_gamma_topo) * topology_cost
+        - float(cost_eta_lsrc) * lsrc_reward
     )
-    return total_cost.astype(np.float32), geometry_cost, topology_cost
+    return total_cost.astype(np.float32), diffusion_cost, wavelet_cost, topology_cost.astype(np.float32), lsrc_reward.astype(np.float32)
 
 
-def build_degree_aware_cost_matrix(proxy_points, reference_points, unified_graph, eps=1e-8):
-    geometry_cost = np.sum((proxy_points[:, None, :] - reference_points[None, :, :]) ** 2, axis=-1).astype(np.float32)
+def build_degree_aware_cost_matrix(
+    proxy_points,
+    reference_points,
+    unified_graph,
+    topo_cost,
+    wavelet_bundle=None,
+    lsrc_confidence=None,
+    cost_alpha_diff=1.0,
+    cost_beta_wavelet=0.25,
+    cost_gamma_topo=0.1,
+    cost_eta_lsrc=0.1,
+    batch_size=64,
+    eps=1e-8,
+):
+    num_proxies = int(proxy_points.shape[0])
+    num_nodes = int(reference_points.shape[0])
+    diffusion_cost = np.empty((num_proxies, num_nodes), dtype=np.float32)
+    wavelet_cost = np.empty((num_proxies, num_nodes), dtype=np.float32)
+    topo_matrix = np.broadcast_to(np.asarray(topo_cost, dtype=np.float32)[None, :], (num_proxies, num_nodes)).copy()
+    lsrc_reward = np.broadcast_to(np.asarray(lsrc_confidence if lsrc_confidence is not None else np.zeros(num_nodes, dtype=np.float32), dtype=np.float32)[None, :], (num_proxies, num_nodes)).copy()
+
+    for start in range(0, num_proxies, int(batch_size)):
+        end = min(num_proxies, start + int(batch_size))
+        batch_proxy = proxy_points[start:end, None, :]
+        batch_candidates = reference_points[None, :, :]
+        batch_proxy_wavelet = None
+        batch_candidate_wavelet = None
+        if wavelet_bundle is not None:
+            batch_proxy_wavelet = wavelet_bundle["proxy_signature"][start:end, None, :]
+            batch_candidate_wavelet = wavelet_bundle["node_signature"][None, :, :]
+        _, batch_diff, batch_wavelet, _, _ = compute_proxy_sample_costs(
+            batch_proxy,
+            batch_candidates,
+            topo_matrix[start:end],
+            proxy_wavelet_signatures=batch_proxy_wavelet,
+            candidate_wavelet_signatures=batch_candidate_wavelet,
+            candidate_q=lsrc_reward[start:end],
+            cost_alpha_diff=cost_alpha_diff,
+            cost_beta_wavelet=cost_beta_wavelet,
+            cost_gamma_topo=cost_gamma_topo,
+            cost_eta_lsrc=cost_eta_lsrc,
+        )
+        diffusion_cost[start:end] = batch_diff
+        wavelet_cost[start:end] = batch_wavelet
+
     degree = compute_graph_degree(unified_graph, eps=eps)
-    total_cost = geometry_cost / degree[None, :]
+    total_cost = (
+        float(cost_alpha_diff) * diffusion_cost
+        + float(cost_beta_wavelet) * wavelet_cost
+        + float(cost_gamma_topo) * topo_matrix
+        - float(cost_eta_lsrc) * lsrc_reward
+    )
     return {
         "total_cost": total_cost.astype(np.float32),
-        "geometry_cost": geometry_cost.astype(np.float32),
+        "diffusion_cost": diffusion_cost.astype(np.float32),
+        "wavelet_cost": wavelet_cost.astype(np.float32),
+        "topo_cost": topo_matrix.astype(np.float32),
+        "lsrc_reward": lsrc_reward.astype(np.float32),
+        "geometry_cost": diffusion_cost.astype(np.float32),
+        "topology_cost": topo_matrix.astype(np.float32),
         "degree": degree.astype(np.float32),
+        "cost_component_stats": {
+            "total_cost": summarize_numeric(total_cost),
+            "diffusion_cost": summarize_numeric(diffusion_cost),
+            "wavelet_cost": summarize_numeric(wavelet_cost),
+            "topo_cost": summarize_numeric(topo_matrix),
+            "lsrc_reward": summarize_numeric(lsrc_reward),
+        },
     }
 
 
 def build_candidate_costs(
     proxy_points,
     representation,
-    topology_targets,
-    graph_scores,
+    topo_cost,
     candidate_indices,
-    degree_weight=0.1,
-    topology_weight=0.5,
-    geometry_weight=1.0,
+    wavelet_bundle=None,
+    lsrc_confidence=None,
+    cost_alpha_diff=1.0,
+    cost_beta_wavelet=0.25,
+    cost_gamma_topo=0.1,
+    cost_eta_lsrc=0.1,
     batch_size=128,
 ):
     num_proxies, top_k = candidate_indices.shape
     total_cost = np.empty((num_proxies, top_k), dtype=np.float32)
-    geometry_cost = np.empty((num_proxies, top_k), dtype=np.float32)
+    diffusion_cost = np.empty((num_proxies, top_k), dtype=np.float32)
+    wavelet_cost = np.empty((num_proxies, top_k), dtype=np.float32)
     topology_cost = np.empty((num_proxies, top_k), dtype=np.float32)
+    lsrc_reward = np.empty((num_proxies, top_k), dtype=np.float32)
 
     for start in range(0, num_proxies, int(batch_size)):
         end = min(num_proxies, start + int(batch_size))
         batch_candidates = candidate_indices[start:end]
         batch_proxy = proxy_points[start:end, None, :]
         batch_repr = representation[batch_candidates]
-        batch_topo = topology_targets[batch_candidates]
-        batch_graph = graph_scores[batch_candidates]
-        batch_total, batch_geom, batch_topo_cost = compute_proxy_sample_costs(
+        batch_topo_cost = topo_cost[batch_candidates]
+        batch_q = None if lsrc_confidence is None else lsrc_confidence[batch_candidates]
+        batch_proxy_wavelet = None
+        batch_candidate_wavelet = None
+        if wavelet_bundle is not None:
+            batch_proxy_wavelet = wavelet_bundle["proxy_signature"][start:end, None, :]
+            batch_candidate_wavelet = wavelet_bundle["node_signature"][batch_candidates]
+        batch_total, batch_diff, batch_wavelet, batch_topo, batch_reward = compute_proxy_sample_costs(
             batch_proxy,
             batch_repr,
-            batch_topo,
-            batch_graph,
-            degree_weight=degree_weight,
-            topology_weight=topology_weight,
-            geometry_weight=geometry_weight,
+            batch_topo_cost,
+            proxy_wavelet_signatures=batch_proxy_wavelet,
+            candidate_wavelet_signatures=batch_candidate_wavelet,
+            candidate_q=batch_q,
+            cost_alpha_diff=cost_alpha_diff,
+            cost_beta_wavelet=cost_beta_wavelet,
+            cost_gamma_topo=cost_gamma_topo,
+            cost_eta_lsrc=cost_eta_lsrc,
         )
         total_cost[start:end] = batch_total
-        geometry_cost[start:end] = batch_geom
-        topology_cost[start:end] = batch_topo_cost
+        diffusion_cost[start:end] = batch_diff
+        wavelet_cost[start:end] = batch_wavelet
+        topology_cost[start:end] = batch_topo
+        lsrc_reward[start:end] = batch_reward
 
     return {
         "total_cost": total_cost,
-        "geometry_cost": geometry_cost,
+        "diffusion_cost": diffusion_cost,
+        "wavelet_cost": wavelet_cost,
+        "topo_cost": topology_cost,
+        "lsrc_reward": lsrc_reward,
+        "geometry_cost": diffusion_cost,
         "topology_cost": topology_cost,
+        "cost_component_stats": {
+            "total_cost": summarize_numeric(total_cost),
+            "diffusion_cost": summarize_numeric(diffusion_cost),
+            "wavelet_cost": summarize_numeric(wavelet_cost),
+            "topo_cost": summarize_numeric(topology_cost),
+            "lsrc_reward": summarize_numeric(lsrc_reward),
+        },
     }
 
 
-def build_single_row_cost(proxy_point, candidate_indices, representation, topology_targets, graph_scores, degree_weight, topology_weight, geometry_weight=1.0):
+def build_single_row_cost(
+    proxy_point,
+    candidate_indices,
+    representation,
+    topo_cost,
+    wavelet_bundle=None,
+    lsrc_confidence=None,
+    cost_alpha_diff=1.0,
+    cost_beta_wavelet=0.25,
+    cost_gamma_topo=0.1,
+    cost_eta_lsrc=0.1,
+    proxy_row_idx=None,
+):
     candidate_repr = representation[candidate_indices]
-    candidate_topo = topology_targets[candidate_indices]
-    candidate_graph = graph_scores[candidate_indices]
-    total_cost, _, _ = compute_proxy_sample_costs(
+    candidate_topo = topo_cost[candidate_indices]
+    candidate_q = None if lsrc_confidence is None else lsrc_confidence[candidate_indices]
+    proxy_wavelet = None
+    candidate_wavelet = None
+    if wavelet_bundle is not None and proxy_row_idx is not None:
+        proxy_wavelet = wavelet_bundle["proxy_signature"][int(proxy_row_idx)][None, None, :]
+        candidate_wavelet = wavelet_bundle["node_signature"][candidate_indices][None, :, :]
+    total_cost, _, _, _, _ = compute_proxy_sample_costs(
         proxy_point[None, :],
         candidate_repr[None, :, :],
-        candidate_topo[None, :, :],
-        candidate_graph[None, :],
-        degree_weight=degree_weight,
-        topology_weight=topology_weight,
-        geometry_weight=geometry_weight,
+        candidate_topo[None, :],
+        proxy_wavelet_signatures=proxy_wavelet,
+        candidate_wavelet_signatures=candidate_wavelet,
+        candidate_q=None if candidate_q is None else candidate_q[None, :],
+        cost_alpha_diff=cost_alpha_diff,
+        cost_beta_wavelet=cost_beta_wavelet,
+        cost_gamma_topo=cost_gamma_topo,
+        cost_eta_lsrc=cost_eta_lsrc,
     )
     return total_cost.reshape(-1)
 
@@ -302,11 +486,13 @@ def resolve_duplicate_assignments(
     candidate_indices,
     candidate_costs,
     representation,
-    topology_targets,
-    graph_scores,
-    degree_weight=0.1,
-    topology_weight=0.5,
-    geometry_weight=1.0,
+    topo_cost,
+    wavelet_bundle=None,
+    lsrc_confidence=None,
+    cost_alpha_diff=1.0,
+    cost_beta_wavelet=0.25,
+    cost_gamma_topo=0.1,
+    cost_eta_lsrc=0.1,
 ):
     num_proxies = candidate_indices.shape[0]
     selected = candidate_indices[np.arange(num_proxies), np.argmin(candidate_costs, axis=1)].astype(np.int64)
@@ -356,15 +542,18 @@ def resolve_duplicate_assignments(
                 missing_candidates = local_candidates[missing_cols]
                 extra_cost = build_single_row_cost(
                     proxy_points[proxy_row],
-                    missing_candidates,
-                    representation,
-                    topology_targets,
-                    graph_scores,
-                    degree_weight=degree_weight,
-                    topology_weight=topology_weight,
-                    geometry_weight=geometry_weight,
-                )
-                local_cost[local_row, missing_cols] = extra_cost
+                missing_candidates,
+                representation,
+                topo_cost,
+                wavelet_bundle=wavelet_bundle,
+                lsrc_confidence=lsrc_confidence,
+                cost_alpha_diff=cost_alpha_diff,
+                cost_beta_wavelet=cost_beta_wavelet,
+                cost_gamma_topo=cost_gamma_topo,
+                cost_eta_lsrc=cost_eta_lsrc,
+                proxy_row_idx=proxy_row,
+            )
+            local_cost[local_row, missing_cols] = extra_cost
 
         row_ind, col_ind = linear_sum_assignment(local_cost)
         for row_offset, col_offset in zip(row_ind.tolist(), col_ind.tolist()):
@@ -386,11 +575,13 @@ def run_hungarian_matching(
     candidate_indices,
     candidate_costs,
     representation,
-    topology_targets,
-    graph_scores,
-    degree_weight=0.1,
-    topology_weight=0.5,
-    geometry_weight=1.0,
+    topo_cost,
+    wavelet_bundle=None,
+    lsrc_confidence=None,
+    cost_alpha_diff=1.0,
+    cost_beta_wavelet=0.25,
+    cost_gamma_topo=0.1,
+    cost_eta_lsrc=0.1,
 ):
     num_proxies = int(candidate_indices.shape[0])
     unique_candidates = np.unique(candidate_indices.reshape(-1)).astype(np.int64)
@@ -400,11 +591,13 @@ def run_hungarian_matching(
             candidate_indices,
             candidate_costs,
             representation,
-            topology_targets,
-            graph_scores,
-            degree_weight=degree_weight,
-            topology_weight=topology_weight,
-            geometry_weight=geometry_weight,
+            topo_cost,
+            wavelet_bundle=wavelet_bundle,
+            lsrc_confidence=lsrc_confidence,
+            cost_alpha_diff=cost_alpha_diff,
+            cost_beta_wavelet=cost_beta_wavelet,
+            cost_gamma_topo=cost_gamma_topo,
+            cost_eta_lsrc=cost_eta_lsrc,
         )
         return {
             "selected_indices": fallback_selected,
@@ -463,18 +656,26 @@ def run_proxy_matching(
     topology_weight=0.5,
     geometry_weight=1.0,
     candidate_batch_size=128,
+    wavelet_bundle=None,
+    lsrc_confidence=None,
+    cost_alpha_diff=1.0,
+    cost_beta_wavelet=0.25,
+    cost_gamma_topo=0.1,
+    cost_eta_lsrc=0.1,
 ):
-    graph_scores = compute_graph_scores(unified_graph)
+    topo_cost, graph_scores = build_topology_node_cost(unified_graph)
     _, candidate_indices = compute_candidate_neighbors(representation, proxy_points, top_k=matching_top_k)
     cost_bundle = build_candidate_costs(
         proxy_points,
         representation,
-        topology_targets,
-        graph_scores,
+        topo_cost,
         candidate_indices,
-        degree_weight=degree_weight,
-        topology_weight=topology_weight,
-        geometry_weight=geometry_weight,
+        wavelet_bundle=wavelet_bundle,
+        lsrc_confidence=lsrc_confidence,
+        cost_alpha_diff=cost_alpha_diff,
+        cost_beta_wavelet=cost_beta_wavelet,
+        cost_gamma_topo=cost_gamma_topo,
+        cost_eta_lsrc=cost_eta_lsrc,
         batch_size=candidate_batch_size,
     )
     match_outputs = run_hungarian_matching(
@@ -482,38 +683,90 @@ def run_proxy_matching(
         candidate_indices,
         cost_bundle["total_cost"],
         representation,
-        topology_targets,
-        graph_scores,
-        degree_weight=degree_weight,
-        topology_weight=topology_weight,
-        geometry_weight=geometry_weight,
+        topo_cost,
+        wavelet_bundle=wavelet_bundle,
+        lsrc_confidence=lsrc_confidence,
+        cost_alpha_diff=cost_alpha_diff,
+        cost_beta_wavelet=cost_beta_wavelet,
+        cost_gamma_topo=cost_gamma_topo,
+        cost_eta_lsrc=cost_eta_lsrc,
     )
+    selected_indices = match_outputs["selected_indices"]
+    selected_q = np.asarray(lsrc_confidence, dtype=np.float32)[np.asarray(selected_indices, dtype=np.int64)] if lsrc_confidence is not None else np.zeros(len(selected_indices), dtype=np.float32)
+    selected_topo = topo_cost[np.asarray(selected_indices, dtype=np.int64)]
     return {
-        "selected_indices": match_outputs["selected_indices"],
+        "selected_indices": selected_indices,
         "graph_scores": graph_scores,
         "candidate_indices": candidate_indices,
         "cost_bundle": cost_bundle,
         "matching_debug": {
             **match_outputs["diagnostics"],
             "assignment_mode": match_outputs["assignment_mode"],
+            "cost_component_stats": cost_bundle.get("cost_component_stats", {}),
+            "selected_q_stats": summarize_numeric(selected_q),
+            "selected_topo_cost_stats": summarize_numeric(selected_topo),
+            "selected_graph_score_stats": summarize_numeric(graph_scores[np.asarray(selected_indices, dtype=np.int64)]),
+            "cost_weights": {
+                "alpha_diff": float(cost_alpha_diff),
+                "beta_wavelet": float(cost_beta_wavelet),
+                "gamma_topo": float(cost_gamma_topo),
+                "eta_lsrc": float(cost_eta_lsrc),
+            },
+            "wavelet_active_scales": [] if wavelet_bundle is None else list(wavelet_bundle.get("active_scales", [])),
         },
     }
 
 
-def run_degree_aware_global_matching(proxy_points, reference_points, unified_graph):
-    cost_bundle = build_degree_aware_cost_matrix(proxy_points, reference_points, unified_graph)
+def run_degree_aware_global_matching(
+    proxy_points,
+    reference_points,
+    unified_graph,
+    wavelet_bundle=None,
+    lsrc_confidence=None,
+    cost_alpha_diff=1.0,
+    cost_beta_wavelet=0.25,
+    cost_gamma_topo=0.1,
+    cost_eta_lsrc=0.1,
+):
+    topo_cost, graph_scores = build_topology_node_cost(unified_graph)
+    cost_bundle = build_degree_aware_cost_matrix(
+        proxy_points,
+        reference_points,
+        unified_graph,
+        topo_cost=topo_cost,
+        wavelet_bundle=wavelet_bundle,
+        lsrc_confidence=lsrc_confidence,
+        cost_alpha_diff=cost_alpha_diff,
+        cost_beta_wavelet=cost_beta_wavelet,
+        cost_gamma_topo=cost_gamma_topo,
+        cost_eta_lsrc=cost_eta_lsrc,
+    )
     row_ind, col_ind = linear_sum_assignment(cost_bundle["total_cost"])
     selected_indices = np.full(proxy_points.shape[0], -1, dtype=np.int64)
     selected_indices[row_ind] = col_ind
+    selected_q = np.asarray(lsrc_confidence, dtype=np.float32)[selected_indices] if lsrc_confidence is not None else np.zeros(len(selected_indices), dtype=np.float32)
+    selected_topo = topo_cost[selected_indices]
     return {
         "selected_indices": selected_indices.astype(np.int64).tolist(),
         "candidate_indices": None,
         "cost_bundle": cost_bundle,
+        "graph_scores": graph_scores,
         "matching_debug": {
             "assignment_mode": "global_degree_aware_hungarian",
             "duplicate_resolution_rounds": 0,
             "local_hungarian_calls": 0,
             "hungarian_rows": int(len(row_ind)),
+            "cost_component_stats": cost_bundle.get("cost_component_stats", {}),
+            "selected_q_stats": summarize_numeric(selected_q),
+            "selected_topo_cost_stats": summarize_numeric(selected_topo),
+            "selected_graph_score_stats": summarize_numeric(graph_scores[selected_indices]),
+            "cost_weights": {
+                "alpha_diff": float(cost_alpha_diff),
+                "beta_wavelet": float(cost_beta_wavelet),
+                "gamma_topo": float(cost_gamma_topo),
+                "eta_lsrc": float(cost_eta_lsrc),
+            },
+            "wavelet_active_scales": [] if wavelet_bundle is None else list(wavelet_bundle.get("active_scales", [])),
         },
     }
 
@@ -625,13 +878,24 @@ def save_selection_outputs(
             torch.save(torch.tensor(proxy_bundle["projection_matrix"], dtype=torch.float32), projection_path)
             saved_paths["projection_matrix"] = str(projection_path)
 
-        frequency_path = output_dir / "frequency_points.pt"
-        torch.save(torch.tensor(proxy_bundle["frequencies"], dtype=torch.float32), frequency_path)
-        saved_paths["frequency_points"] = str(frequency_path)
+        if proxy_bundle.get("frequencies") is not None:
+            frequency_path = output_dir / "frequency_points.pt"
+            torch.save(torch.tensor(proxy_bundle["frequencies"], dtype=torch.float32), frequency_path)
+            saved_paths["frequency_points"] = str(frequency_path)
         if proxy_bundle.get("initial_frequencies") is not None:
             initial_frequency_path = output_dir / "initial_frequency_points.pt"
             torch.save(torch.tensor(proxy_bundle["initial_frequencies"], dtype=torch.float32), initial_frequency_path)
             saved_paths["initial_frequency_points"] = str(initial_frequency_path)
+        if proxy_bundle.get("lsrc_outputs") is not None:
+            lsrc_direct_path = output_dir / "lsrc_coverage_direct.pt"
+            lsrc_relational_path = output_dir / "lsrc_coverage_relational.pt"
+            lsrc_q_path = output_dir / "lsrc_confidence_q.pt"
+            torch.save(torch.tensor(proxy_bundle["lsrc_outputs"]["coverage_direct"], dtype=torch.float32), lsrc_direct_path)
+            torch.save(torch.tensor(proxy_bundle["lsrc_outputs"]["coverage_relational"], dtype=torch.float32), lsrc_relational_path)
+            torch.save(torch.tensor(proxy_bundle["lsrc_outputs"]["confidence_q"], dtype=torch.float32), lsrc_q_path)
+            saved_paths["lsrc_coverage_direct"] = str(lsrc_direct_path)
+            saved_paths["lsrc_coverage_relational"] = str(lsrc_relational_path)
+            saved_paths["lsrc_confidence_q"] = str(lsrc_q_path)
 
     if matching_bundle is not None:
         matching_cost_path = output_dir / "matching_cost.pt"
@@ -641,6 +905,14 @@ def save_selection_outputs(
         }
         if matching_bundle.get("candidate_indices") is not None:
             payload["candidate_indices"] = torch.tensor(matching_bundle["candidate_indices"], dtype=torch.long)
+        if "diffusion_cost" in matching_bundle["cost_bundle"]:
+            payload["diffusion_cost"] = torch.tensor(matching_bundle["cost_bundle"]["diffusion_cost"], dtype=torch.float32)
+        if "wavelet_cost" in matching_bundle["cost_bundle"]:
+            payload["wavelet_cost"] = torch.tensor(matching_bundle["cost_bundle"]["wavelet_cost"], dtype=torch.float32)
+        if "topo_cost" in matching_bundle["cost_bundle"]:
+            payload["topo_cost"] = torch.tensor(matching_bundle["cost_bundle"]["topo_cost"], dtype=torch.float32)
+        if "lsrc_reward" in matching_bundle["cost_bundle"]:
+            payload["lsrc_reward"] = torch.tensor(matching_bundle["cost_bundle"]["lsrc_reward"], dtype=torch.float32)
         if "geometry_cost" in matching_bundle["cost_bundle"]:
             payload["geometry_cost"] = torch.tensor(matching_bundle["cost_bundle"]["geometry_cost"], dtype=torch.float32)
         if "topology_cost" in matching_bundle["cost_bundle"]:
@@ -694,19 +966,36 @@ def run_proxy_optimized_selection(args, representation, unified_graph):
         budget_ratio=getattr(args, "budget_ratio", None),
         budget_size=getattr(args, "budget_size", None),
     )
+    proxy_loss_type = str(
+        getattr(
+            args,
+            "proxy_loss_type",
+            "pdcfd" if str(getattr(args, "proxy_objective_mode", "pd_cfd")).lower() == "pd_cfd" else getattr(args, "proxy_objective_mode", "cfd"),
+        )
+    ).lower()
     reference_embedding = build_reference_embedding(
         representation,
         spectral_embedding=getattr(args, "_spectral_embedding", None),
         mode=getattr(args, "reference_embedding_mode", "hybrid"),
         spectral_weight=getattr(args, "spectral_weight", 1.0),
     )
+    optimization_embedding = reference_embedding
+    if proxy_loss_type == "diffusion_mmd":
+        optimization_embedding = getattr(args, "_spectral_embedding", None)
+        if optimization_embedding is None:
+            raise ValueError("diffusion_mmd requires unified spectral embedding, but none was found in cross-modal artifacts.")
+        if str(getattr(args, "_embedding_type", "laplacian")) != "diffusion":
+            raise ValueError(
+                "diffusion_mmd requires diffusion embedding artifacts. "
+                f"Current cross-modal embedding_type={getattr(args, '_embedding_type', 'unknown')}."
+            )
     graph_reference = build_topology_targets(
         unified_graph,
-        reference_embedding,
+        optimization_embedding,
         hop_weight=args.topology_hop_weight,
     )
     proxy_bundle = optimize_proxy_points(
-        reference_embedding,
+        optimization_embedding,
         subset_size=subset_size,
         device=args.device,
         projection_dim=args.proxy_projection_dim,
@@ -720,6 +1009,7 @@ def run_proxy_optimized_selection(args, representation, unified_graph):
         reg_weight=args.proxy_reg_weight,
         target_batch_size=args.proxy_target_batch_size,
         proxy_batch_size=args.proxy_batch_size,
+        proxy_loss_type=proxy_loss_type,
         objective_mode=getattr(args, "proxy_objective_mode", "pd_cfd"),
         use_pdas=bool(getattr(args, "use_pdas", False)),
         pdas_num_stages=getattr(args, "pdas_num_stages", 4),
@@ -734,7 +1024,7 @@ def run_proxy_optimized_selection(args, representation, unified_graph):
         tau_max=getattr(args, "tau_max", None),
         diversity_sigma=getattr(args, "diversity_sigma", 1.0),
         phase_weight_mode=getattr(args, "phase_weight_mode", "uniform"),
-        match_reference=reference_embedding,
+        match_reference=optimization_embedding,
         graph_reference=graph_reference,
         enable_lsrc=bool(getattr(args, "enable_lsrc", False)),
         lsrc_image_graph=getattr(args, "_lsrc_image_graph", None),
@@ -753,9 +1043,34 @@ def run_proxy_optimized_selection(args, representation, unified_graph):
         lsrc_use_global_confidence=bool(getattr(args, "lsrc_use_global_confidence", False)),
         lsrc_coverage_mode=getattr(args, "lsrc_coverage_mode", "mean"),
         lsrc_rel_loss_mode=getattr(args, "lsrc_rel_loss_mode", "weight_mean"),
+        mmd_kernel=getattr(args, "mmd_kernel", "rbf"),
+        mmd_bandwidth=getattr(args, "mmd_bandwidth", None),
+        mmd_use_median_heuristic=bool(getattr(args, "mmd_use_median_heuristic", True)),
+        use_wavelet_multiscale=bool(getattr(args, "use_wavelet_multiscale", False)),
+        wavelet_graph=unified_graph,
+        wavelet_scales=getattr(args, "wavelet_scales", None),
+        wavelet_loss_weight=getattr(args, "wavelet_loss_weight", 0.0),
+        wavelet_distance_type=getattr(args, "wavelet_distance_type", "mmd"),
+        wavelet_schedule=getattr(args, "wavelet_schedule", "coarse_to_fine"),
+        lambda_diff=getattr(args, "lambda_diff", 1.0),
+        lambda_ms=getattr(args, "lambda_ms", None),
+        lambda_lsrc=getattr(args, "lambda_lsrc", None),
+        lsrc_mu=getattr(args, "lsrc_mu", 1.0),
+        lambda_reg=getattr(args, "lambda_reg", 1.0),
+        reg_alpha_div=getattr(args, "reg_alpha_div", 1.0),
+        reg_beta_topo=getattr(args, "reg_beta_topo", 1.0),
+        reg_gamma_init=getattr(args, "reg_gamma_init", 1.0),
     )
     projected_representation = proxy_bundle["projected_representation"]
     topology_targets = build_topology_targets(unified_graph, projected_representation, hop_weight=args.topology_hop_weight)
+    wavelet_bundle = resolve_wavelet_signature_bundle(proxy_bundle, unified_graph, projected_representation)
+    lsrc_confidence_q = None
+    if proxy_bundle.get("lsrc_outputs") is not None:
+        lsrc_confidence_q = np.asarray(proxy_bundle["lsrc_outputs"]["confidence_q"], dtype=np.float32)
+    cost_alpha_diff = float(getattr(args, "cost_alpha_diff", 1.0))
+    cost_beta_wavelet = float(getattr(args, "cost_beta_wavelet", 0.25))
+    cost_gamma_topo = float(getattr(args, "cost_gamma_topo", 0.1))
+    cost_eta_lsrc = float(getattr(args, "cost_eta_lsrc", 0.1))
     matching_bundle = run_proxy_matching(
         proxy_bundle["proxy_points"],
         projected_representation,
@@ -766,12 +1081,24 @@ def run_proxy_optimized_selection(args, representation, unified_graph):
         topology_weight=args.topology_weight,
         geometry_weight=getattr(args, "geometry_weight", 1.0),
         candidate_batch_size=args.matching_candidate_batch_size,
+        wavelet_bundle=wavelet_bundle,
+        lsrc_confidence=lsrc_confidence_q,
+        cost_alpha_diff=cost_alpha_diff,
+        cost_beta_wavelet=cost_beta_wavelet,
+        cost_gamma_topo=cost_gamma_topo,
+        cost_eta_lsrc=cost_eta_lsrc,
     )
     if getattr(args, "matching_cost_mode", "candidate_topk") == "degree_aware_global":
         matching_bundle = run_degree_aware_global_matching(
             proxy_bundle["proxy_points"],
             projected_representation,
             unified_graph,
+            wavelet_bundle=wavelet_bundle,
+            lsrc_confidence=lsrc_confidence_q,
+            cost_alpha_diff=cost_alpha_diff,
+            cost_beta_wavelet=cost_beta_wavelet,
+            cost_gamma_topo=cost_gamma_topo,
+            cost_eta_lsrc=cost_eta_lsrc,
         )
 
     match_loss = compute_match_loss(
@@ -799,6 +1126,7 @@ def run_proxy_optimized_selection(args, representation, unified_graph):
             "proxy_num_frequencies": int(args.proxy_num_frequencies),
             "proxy_lr": float(args.proxy_lr),
             "proxy_reg_weight": float(args.proxy_reg_weight),
+            "proxy_loss_type": getattr(args, "proxy_loss_type", None),
             "proxy_objective_mode": getattr(args, "proxy_objective_mode", "pd_cfd"),
             "reference_embedding_mode": getattr(args, "reference_embedding_mode", "hybrid"),
             "enable_lsrc": bool(getattr(args, "enable_lsrc", False)),
@@ -838,6 +1166,7 @@ def run_subset_selection(args):
 
     representation = build_unified_representation(img_features, txt_features, mode=args.representation_mode)
     args._spectral_embedding = spectral_embedding
+    args._embedding_type = str(cross_modal_summary.get("embedding_type", "laplacian"))
     args._lsrc_image_graph = lsrc_image_graph
     args._lsrc_text_graph = lsrc_text_graph
     args._lsrc_rho_img = float(cross_modal_summary.get("rho_img", 0.5))

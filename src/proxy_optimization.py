@@ -5,6 +5,8 @@ import torch
 from sklearn.cluster import KMeans, MiniBatchKMeans
 from sklearn.neighbors import NearestNeighbors
 
+from src.graph_wavelet import build_multi_scale_wavelet_signatures, parse_wavelet_scales, resolve_active_scales
+
 
 def l2_normalize(features, eps=1e-12):
     if isinstance(features, np.ndarray):
@@ -213,6 +215,75 @@ def build_rbf_kernel(points, sigma=1.0):
     return torch.exp(-sqdist / (2.0 * sigma * sigma))
 
 
+def infer_mmd_bandwidth(x, y, eps=1e-8, max_points=1024):
+    x = x.detach()
+    y = y.detach()
+    max_points = max(2, int(max_points))
+    if x.shape[0] > max_points:
+        x = x[torch.randperm(x.shape[0], device=x.device)[:max_points]]
+    if y.shape[0] > max_points:
+        y = y[torch.randperm(y.shape[0], device=y.device)[:max_points]]
+    combined = torch.cat([x, y], dim=0)
+    if combined.shape[0] <= 1:
+        return float(1.0)
+    sqdist = torch.cdist(combined, combined, p=2) ** 2
+    mask = sqdist > float(eps)
+    if not torch.any(mask):
+        return float(1.0)
+    median_sqdist = torch.median(sqdist[mask]).detach().cpu().item()
+    bandwidth = math.sqrt(max(float(median_sqdist), float(eps)) / 2.0)
+    return float(max(bandwidth, 1e-6))
+
+
+def rbf_kernel_between(x, y, sigma):
+    sigma = max(float(sigma), 1e-6)
+    sqdist = torch.cdist(x, y, p=2) ** 2
+    return torch.exp(-sqdist / (2.0 * sigma * sigma))
+
+
+def diffusion_mmd_loss(
+    proxy_points,
+    target_samples,
+    kernel="rbf",
+    bandwidth=None,
+    use_median_heuristic=True,
+    eps=1e-8,
+):
+    if kernel != "rbf":
+        raise ValueError(f"Unsupported MMD kernel: {kernel}")
+    if bandwidth is None and use_median_heuristic:
+        bandwidth = infer_mmd_bandwidth(proxy_points, target_samples, eps=eps)
+    bandwidth = 1.0 if bandwidth is None else float(max(bandwidth, eps))
+
+    k_xx = rbf_kernel_between(proxy_points, proxy_points, sigma=bandwidth)
+    k_yy = rbf_kernel_between(target_samples, target_samples, sigma=bandwidth)
+    k_xy = rbf_kernel_between(proxy_points, target_samples, sigma=bandwidth)
+
+    m = max(int(proxy_points.shape[0]), 1)
+    n = max(int(target_samples.shape[0]), 1)
+    mean_xx = torch.sum(k_xx) / float(m * m)
+    mean_yy = torch.sum(k_yy) / float(n * n)
+    mean_xy = torch.sum(k_xy) / float(m * n)
+    return mean_xx + mean_yy - 2.0 * mean_xy
+
+
+def maybe_subsample_points(points, batch_size):
+    if batch_size is None:
+        return points
+    batch_size = int(batch_size)
+    if batch_size <= 0 or points.shape[0] <= batch_size:
+        return points
+    indices = torch.randperm(points.shape[0], device=points.device)[:batch_size]
+    return points[indices]
+
+
+def interpolate_proxy_wavelet_signature(proxy_points, anchor_points, anchor_signatures, tau):
+    tau = max(float(tau), 1e-8)
+    sqdist = torch.cdist(proxy_points, anchor_points, p=2) ** 2
+    weights = torch.softmax(-sqdist / tau, dim=1)
+    return weights @ anchor_signatures
+
+
 def dpp_diversity_loss(proxy_points, kernel="rbf", sigma=1.0, eps=1e-6):
     if kernel != "rbf":
         raise ValueError(f"Unsupported diversity kernel: {kernel}")
@@ -275,6 +346,7 @@ def build_lsrc_relation_graph(
     rho_txt=0.5,
     eps=1e-8,
     use_global_confidence=False,
+    distance_scale=1.0,
 ):
     real_points = np.asarray(real_points, dtype=np.float32)
     num_nodes = int(real_points.shape[0])
@@ -290,7 +362,8 @@ def build_lsrc_relation_graph(
     rows = np.repeat(np.arange(num_nodes, dtype=np.int64), indices.shape[1])
     cols = indices.reshape(-1).astype(np.int64)
     sqdist = (distances.reshape(-1).astype(np.float32)) ** 2
-    g = np.exp(-sqdist / max(float(tau_r), float(eps))).astype(np.float32)
+    sigma = max(float(tau_r) * float(distance_scale), float(eps))
+    g = np.exp(-sqdist / (sigma * sigma)).astype(np.float32)
 
     image_norm = row_normalize_sparse_graph(image_graph, eps=eps).tocsr()
     text_norm = row_normalize_sparse_graph(text_graph, eps=eps).tocsr()
@@ -331,6 +404,7 @@ def build_lsrc_relation_graph(
         "weights": normalized_weights[keep_mask].astype(np.float32),
         "num_edges": int(np.sum(keep_mask)),
         "num_nodes": int(num_nodes),
+        "distance_scale": float(distance_scale),
     }
 
 
@@ -388,6 +462,66 @@ def compute_lsrc_losses(
     return cov_loss, rel_loss, coverage, indirect
 
 
+def compute_multiscale_lsrc_outputs(
+    proxy_points,
+    real_points,
+    relation_graphs,
+    active_scales,
+    scale_weights,
+    tau_c=1.0,
+    beta=0.5,
+    eps=1e-8,
+    batch_size=4096,
+    coverage_mode="mean",
+    rel_loss_mode="weight_mean",
+):
+    aggregated_cov_loss = torch.tensor(0.0, dtype=proxy_points.dtype, device=proxy_points.device)
+    aggregated_rel_loss = torch.tensor(0.0, dtype=proxy_points.dtype, device=proxy_points.device)
+    aggregated_coverage = None
+    aggregated_indirect = None
+    per_scale = {}
+
+    for scale in active_scales:
+        relation_graph = relation_graphs[int(scale)]
+        cov_loss, rel_loss, coverage, indirect = compute_lsrc_losses(
+            proxy_points,
+            real_points,
+            relation_graph,
+            tau_c=tau_c,
+            beta=beta,
+            eps=eps,
+            batch_size=batch_size,
+            coverage_mode=coverage_mode,
+            rel_loss_mode=rel_loss_mode,
+        )
+        weight = float(scale_weights[int(scale)])
+        aggregated_cov_loss = aggregated_cov_loss + weight * cov_loss
+        aggregated_rel_loss = aggregated_rel_loss + weight * rel_loss
+        if aggregated_coverage is None:
+            aggregated_coverage = weight * coverage
+            aggregated_indirect = weight * indirect
+        else:
+            aggregated_coverage = aggregated_coverage + weight * coverage
+            aggregated_indirect = aggregated_indirect + weight * indirect
+        per_scale[int(scale)] = {
+            "cov_loss": float(cov_loss.detach().cpu().item()),
+            "rel_loss": float(rel_loss.detach().cpu().item()),
+            "weight": weight,
+        }
+
+    if aggregated_coverage is None:
+        aggregated_coverage = torch.zeros(real_points.shape[0], dtype=proxy_points.dtype, device=proxy_points.device)
+        aggregated_indirect = torch.zeros_like(aggregated_coverage)
+    return {
+        "loss_lsrc_cov": aggregated_cov_loss,
+        "loss_lsrc_rel": aggregated_rel_loss,
+        "coverage_direct": aggregated_coverage,
+        "coverage_relational": aggregated_indirect,
+        "confidence_q": aggregated_indirect,
+        "per_scale": per_scale,
+    }
+
+
 def discrepancy_score(proxy_points, target_samples, frequencies, batch_size=4096):
     with torch.no_grad():
         proxy_real, proxy_imag = compute_characteristic_function(proxy_points, frequencies, batch_size=batch_size)
@@ -437,6 +571,7 @@ def optimize_proxy_points(
     reg_weight=1e-2,
     target_batch_size=4096,
     proxy_batch_size=4096,
+    proxy_loss_type="diffusion_mmd",
     objective_mode="cfd",
     use_pdas=False,
     pdas_num_stages=4,
@@ -471,7 +606,44 @@ def optimize_proxy_points(
     lsrc_use_global_confidence=False,
     lsrc_coverage_mode="mean",
     lsrc_rel_loss_mode="weight_mean",
+    mmd_kernel="rbf",
+    mmd_bandwidth=None,
+    mmd_use_median_heuristic=True,
+    use_wavelet_multiscale=False,
+    wavelet_graph=None,
+    wavelet_scales=None,
+    wavelet_loss_weight=0.0,
+    wavelet_distance_type="mmd",
+    wavelet_schedule="coarse_to_fine",
+    lambda_diff=1.0,
+    lambda_ms=None,
+    lambda_lsrc=None,
+    lsrc_mu=1.0,
+    lambda_reg=1.0,
+    reg_alpha_div=1.0,
+    reg_beta_topo=1.0,
+    reg_gamma_init=1.0,
 ):
+    active_loss_type = str(proxy_loss_type or "").strip().lower()
+    if not active_loss_type:
+        active_loss_type = "pdcfd" if str(objective_mode or "pd_cfd").lower() == "pd_cfd" else str(objective_mode).lower()
+    if active_loss_type == "pd_cfd":
+        active_loss_type = "pdcfd"
+    if active_loss_type not in {"diffusion_mmd", "pdcfd", "cfd"}:
+        raise ValueError(f"Unsupported proxy loss type: {active_loss_type}")
+    if bool(use_wavelet_multiscale) and active_loss_type != "diffusion_mmd":
+        raise ValueError("Graph wavelet multiscale loss currently requires proxy_loss_type=diffusion_mmd.")
+
+    lambda_diff = float(lambda_diff)
+    lambda_ms_effective = float(wavelet_loss_weight if lambda_ms is None else lambda_ms)
+    lambda_reg = float(lambda_reg)
+    reg_alpha_div = float(reg_alpha_div)
+    reg_beta_topo = float(reg_beta_topo)
+    reg_gamma_init = float(reg_gamma_init)
+    legacy_lsrc_weight_mode = lambda_lsrc is None
+    lambda_lsrc_effective = 1.0 if legacy_lsrc_weight_mode else float(lambda_lsrc)
+    lsrc_mu_effective = float(lsrc_mu)
+
     projected_representation, projection_matrix = random_project_representation(
         representation,
         projection_dim=projection_dim,
@@ -481,24 +653,44 @@ def optimize_proxy_points(
     projected_match_reference = project_reference_points(match_reference, projection_matrix)
     projected_graph_reference = project_reference_points(graph_reference, projection_matrix)
     lsrc_reference = projected_representation.astype(np.float32)
+    wavelet_graph_signatures = None
+    wavelet_scales = parse_wavelet_scales(wavelet_scales)
     lsrc_relation_graph = None
+    lsrc_relation_graphs = None
     if bool(enable_lsrc):
         if lsrc_image_graph is None or lsrc_text_graph is None:
             raise ValueError("LSRC is enabled but image/text graphs were not provided.")
-        lsrc_relation_graph_np = build_lsrc_relation_graph(
-            lsrc_reference,
-            lsrc_image_graph,
-            lsrc_text_graph,
-            k=lsrc_k,
-            tau_r=lsrc_tau_r,
-            eta=lsrc_eta,
-            rho_img=lsrc_rho_img,
-            rho_txt=lsrc_rho_txt,
-            eps=lsrc_eps,
-            use_global_confidence=lsrc_use_global_confidence,
-        )
+        lsrc_scale_list = wavelet_scales if bool(use_wavelet_multiscale) else [1]
+        lsrc_relation_graph_np = {
+            int(scale): build_lsrc_relation_graph(
+                lsrc_reference,
+                lsrc_image_graph,
+                lsrc_text_graph,
+                k=lsrc_k,
+                tau_r=lsrc_tau_r,
+                eta=lsrc_eta,
+                rho_img=lsrc_rho_img,
+                rho_txt=lsrc_rho_txt,
+                eps=lsrc_eps,
+                use_global_confidence=lsrc_use_global_confidence,
+                distance_scale=float(scale),
+            )
+            for scale in lsrc_scale_list
+        }
     else:
         lsrc_relation_graph_np = None
+
+    if bool(use_wavelet_multiscale):
+        if wavelet_graph is None:
+            raise ValueError("Wavelet multiscale loss is enabled but unified graph was not provided.")
+        if wavelet_distance_type != "mmd":
+            raise ValueError(f"Unsupported wavelet distance type: {wavelet_distance_type}")
+        wavelet_graph_signatures = build_multi_scale_wavelet_signatures(
+            wavelet_graph,
+            projected_representation,
+            wavelet_scales,
+            normalize=True,
+        )
 
     init_points, init_info = initialize_proxy_points(
         projected_representation,
@@ -511,13 +703,18 @@ def optimize_proxy_points(
     torch_device = torch.device(device)
     full_repr = torch.tensor(projected_representation, dtype=torch.float32, device=torch_device)
     if lsrc_relation_graph_np is not None:
-        lsrc_relation_graph = {
-            "row_index": torch.tensor(lsrc_relation_graph_np["row_index"], dtype=torch.long, device=torch_device),
-            "col_index": torch.tensor(lsrc_relation_graph_np["col_index"], dtype=torch.long, device=torch_device),
-            "weights": torch.tensor(lsrc_relation_graph_np["weights"], dtype=torch.float32, device=torch_device),
-            "num_edges": int(lsrc_relation_graph_np["num_edges"]),
-            "num_nodes": int(lsrc_relation_graph_np["num_nodes"]),
+        lsrc_relation_graphs = {
+            int(scale): {
+                "row_index": torch.tensor(graph_payload["row_index"], dtype=torch.long, device=torch_device),
+                "col_index": torch.tensor(graph_payload["col_index"], dtype=torch.long, device=torch_device),
+                "weights": torch.tensor(graph_payload["weights"], dtype=torch.float32, device=torch_device),
+                "num_edges": int(graph_payload["num_edges"]),
+                "num_nodes": int(graph_payload["num_nodes"]),
+                "distance_scale": float(graph_payload.get("distance_scale", scale)),
+            }
+            for scale, graph_payload in lsrc_relation_graph_np.items()
         }
+        lsrc_relation_graph = lsrc_relation_graphs[min(lsrc_relation_graphs.keys())]
     proxy_init = torch.tensor(init_points, dtype=torch.float32, device=torch_device)
     proxy_points = torch.nn.Parameter(proxy_init.clone())
     if projected_match_reference is not None:
@@ -529,26 +726,63 @@ def optimize_proxy_points(
     else:
         graph_reference = None
 
+    if wavelet_graph_signatures is not None:
+        anchor_count = min(int(projected_representation.shape[0]), 1024)
+        rng = np.random.default_rng(int(random_state))
+        anchor_indices_np = rng.choice(projected_representation.shape[0], size=anchor_count, replace=False)
+        anchor_indices = torch.tensor(anchor_indices_np, dtype=torch.long, device=torch_device)
+        wavelet_anchor_points = full_repr[anchor_indices]
+        wavelet_scale_tensors = {
+            int(scale): torch.tensor(wavelet_graph_signatures[int(scale)], dtype=torch.float32, device=torch_device)
+            for scale in wavelet_scales
+        }
+        wavelet_anchor_signatures = {
+            int(scale): wavelet_scale_tensors[int(scale)][anchor_indices]
+            for scale in wavelet_scales
+        }
+        wavelet_interp_tau = infer_mmd_bandwidth(wavelet_anchor_points, wavelet_anchor_points)
+    else:
+        wavelet_anchor_points = None
+        wavelet_scale_tensors = None
+        wavelet_anchor_signatures = None
+        wavelet_interp_tau = None
+
     if tau_max is None:
         tau_max = frequency_scale
     if num_freq_pool is None:
         num_freq_pool = num_frequencies
 
-    initial_frequencies = sample_frequency_pool(
-        dim=projected_representation.shape[1],
-        num_frequencies=num_freq_pool,
-        tau_max=tau_max,
-        device=torch_device,
-        random_state=random_state,
-    )
-    current_frequencies = initial_frequencies
-    phase_weights = build_phase_weights(num_frequencies, mode=phase_weight_mode, device=torch_device)
+    initial_frequencies = None
+    current_frequencies = None
+    phase_weights = None
+    if active_loss_type in {"pdcfd", "cfd"}:
+        initial_frequencies = sample_frequency_pool(
+            dim=projected_representation.shape[1],
+            num_frequencies=num_freq_pool,
+            tau_max=tau_max,
+            device=torch_device,
+            random_state=random_state,
+        )
+        current_frequencies = initial_frequencies
+        phase_weights = build_phase_weights(num_frequencies, mode=phase_weight_mode, device=torch_device)
 
     optimizer = torch.optim.Adam([proxy_points], lr=float(lr))
     history = []
+    final_lsrc_state = None
 
     for step in range(int(num_steps)):
-        if use_pdas:
+        if bool(use_wavelet_multiscale):
+            active_scales, scale_weights = resolve_active_scales(
+                wavelet_scales,
+                step=step,
+                total_steps=num_steps,
+                schedule=wavelet_schedule,
+            )
+        else:
+            active_scales = [1]
+            scale_weights = {1: 1.0}
+
+        if active_loss_type in {"pdcfd", "cfd"} and use_pdas:
             stage = min(int(step * max(int(pdas_num_stages), 1) / max(int(num_steps), 1)), max(int(pdas_num_stages) - 1, 0))
             if pdas_schedule_mode == "low_to_high":
                 current_frequencies = schedule_pdas_frequencies(
@@ -576,12 +810,22 @@ def optimize_proxy_points(
             phase_weights = build_phase_weights(current_frequencies.shape[0], mode=phase_weight_mode, device=torch_device)
         else:
             stage = 0
-            if current_frequencies.shape[0] != int(num_frequencies):
+            if active_loss_type in {"pdcfd", "cfd"} and current_frequencies.shape[0] != int(num_frequencies):
                 current_frequencies = initial_frequencies[: int(num_frequencies)]
                 phase_weights = build_phase_weights(current_frequencies.shape[0], mode=phase_weight_mode, device=torch_device)
 
         optimizer.zero_grad(set_to_none=True)
-        if objective_mode == "pd_cfd":
+        if active_loss_type == "diffusion_mmd":
+            target_samples_for_loss = maybe_subsample_points(full_repr, target_batch_size)
+            proxy_points_for_loss = maybe_subsample_points(proxy_points, proxy_batch_size)
+            freq_loss = diffusion_mmd_loss(
+                proxy_points_for_loss,
+                target_samples_for_loss,
+                kernel=mmd_kernel,
+                bandwidth=mmd_bandwidth,
+                use_median_heuristic=bool(mmd_use_median_heuristic),
+            )
+        elif active_loss_type == "pdcfd":
             freq_loss = pd_cfd_loss(
                 proxy_points,
                 full_repr,
@@ -590,7 +834,7 @@ def optimize_proxy_points(
                 lambda_phase=lambda_phase,
                 batch_size=proxy_batch_size,
             )
-        elif objective_mode == "cfd":
+        elif active_loss_type == "cfd":
             freq_loss = cfd_loss(
                 proxy_points,
                 full_repr,
@@ -598,9 +842,9 @@ def optimize_proxy_points(
                 batch_size=proxy_batch_size,
             )
         else:
-            raise ValueError(f"Unsupported proxy objective mode: {objective_mode}")
+            raise ValueError(f"Unsupported proxy loss type: {active_loss_type}")
 
-        reg_loss = torch.mean((proxy_points - proxy_init) ** 2)
+        init_loss = torch.mean((proxy_points - proxy_init) ** 2)
         div_loss = dpp_diversity_loss(
             proxy_points,
             kernel=diversity_kernel,
@@ -609,10 +853,12 @@ def optimize_proxy_points(
         match_loss = nearest_reference_loss(proxy_points, match_reference)
         graph_loss = nearest_reference_loss(proxy_points, graph_reference)
         if bool(enable_lsrc):
-            lsrc_cov_loss, lsrc_rel_loss, _, _ = compute_lsrc_losses(
+            lsrc_outputs = compute_multiscale_lsrc_outputs(
                 proxy_points,
                 full_repr,
-                lsrc_relation_graph,
+                lsrc_relation_graphs,
+                active_scales=active_scales,
+                scale_weights=scale_weights,
                 tau_c=lsrc_tau_c,
                 beta=lsrc_beta,
                 eps=lsrc_eps,
@@ -620,41 +866,117 @@ def optimize_proxy_points(
                 coverage_mode=lsrc_coverage_mode,
                 rel_loss_mode=lsrc_rel_loss_mode,
             )
+            lsrc_cov_loss = lsrc_outputs["loss_lsrc_cov"]
+            lsrc_rel_loss = lsrc_outputs["loss_lsrc_rel"]
+            lsrc_q = lsrc_outputs["confidence_q"]
+            final_lsrc_state = {
+                "coverage_direct": lsrc_outputs["coverage_direct"].detach().cpu().numpy().astype(np.float32),
+                "coverage_relational": lsrc_outputs["coverage_relational"].detach().cpu().numpy().astype(np.float32),
+                "confidence_q": lsrc_q.detach().cpu().numpy().astype(np.float32),
+                "active_scales": [int(scale) for scale in active_scales],
+                "scale_weights": {str(scale): float(scale_weights[int(scale)]) for scale in active_scales},
+                "per_scale": lsrc_outputs["per_scale"],
+            }
         else:
             lsrc_cov_loss = torch.tensor(0.0, dtype=proxy_points.dtype, device=torch_device)
             lsrc_rel_loss = torch.tensor(0.0, dtype=proxy_points.dtype, device=torch_device)
+            lsrc_q = torch.tensor([], dtype=proxy_points.dtype, device=torch_device)
+            lsrc_outputs = None
 
-        loss = (
-            freq_loss
-            + float(reg_weight) * reg_loss
-            + float(lambda_div) * div_loss
-            + float(lambda_match) * match_loss
-            + float(lambda_graph) * graph_loss
-            + float(lambda_lsrc_cov) * lsrc_cov_loss
-            + float(lambda_lsrc_rel) * lsrc_rel_loss
-        )
+        if bool(use_wavelet_multiscale):
+            sampled_target_indices = None
+            if target_batch_size is not None and int(target_batch_size) > 0 and full_repr.shape[0] > int(target_batch_size):
+                sampled_target_indices = torch.randperm(full_repr.shape[0], device=torch_device)[: int(target_batch_size)]
+            sampled_proxy_indices = None
+            if proxy_batch_size is not None and int(proxy_batch_size) > 0 and proxy_points.shape[0] > int(proxy_batch_size):
+                sampled_proxy_indices = torch.randperm(proxy_points.shape[0], device=torch_device)[: int(proxy_batch_size)]
+            proxy_wavelet_points = proxy_points if sampled_proxy_indices is None else proxy_points[sampled_proxy_indices]
+
+            loss_ms = torch.tensor(0.0, dtype=proxy_points.dtype, device=torch_device)
+            per_scale_losses = {}
+            for scale in active_scales:
+                target_signature = wavelet_scale_tensors[int(scale)]
+                if sampled_target_indices is not None:
+                    target_signature = target_signature[sampled_target_indices]
+                proxy_signature = interpolate_proxy_wavelet_signature(
+                    proxy_wavelet_points,
+                    wavelet_anchor_points,
+                    wavelet_anchor_signatures[int(scale)],
+                    tau=wavelet_interp_tau,
+                )
+                scale_loss = diffusion_mmd_loss(
+                    proxy_signature,
+                    target_signature,
+                    kernel=mmd_kernel,
+                    bandwidth=mmd_bandwidth,
+                    use_median_heuristic=bool(mmd_use_median_heuristic),
+                )
+                per_scale_losses[int(scale)] = float(scale_loss.detach().cpu().item())
+                loss_ms = loss_ms + float(scale_weights[int(scale)]) * scale_loss
+        else:
+            per_scale_losses = {}
+            loss_ms = torch.tensor(0.0, dtype=proxy_points.dtype, device=torch_device)
+
+        loss_diff = freq_loss
+        loss_topo = float(lambda_match) * match_loss + float(lambda_graph) * graph_loss
+        loss_init = float(reg_weight) * init_loss
+        loss_div = float(lambda_div) * div_loss
+        loss_reg = reg_alpha_div * loss_div + reg_beta_topo * loss_topo + reg_gamma_init * loss_init
+        loss_reg_block = lambda_reg * loss_reg
+        loss_global_alignment = lambda_diff * loss_diff
+        loss_multiscale = lambda_ms_effective * loss_ms
+        if legacy_lsrc_weight_mode:
+            loss_lsrc = float(lambda_lsrc_cov) * lsrc_cov_loss + float(lambda_lsrc_rel) * lsrc_rel_loss
+            loss_lsrc_block = loss_lsrc
+        else:
+            loss_lsrc = lsrc_cov_loss + lsrc_mu_effective * lsrc_rel_loss
+            loss_lsrc_block = lambda_lsrc_effective * loss_lsrc
+
+        loss = loss_global_alignment + loss_multiscale + loss_lsrc_block + loss_reg_block
         loss.backward()
         optimizer.step()
 
         if step in {0, int(num_steps) - 1} or (step + 1) % max(1, int(num_steps) // 10) == 0:
+            if bool(use_wavelet_multiscale):
+                print(
+                    f"[proxy-opt] step={step + 1}/{int(num_steps)} active_scales={active_scales} "
+                    f"loss_diff={float(freq_loss.detach().cpu().item()):.6f} "
+                    f"loss_ms={float(loss_ms.detach().cpu().item()):.6f} "
+                    f"loss_lsrc={float(loss_lsrc_block.detach().cpu().item()):.6f} "
+                    f"loss_reg={float(loss_reg_block.detach().cpu().item()):.6f} "
+                    f"scale_weights={{{', '.join(f'{int(scale)}:{float(scale_weights[scale]):.3f}' for scale in active_scales)}}}",
+                    flush=True,
+                )
             history.append(
                 {
                     "step": int(step + 1),
                     "total_loss": float(loss.detach().cpu().item()),
+                    "loss_diff": float(freq_loss.detach().cpu().item()),
+                    "loss_ms": float(loss_ms.detach().cpu().item()),
+                    "loss_global_alignment": float(loss_global_alignment.detach().cpu().item()),
+                    "loss_multiscale": float(loss_multiscale.detach().cpu().item()),
+                    "loss_lsrc_block": float(loss_lsrc_block.detach().cpu().item()),
+                    "loss_reg_block": float(loss_reg_block.detach().cpu().item()),
                     "frequency_loss": float(freq_loss.detach().cpu().item()),
-                    "reg_loss": float(reg_loss.detach().cpu().item()),
+                    "loss_reg": float(loss_reg.detach().cpu().item()),
+                    "reg_loss": float(init_loss.detach().cpu().item()),
+                    "loss_div": float(loss_div.detach().cpu().item()),
+                    "loss_topo": float(loss_topo.detach().cpu().item()),
+                    "loss_init": float(loss_init.detach().cpu().item()),
                     "div_loss": float(div_loss.detach().cpu().item()),
                     "match_loss": float(match_loss.detach().cpu().item()),
                     "graph_loss": float(graph_loss.detach().cpu().item()),
+                    "loss_lsrc_cov": float(lsrc_cov_loss.detach().cpu().item()),
+                    "loss_lsrc_rel": float(lsrc_rel_loss.detach().cpu().item()),
+                    "loss_lsrc_total": float(loss_lsrc_block.detach().cpu().item()),
                     "lsrc_cov": float(lsrc_cov_loss.detach().cpu().item()),
                     "lsrc_rel": float(lsrc_rel_loss.detach().cpu().item()),
-                    "lsrc_total": float(
-                        (float(lambda_lsrc_cov) * lsrc_cov_loss + float(lambda_lsrc_rel) * lsrc_rel_loss)
-                        .detach()
-                        .cpu()
-                        .item()
-                    ),
+                    "lsrc_total": float(loss_lsrc_block.detach().cpu().item()),
                     "pdas_stage": int(stage),
+                    "active_scales": [int(scale) for scale in active_scales] if bool(use_wavelet_multiscale) else [],
+                    "wavelet_scale_weights": {str(scale): float(scale_weights[scale]) for scale in active_scales} if bool(use_wavelet_multiscale) else {},
+                    "wavelet_scale_losses": {str(scale): float(per_scale_losses[scale]) for scale in per_scale_losses},
+                    "lsrc_scale_weights": {str(scale): float(scale_weights[scale]) for scale in active_scales} if bool(enable_lsrc) else {},
                 }
             )
 
@@ -668,7 +990,18 @@ def optimize_proxy_points(
         "num_steps": int(num_steps),
         "lr": float(lr),
         "reg_weight": float(reg_weight),
+        "proxy_loss_type": active_loss_type,
         "objective_mode": objective_mode,
+        "loss_structure": "lambda_diff * L_diff + lambda_ms * L_ms + lambda_lsrc * L_lsrc + lambda_reg * L_reg",
+        "lambda_diff": float(lambda_diff),
+        "lambda_ms": float(lambda_ms_effective),
+        "lambda_lsrc": float(lambda_lsrc_effective),
+        "lsrc_mu": float(lsrc_mu_effective),
+        "lambda_reg": float(lambda_reg),
+        "reg_alpha_div": float(reg_alpha_div),
+        "reg_beta_topo": float(reg_beta_topo),
+        "reg_gamma_init": float(reg_gamma_init),
+        "legacy_lsrc_weight_mode": bool(legacy_lsrc_weight_mode),
         "use_pdas": bool(use_pdas),
         "pdas_num_stages": int(pdas_num_stages),
         "pdas_schedule_mode": pdas_schedule_mode,
@@ -689,10 +1022,36 @@ def optimize_proxy_points(
         "lambda_lsrc_cov": float(lambda_lsrc_cov),
         "lambda_lsrc_rel": float(lambda_lsrc_rel),
         "lsrc_eps": float(lsrc_eps),
-        "lsrc_num_edges": int(lsrc_relation_graph["num_edges"]) if lsrc_relation_graph is not None else 0,
+        "lsrc_num_edges": int(sum(graph["num_edges"] for graph in lsrc_relation_graphs.values())) if lsrc_relation_graphs is not None else 0,
         "lsrc_use_global_confidence": bool(lsrc_use_global_confidence),
         "lsrc_coverage_mode": lsrc_coverage_mode,
         "lsrc_rel_loss_mode": lsrc_rel_loss_mode,
+        "lsrc_geometry_space": "diffusion",
+        "lsrc_multiscale_enabled": bool(enable_lsrc and use_wavelet_multiscale),
+        "lsrc_scales": [int(scale) for scale in (wavelet_scales if bool(enable_lsrc and use_wavelet_multiscale) else [1])],
+        "mmd_kernel": mmd_kernel,
+        "mmd_bandwidth": None if mmd_bandwidth is None else float(mmd_bandwidth),
+        "mmd_use_median_heuristic": bool(mmd_use_median_heuristic),
+        "use_wavelet_multiscale": bool(use_wavelet_multiscale),
+        "wavelet_scales": [int(scale) for scale in wavelet_scales],
+        "wavelet_loss_weight": float(wavelet_loss_weight),
+        "wavelet_distance_type": wavelet_distance_type,
+        "wavelet_schedule": wavelet_schedule,
+        "wavelet_interp_tau": None if wavelet_interp_tau is None else float(wavelet_interp_tau),
+        "deprecated_proxy_config": {
+            "proxy_objective_mode": objective_mode,
+            "proxy_num_frequencies": int(num_frequencies),
+            "proxy_frequency_scale": float(frequency_scale),
+            "use_pdas": bool(use_pdas),
+            "pdas_num_stages": int(pdas_num_stages),
+            "pdas_schedule_mode": pdas_schedule_mode,
+            "num_freq_pool": int(num_freq_pool),
+            "tau_min": float(tau_min),
+            "tau_max": float(tau_max),
+            "lambda_phase": float(lambda_phase),
+            "phase_weight_mode": phase_weight_mode,
+            "status": "deprecated_compatibility_only",
+        },
         "init_method": init_info["init_method"],
         "initial_loss": float(history[0]["total_loss"]) if history else None,
         "final_loss": float(history[-1]["total_loss"]) if history else None,
@@ -704,7 +1063,8 @@ def optimize_proxy_points(
         "projection_matrix": projection_matrix,
         "proxy_init": proxy_init_np,
         "proxy_points": optimized,
-        "frequencies": current_frequencies.detach().cpu().numpy().astype(np.float32),
-        "initial_frequencies": initial_frequencies.detach().cpu().numpy().astype(np.float32),
+        "frequencies": None if current_frequencies is None else current_frequencies.detach().cpu().numpy().astype(np.float32),
+        "initial_frequencies": None if initial_frequencies is None else initial_frequencies.detach().cpu().numpy().astype(np.float32),
+        "lsrc_outputs": final_lsrc_state,
         "summary": summary,
     }
