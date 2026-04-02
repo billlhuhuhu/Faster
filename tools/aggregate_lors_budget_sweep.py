@@ -16,7 +16,7 @@ def parse_eval_metrics(evaluate_log_path):
         numbers = TABLE_LINE_PATTERN.findall(line)
         if len(numbers) < 7:
             continue
-        values = [float(x) for x in numbers[:7]]
+        values = [float(x) for x in numbers[-7:]]
         return {
             "img_r1": values[0],
             "img_r5": values[1],
