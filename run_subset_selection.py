@@ -38,7 +38,7 @@ def build_parser():
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--proxy_projection_dim", type=int, default=128)
     parser.add_argument("--proxy_init_method", type=str, default="kmeans", choices=["kmeans", "minibatch_kmeans", "sample"])
-    parser.add_argument("--proxy_loss_type", type=str, default=None, choices=["pdcfd", "diffusion_mmd"], help="Primary proxy distribution matching loss. If omitted, defaults to diffusion_mmd unless a deprecated legacy objective flag is explicitly set.")
+    parser.add_argument("--proxy_loss_type", type=str, default=None, choices=["pdcfd", "diffusion_mmd", "diffusion_swd", "diffusion_ms_swd"], help="Primary proxy distribution matching loss. If omitted, defaults to diffusion_ms_swd unless a deprecated legacy objective flag is explicitly set.")
     parser.add_argument("--proxy_objective_mode", type=str, default=None, choices=["cfd", "pd_cfd"], help="Deprecated legacy objective switch kept for backward compatibility.")
     parser.add_argument("--use_pdcfd", action="store_true")
     parser.add_argument("--proxy_num_frequencies", type=int, default=64, help="Deprecated: only used by legacy CFD / PD-CFD paths.")
@@ -52,10 +52,16 @@ def build_parser():
     parser.add_argument("--mmd_bandwidth", type=float, default=None)
     parser.add_argument("--mmd_use_median_heuristic", action="store_true", default=True)
     parser.add_argument("--disable_mmd_median_heuristic", action="store_false", dest="mmd_use_median_heuristic")
+    parser.add_argument("--swd_num_projections", type=int, default=64)
+    parser.add_argument("--swd_p", type=float, default=2.0)
+    parser.add_argument("--swd_projection_seed", type=int, default=None)
+    parser.add_argument("--swd_use_fixed_projections", action="store_true")
     parser.add_argument("--use_wavelet_multiscale", action="store_true")
     parser.add_argument("--wavelet_scales", type=str, default="1,2,4")
     parser.add_argument("--wavelet_loss_weight", type=float, default=0.1, help="Legacy multiscale weight. Retained for backward compatibility; if --lambda_ms is unset it is reused as the multiscale block weight.")
-    parser.add_argument("--wavelet_distance_type", type=str, default="mmd", choices=["mmd"])
+    parser.add_argument("--wavelet_distance_type", type=str, default="swd", choices=["mmd", "swd"])
+    parser.add_argument("--wavelet_swd_num_projections", type=int, default=None)
+    parser.add_argument("--wavelet_swd_p", type=float, default=None)
     parser.add_argument("--wavelet_schedule", type=str, default="coarse_to_fine", choices=["coarse_to_fine", "all"])
     parser.add_argument("--use_pdas", action="store_true", help="Deprecated: only used by legacy CFD / PD-CFD paths.")
     parser.add_argument("--pdas_num_stages", type=int, default=4, help="Deprecated: only used by legacy CFD / PD-CFD paths.")
@@ -71,7 +77,7 @@ def build_parser():
     parser.add_argument("--diversity_sigma", type=float, default=1.0)
     parser.add_argument("--phase_weight_mode", type=str, default="uniform", choices=["uniform", "linear"], help="Deprecated: only used by legacy PD-CFD objective.")
     parser.add_argument("--lambda_diff", type=float, default=1.0, help="Weight for the global alignment block L_diff.")
-    parser.add_argument("--lambda_ms", type=float, default=None, help="Weight for the multiscale block L_ms. If omitted, reuses --wavelet_loss_weight for backward compatibility.")
+    parser.add_argument("--lambda_ms", type=float, default=None, help="Deprecated for the new diffusion_ms_swd default path. Still used by compatibility modes where L_ms remains a separate top-level term.")
     parser.add_argument("--lambda_lsrc", type=float, default=None, help="Weight for the grouped LSRC block. If omitted, legacy lambda_lsrc_cov / lambda_lsrc_rel weighting is preserved.")
     parser.add_argument("--lsrc_mu", type=float, default=1.0, help="Relative weight mu inside L_cov_LSRC + mu * L_rel_LSRC.")
     parser.add_argument("--lambda_reg", type=float, default=1.0, help="Weight for the grouped regularization block L_reg.")
@@ -114,7 +120,7 @@ def main():
         elif args.proxy_objective_mode == "cfd":
             args.proxy_loss_type = "cfd"
         else:
-            args.proxy_loss_type = "diffusion_mmd"
+            args.proxy_loss_type = "diffusion_ms_swd"
     outputs = run_subset_selection(args)
     print("Subset selection finished:")
     print(f"  output_dir: {outputs['output_dir']}")

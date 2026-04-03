@@ -980,13 +980,13 @@ def run_proxy_optimized_selection(args, representation, unified_graph):
         spectral_weight=getattr(args, "spectral_weight", 1.0),
     )
     optimization_embedding = reference_embedding
-    if proxy_loss_type == "diffusion_mmd":
+    if proxy_loss_type in {"diffusion_mmd", "diffusion_swd", "diffusion_ms_swd"}:
         optimization_embedding = getattr(args, "_spectral_embedding", None)
         if optimization_embedding is None:
-            raise ValueError("diffusion_mmd requires unified spectral embedding, but none was found in cross-modal artifacts.")
+            raise ValueError(f"{proxy_loss_type} requires unified spectral embedding, but none was found in cross-modal artifacts.")
         if str(getattr(args, "_embedding_type", "laplacian")) != "diffusion":
             raise ValueError(
-                "diffusion_mmd requires diffusion embedding artifacts. "
+                f"{proxy_loss_type} requires diffusion embedding artifacts. "
                 f"Current cross-modal embedding_type={getattr(args, '_embedding_type', 'unknown')}."
             )
     graph_reference = build_topology_targets(
@@ -1046,12 +1046,18 @@ def run_proxy_optimized_selection(args, representation, unified_graph):
         mmd_kernel=getattr(args, "mmd_kernel", "rbf"),
         mmd_bandwidth=getattr(args, "mmd_bandwidth", None),
         mmd_use_median_heuristic=bool(getattr(args, "mmd_use_median_heuristic", True)),
+        swd_num_projections=getattr(args, "swd_num_projections", 64),
+        swd_p=getattr(args, "swd_p", 2),
+        swd_projection_seed=getattr(args, "swd_projection_seed", None),
+        swd_use_fixed_projections=bool(getattr(args, "swd_use_fixed_projections", False)),
         use_wavelet_multiscale=bool(getattr(args, "use_wavelet_multiscale", False)),
         wavelet_graph=unified_graph,
         wavelet_scales=getattr(args, "wavelet_scales", None),
         wavelet_loss_weight=getattr(args, "wavelet_loss_weight", 0.0),
         wavelet_distance_type=getattr(args, "wavelet_distance_type", "mmd"),
         wavelet_schedule=getattr(args, "wavelet_schedule", "coarse_to_fine"),
+        wavelet_swd_num_projections=getattr(args, "wavelet_swd_num_projections", None),
+        wavelet_swd_p=getattr(args, "wavelet_swd_p", None),
         lambda_diff=getattr(args, "lambda_diff", 1.0),
         lambda_ms=getattr(args, "lambda_ms", None),
         lambda_lsrc=getattr(args, "lambda_lsrc", None),
