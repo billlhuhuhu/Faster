@@ -147,9 +147,11 @@ def build_summary_rows(rows):
     return summary_rows
 
 
-def write_csv(path, rows, fieldnames):
+def write_csv(path, rows, fieldnames, encoding="utf-8", excel_sep_hint=False):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8", newline="") as handle:
+    with open(path, "w", encoding=encoding, newline="") as handle:
+        if excel_sep_hint:
+            handle.write("sep=,\n")
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
@@ -166,10 +168,14 @@ def main():
 
     raw_csv = report_dir / "main_table_raw.csv"
     summary_csv = report_dir / "main_table_summary.csv"
+    raw_excel_csv = report_dir / "main_table_raw_excel.csv"
+    summary_excel_csv = report_dir / "main_table_summary_excel.csv"
     missing_txt = report_dir / "missing_metrics.txt"
 
     write_csv(raw_csv, rows, RAW_FIELDS)
     write_csv(summary_csv, summary_rows, SUMMARY_FIELDS)
+    write_csv(raw_excel_csv, rows, RAW_FIELDS, encoding="utf-8-sig", excel_sep_hint=True)
+    write_csv(summary_excel_csv, summary_rows, SUMMARY_FIELDS, encoding="utf-8-sig", excel_sep_hint=True)
     with open(missing_txt, "w", encoding="utf-8") as handle:
         for item in missing:
             handle.write(item + "\n")
@@ -178,6 +184,8 @@ def main():
     print(f"  report_dir: {report_dir}")
     print(f"  raw_csv: {raw_csv}")
     print(f"  summary_csv: {summary_csv}")
+    print(f"  raw_excel_csv: {raw_excel_csv}")
+    print(f"  summary_excel_csv: {summary_excel_csv}")
     print(f"  missing_metrics: {missing_txt}")
     print(f"  collected_runs: {len(rows)}")
     print(f"  grouped_entries: {len(summary_rows)}")
