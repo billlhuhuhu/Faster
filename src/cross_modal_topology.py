@@ -135,32 +135,200 @@ def scale_sparse_graph(graph, scalar):
     return graph
 
 
-def compute_local_node_confidence(graph, eps=1e-8, tau_l=0.25, kappa_min=0.05):
+def compute_entropy_confidence_view(graph, eps=1e-8):
     graph = graph.tocsr().astype(np.float32)
     num_nodes = int(graph.shape[0])
-    kappa = np.full(num_nodes, float(kappa_min), dtype=np.float32)
-    eps = float(eps)
-    tau_l = max(float(tau_l), eps)
-    kappa_min = float(kappa_min)
+    entropy_score = np.zeros(num_nodes, dtype=np.float32)
 
     indptr = graph.indptr
     data = graph.data
+    eps = float(eps)
     for node_idx in range(num_nodes):
         start = indptr[node_idx]
         end = indptr[node_idx + 1]
         num_neighbors = int(end - start)
         if num_neighbors <= 1:
             continue
-
         p = np.clip(data[start:end].astype(np.float64), eps, None)
         entropy = -np.sum(p * np.log(p + eps))
         entropy = entropy / max(np.log(float(num_neighbors) + eps), eps)
-        entropy = float(np.clip(entropy, 0.0, 1.0))
-        chi = 1.0 - entropy
-        kappa[node_idx] = np.float32(
-            kappa_min + (1.0 - kappa_min) * np.exp(-chi / tau_l)
+        entropy_score[node_idx] = np.float32(np.clip(entropy, 0.0, 1.0))
+    return entropy_score.astype(np.float32)
+
+
+def entropy_view_to_kappa(entropy_score, tau_l=0.25, kappa_min=0.05, eps=1e-8):
+    tau_l = max(float(tau_l), float(eps))
+    kappa_min = float(kappa_min)
+    chi = 1.0 - np.asarray(entropy_score, dtype=np.float32)
+    kappa = kappa_min + (1.0 - kappa_min) * np.exp(-chi / tau_l)
+    return np.clip(kappa.astype(np.float32), kappa_min, 1.0)
+
+
+def extract_row_topk_neighbors(graph, topk=15):
+    graph = graph.tocsr().astype(np.float32)
+    indptr = graph.indptr
+    indices = graph.indices
+    data = graph.data
+    neighbors = []
+    topk = max(1, int(topk))
+    for node_idx in range(int(graph.shape[0])):
+        start = indptr[node_idx]
+        end = indptr[node_idx + 1]
+        row_indices = indices[start:end]
+        row_values = data[start:end]
+        if row_indices.size == 0:
+            neighbors.append(np.empty(0, dtype=np.int64))
+            continue
+        if row_indices.size > topk:
+            top_positions = np.argpartition(-row_values, topk - 1)[:topk]
+            top_positions = top_positions[np.argsort(-row_values[top_positions], kind="stable")]
+            chosen = row_indices[top_positions]
+        else:
+            chosen = row_indices[np.argsort(-row_values, kind="stable")]
+        neighbors.append(chosen.astype(np.int64))
+    return neighbors
+
+
+def compute_cross_modal_agreement_view(graph, other_graph, topk=15, agreement_type="jaccard"):
+    agreement_type = str(agreement_type or "jaccard")
+    if agreement_type != "jaccard":
+        raise ValueError(f"Unsupported local agreement type: {agreement_type}")
+    neighbors_a = extract_row_topk_neighbors(graph, topk=topk)
+    neighbors_b = extract_row_topk_neighbors(other_graph, topk=topk)
+    score = np.zeros(int(graph.shape[0]), dtype=np.float32)
+    for node_idx, (row_a, row_b) in enumerate(zip(neighbors_a, neighbors_b)):
+        if row_a.size == 0 and row_b.size == 0:
+            score[node_idx] = 0.0
+            continue
+        set_a = set(int(x) for x in row_a.tolist())
+        set_b = set(int(x) for x in row_b.tolist())
+        union = len(set_a | set_b)
+        if union <= 0:
+            score[node_idx] = 0.0
+            continue
+        score[node_idx] = np.float32(len(set_a & set_b) / float(union))
+    return score.astype(np.float32)
+
+
+def compute_diffusion_stability_view(graph, diffusion_hops=2, diffusion_type="p_vs_p2_cosine", eps=1e-8):
+    diffusion_type = str(diffusion_type or "p_vs_p2_cosine")
+    if diffusion_type != "p_vs_p2_cosine":
+        raise ValueError(f"Unsupported local diffusion stability type: {diffusion_type}")
+    graph = graph.tocsr().astype(np.float32)
+    if int(diffusion_hops) <= 1:
+        graph_h = graph
+    else:
+        graph_h = graph.copy()
+        for _ in range(int(diffusion_hops) - 1):
+            graph_h = (graph_h @ graph).tocsr()
+        graph_h.eliminate_zeros()
+    num_nodes = int(graph.shape[0])
+    score = np.zeros(num_nodes, dtype=np.float32)
+    eps = float(eps)
+    for node_idx in range(num_nodes):
+        row_p = graph.getrow(node_idx)
+        row_h = graph_h.getrow(node_idx)
+        norm_p = float(np.sqrt(row_p.multiply(row_p).sum()))
+        norm_h = float(np.sqrt(row_h.multiply(row_h).sum()))
+        if norm_p <= eps or norm_h <= eps:
+            score[node_idx] = 0.0
+            continue
+        dot = float(row_p.multiply(row_h).sum())
+        score[node_idx] = np.float32(np.clip(dot / max(norm_p * norm_h, eps), 0.0, 1.0))
+    return score.astype(np.float32)
+
+
+def compute_local_node_confidence(
+    graph,
+    other_graph=None,
+    mode="entropy",
+    eps=1e-8,
+    tau_l=0.25,
+    kappa_min=0.05,
+    local_conf_weight_entropy=1.0,
+    local_conf_weight_agreement=1.0,
+    local_conf_weight_diffusion=1.0,
+    local_conf_agreement_topk=15,
+    local_conf_agreement_type="jaccard",
+    local_conf_diffusion_hops=2,
+    local_conf_diffusion_type="p_vs_p2_cosine",
+):
+    mode = str(mode or "entropy")
+    if mode == "none":
+        num_nodes = int(graph.shape[0])
+        diagnostics = {
+            "mode": "none",
+            "entropy_view_stats": summarize_vector(np.zeros(num_nodes, dtype=np.float32)),
+            "agreement_view_stats": summarize_vector(np.zeros(num_nodes, dtype=np.float32)),
+            "diffusion_view_stats": summarize_vector(np.zeros(num_nodes, dtype=np.float32)),
+        }
+        return None, diagnostics
+
+    entropy_score = compute_entropy_confidence_view(graph, eps=eps)
+    if mode == "entropy":
+        kappa = entropy_view_to_kappa(
+            entropy_score,
+            tau_l=tau_l,
+            kappa_min=kappa_min,
+            eps=eps,
         )
-    return kappa.astype(np.float32)
+        diagnostics = {
+            "mode": "entropy",
+            "entropy_view_stats": summarize_vector(entropy_score),
+            "agreement_view_stats": summarize_vector(np.zeros_like(entropy_score)),
+            "diffusion_view_stats": summarize_vector(np.zeros_like(entropy_score)),
+        }
+        return kappa.astype(np.float32), diagnostics
+
+    if mode != "multi_view":
+        raise ValueError(f"Unsupported local node confidence mode: {mode}")
+    if other_graph is None:
+        raise ValueError("multi_view local node confidence requires the opposite-modality graph.")
+
+    agreement_score = compute_cross_modal_agreement_view(
+        graph,
+        other_graph,
+        topk=local_conf_agreement_topk,
+        agreement_type=local_conf_agreement_type,
+    )
+    diffusion_score = compute_diffusion_stability_view(
+        graph,
+        diffusion_hops=local_conf_diffusion_hops,
+        diffusion_type=local_conf_diffusion_type,
+        eps=eps,
+    )
+
+    w_entropy = float(local_conf_weight_entropy)
+    w_agreement = float(local_conf_weight_agreement)
+    w_diffusion = float(local_conf_weight_diffusion)
+    weight_sum = max(w_entropy + w_agreement + w_diffusion, float(eps))
+    # Multi-view local reliability: weighted average of three normalized views,
+    # then linearly squashed into [kappa_min, 1] for reuse in edge confidence.
+    combined_score = (
+        w_entropy * entropy_score
+        + w_agreement * agreement_score
+        + w_diffusion * diffusion_score
+    ) / weight_sum
+    combined_score = np.clip(combined_score.astype(np.float32), 0.0, 1.0)
+    kappa = float(kappa_min) + (1.0 - float(kappa_min)) * combined_score
+    kappa = np.clip(kappa.astype(np.float32), float(kappa_min), 1.0)
+    diagnostics = {
+        "mode": "multi_view",
+        "entropy_view_stats": summarize_vector(entropy_score),
+        "agreement_view_stats": summarize_vector(agreement_score),
+        "diffusion_view_stats": summarize_vector(diffusion_score),
+        "combined_view_stats": summarize_vector(combined_score),
+        "weights": {
+            "entropy": float(w_entropy),
+            "agreement": float(w_agreement),
+            "diffusion": float(w_diffusion),
+        },
+        "agreement_topk": int(local_conf_agreement_topk),
+        "agreement_type": str(local_conf_agreement_type),
+        "diffusion_hops": int(local_conf_diffusion_hops),
+        "diffusion_type": str(local_conf_diffusion_type),
+    }
+    return kappa.astype(np.float32), diagnostics
 
 
 def summarize_vector(values):
@@ -285,6 +453,31 @@ def scale_sparse_graph_with_node_confidence(graph, scalar, node_confidence=None)
     return scaled
 
 
+def build_hard_directional_gate(source_confidence, target_confidence, tau_high=0.6, tau_low=0.3, tau_gap=0.15):
+    source_confidence = np.asarray(source_confidence, dtype=np.float32)
+    target_confidence = np.asarray(target_confidence, dtype=np.float32)
+    gate = (
+        (source_confidence > float(tau_high))
+        & (target_confidence < float(tau_low))
+        & ((source_confidence - target_confidence) > float(tau_gap))
+    )
+    return gate.astype(np.float32)
+
+
+def sparse_matrix_from_union_keys(union_keys, values, shape):
+    values = np.asarray(values, dtype=np.float32)
+    nonzero = values > 0
+    if not np.any(nonzero):
+        return sparse.csr_matrix(shape, dtype=np.float32)
+    num_cols = int(shape[1])
+    keys = union_keys[nonzero]
+    rows = (keys // num_cols).astype(np.int32)
+    cols = (keys % num_cols).astype(np.int32)
+    matrix = sparse.csr_matrix((values[nonzero].astype(np.float32), (rows, cols)), shape=shape)
+    matrix.eliminate_zeros()
+    return matrix
+
+
 def build_union_keys(matrix_a, matrix_b):
     matrix_a = matrix_a.tocoo()
     matrix_b = matrix_b.tocoo()
@@ -316,44 +509,141 @@ def build_bidirectional_correction_weights(
     rho_txt,
     eps=1e-8,
     enable_local_node_confidence=False,
+    local_node_confidence_mode="multi_view",
     tau_l=0.25,
     kappa_min=0.05,
     local_conf_eps=1e-8,
+    local_conf_weight_entropy=1.0,
+    local_conf_weight_agreement=1.0,
+    local_conf_weight_diffusion=1.0,
+    local_conf_agreement_topk=15,
+    local_conf_agreement_type="jaccard",
+    local_conf_diffusion_hops=2,
+    local_conf_diffusion_type="p_vs_p2_cosine",
+    enable_directional_correction_gate=True,
+    correction_gate_tau_high=0.6,
+    correction_gate_tau_low=0.3,
+    correction_gate_tau_gap=0.15,
 ):
+    requested_local_mode = str(local_node_confidence_mode or "multi_view")
+    effective_local_mode = requested_local_mode
+    if bool(enable_local_node_confidence) and requested_local_mode == "none":
+        # Legacy compatibility: old scripts may only pass the boolean switch.
+        effective_local_mode = "entropy"
+
     image_kappa = None
     text_kappa = None
-    if bool(enable_local_node_confidence):
-        image_kappa = compute_local_node_confidence(
+    image_local_conf_diagnostics = {
+        "mode": effective_local_mode,
+        "entropy_view_stats": summarize_vector(np.zeros(image_transition.shape[0], dtype=np.float32)),
+        "agreement_view_stats": summarize_vector(np.zeros(image_transition.shape[0], dtype=np.float32)),
+        "diffusion_view_stats": summarize_vector(np.zeros(image_transition.shape[0], dtype=np.float32)),
+    }
+    text_local_conf_diagnostics = {
+        "mode": effective_local_mode,
+        "entropy_view_stats": summarize_vector(np.zeros(text_transition.shape[0], dtype=np.float32)),
+        "agreement_view_stats": summarize_vector(np.zeros(text_transition.shape[0], dtype=np.float32)),
+        "diffusion_view_stats": summarize_vector(np.zeros(text_transition.shape[0], dtype=np.float32)),
+    }
+    if effective_local_mode != "none":
+        image_kappa, image_local_conf_diagnostics = compute_local_node_confidence(
             image_transition,
+            other_graph=text_transition,
+            mode=effective_local_mode,
             eps=local_conf_eps,
             tau_l=tau_l,
             kappa_min=kappa_min,
+            local_conf_weight_entropy=local_conf_weight_entropy,
+            local_conf_weight_agreement=local_conf_weight_agreement,
+            local_conf_weight_diffusion=local_conf_weight_diffusion,
+            local_conf_agreement_topk=local_conf_agreement_topk,
+            local_conf_agreement_type=local_conf_agreement_type,
+            local_conf_diffusion_hops=local_conf_diffusion_hops,
+            local_conf_diffusion_type=local_conf_diffusion_type,
         )
-        text_kappa = compute_local_node_confidence(
+        text_kappa, text_local_conf_diagnostics = compute_local_node_confidence(
             text_transition,
+            other_graph=image_transition,
+            mode=effective_local_mode,
             eps=local_conf_eps,
             tau_l=tau_l,
             kappa_min=kappa_min,
+            local_conf_weight_entropy=local_conf_weight_entropy,
+            local_conf_weight_agreement=local_conf_weight_agreement,
+            local_conf_weight_diffusion=local_conf_weight_diffusion,
+            local_conf_agreement_topk=local_conf_agreement_topk,
+            local_conf_agreement_type=local_conf_agreement_type,
+            local_conf_diffusion_hops=local_conf_diffusion_hops,
+            local_conf_diffusion_type=local_conf_diffusion_type,
         )
 
     c_img = scale_sparse_graph_with_node_confidence(image_transition, rho_img, node_confidence=image_kappa)
     c_txt = scale_sparse_graph_with_node_confidence(text_transition, rho_txt, node_confidence=text_kappa)
     overlap = c_img.multiply(c_txt)
+    union_keys, _, _ = build_union_keys(c_img, c_txt)
+    c_img_data = gather_sparse_data_on_keys(c_img, union_keys)
+    c_txt_data = gather_sparse_data_on_keys(c_txt, union_keys)
+    overlap_data = gather_sparse_data_on_keys(overlap, union_keys)
 
-    # Old logic was directional: healthy -> collapsed. New logic uses global confidences
-    # to build two edge-wise correction coefficients and updates both modalities.
-    numer_txt_to_img = c_txt - overlap
-    numer_img_to_txt = c_img - overlap
-    numer_txt_to_img.eliminate_zeros()
-    numer_img_to_txt.eliminate_zeros()
+    # Preserve the original alpha formulation and only add a directional gate on top.
+    numer_txt_to_img = np.maximum(c_txt_data - overlap_data, 0.0).astype(np.float32)
+    numer_img_to_txt = np.maximum(c_img_data - overlap_data, 0.0).astype(np.float32)
+    alpha_txt_to_img_data = (numer_txt_to_img / (numer_txt_to_img + float(eps))).astype(np.float32)
+    alpha_img_to_txt_data = (numer_img_to_txt / (numer_img_to_txt + float(eps))).astype(np.float32)
 
-    alpha_txt_to_img = numer_txt_to_img.tocsr(copy=True)
-    alpha_img_to_txt = numer_img_to_txt.tocsr(copy=True)
-    alpha_txt_to_img.data = alpha_txt_to_img.data / (alpha_txt_to_img.data + float(eps))
-    alpha_img_to_txt.data = alpha_img_to_txt.data / (alpha_img_to_txt.data + float(eps))
-    alpha_txt_to_img.eliminate_zeros()
-    alpha_img_to_txt.eliminate_zeros()
-    return alpha_txt_to_img, alpha_img_to_txt, image_kappa, text_kappa
+    if bool(enable_directional_correction_gate):
+        gate_txt_to_img = build_hard_directional_gate(
+            c_txt_data,
+            c_img_data,
+            tau_high=correction_gate_tau_high,
+            tau_low=correction_gate_tau_low,
+            tau_gap=correction_gate_tau_gap,
+        )
+        gate_img_to_txt = build_hard_directional_gate(
+            c_img_data,
+            c_txt_data,
+            tau_high=correction_gate_tau_high,
+            tau_low=correction_gate_tau_low,
+            tau_gap=correction_gate_tau_gap,
+        )
+    else:
+        gate_txt_to_img = np.ones_like(alpha_txt_to_img_data, dtype=np.float32)
+        gate_img_to_txt = np.ones_like(alpha_img_to_txt_data, dtype=np.float32)
+
+    alpha_txt_to_img_eff_data = (gate_txt_to_img * alpha_txt_to_img_data).astype(np.float32)
+    alpha_img_to_txt_eff_data = (gate_img_to_txt * alpha_img_to_txt_data).astype(np.float32)
+
+    alpha_txt_to_img = sparse_matrix_from_union_keys(union_keys, alpha_txt_to_img_data, c_img.shape)
+    alpha_img_to_txt = sparse_matrix_from_union_keys(union_keys, alpha_img_to_txt_data, c_img.shape)
+    alpha_txt_to_img_eff = sparse_matrix_from_union_keys(union_keys, alpha_txt_to_img_eff_data, c_img.shape)
+    alpha_img_to_txt_eff = sparse_matrix_from_union_keys(union_keys, alpha_img_to_txt_eff_data, c_img.shape)
+
+    diagnostics = {
+        "requested_local_node_confidence_mode": requested_local_mode,
+        "effective_local_node_confidence_mode": effective_local_mode,
+        "image_local_confidence_diagnostics": image_local_conf_diagnostics,
+        "text_local_confidence_diagnostics": text_local_conf_diagnostics,
+        "image_kappa_stats": summarize_vector(image_kappa) if image_kappa is not None else None,
+        "text_kappa_stats": summarize_vector(text_kappa) if text_kappa is not None else None,
+        "gate_activation_ratio_t2i": float(np.mean(gate_txt_to_img)) if gate_txt_to_img.size else 0.0,
+        "gate_activation_ratio_i2t": float(np.mean(gate_img_to_txt)) if gate_img_to_txt.size else 0.0,
+        "alpha_t2i_stats_before_gate": summarize_vector(alpha_txt_to_img_data),
+        "alpha_t2i_stats_after_gate": summarize_vector(alpha_txt_to_img_eff_data),
+        "alpha_i2t_stats_before_gate": summarize_vector(alpha_img_to_txt_data),
+        "alpha_i2t_stats_after_gate": summarize_vector(alpha_img_to_txt_eff_data),
+        "c_img_stats": summarize_vector(c_img_data),
+        "c_txt_stats": summarize_vector(c_txt_data),
+        "edge_confidence_note": "mode=none uses C=rho*P without node confidence scaling" if effective_local_mode == "none" else "node confidence scaling enabled",
+    }
+    return (
+        alpha_txt_to_img,
+        alpha_img_to_txt,
+        alpha_txt_to_img_eff,
+        alpha_img_to_txt_eff,
+        image_kappa,
+        text_kappa,
+        diagnostics,
+    )
 
 
 def apply_directional_correction(
@@ -409,6 +699,39 @@ def apply_bidirectional_correction(image_graph, text_graph, alpha_txt_to_img, al
     )
 
 
+def build_thresholded_autonomy_fusion(
+    image_graph,
+    text_graph,
+    alpha_txt_to_img_eff,
+    alpha_img_to_txt_eff,
+    eps=1e-8,
+):
+    image_graph = image_graph.tocsr()
+    text_graph = text_graph.tocsr()
+    union_keys, rows, cols = build_union_keys(image_graph, text_graph)
+    image_data = gather_sparse_data_on_keys(image_graph, union_keys)
+    text_data = gather_sparse_data_on_keys(text_graph, union_keys)
+    alpha_txt_to_img_eff_data = gather_sparse_data_on_keys(alpha_txt_to_img_eff, union_keys)
+    alpha_img_to_txt_eff_data = gather_sparse_data_on_keys(alpha_img_to_txt_eff, union_keys)
+
+    autonomy_img = 1.0 - alpha_txt_to_img_eff_data
+    autonomy_txt = 1.0 - alpha_img_to_txt_eff_data
+    denom = autonomy_img + autonomy_txt + float(eps)
+    omega_img = autonomy_img / denom
+    omega_txt = autonomy_txt / denom
+    unified_data = omega_img * image_data + omega_txt * text_data
+
+    unified = sparse.csr_matrix((unified_data.astype(np.float32), (rows, cols)), shape=image_graph.shape)
+    unified.eliminate_zeros()
+    unified = fuzzy_union_symmetrize(unified)
+    unified.eliminate_zeros()
+    diagnostics = {
+        "omega_img_stats": summarize_vector(omega_img),
+        "omega_txt_stats": summarize_vector(omega_txt),
+    }
+    return unified, diagnostics
+
+
 def build_confidence_aware_fusion(
     image_graph,
     text_graph,
@@ -460,19 +783,32 @@ def unify_topology(
     image_graph,
     text_graph,
     mode="confidence_aware",
+    correction_fusion_mode="legacy",
     rho_img=0.5,
     rho_txt=0.5,
     lambda_f=1.0,
     mu_f=1.0,
     eps=1e-8,
+    alpha_txt_to_img_eff=None,
+    alpha_img_to_txt_eff=None,
 ):
     if mode == "intersection":
         unified = image_graph.multiply(text_graph)
         unified = fuzzy_union_symmetrize(unified)
         unified.eliminate_zeros()
-        return unified
+        return unified, {}
     if mode == "confidence_aware":
-        return build_confidence_aware_fusion(
+        if str(correction_fusion_mode or "legacy") == "thresholded_autonomy":
+            if alpha_txt_to_img_eff is None or alpha_img_to_txt_eff is None:
+                raise ValueError("thresholded_autonomy fusion requires effective bidirectional correction weights.")
+            return build_thresholded_autonomy_fusion(
+                image_graph,
+                text_graph,
+                alpha_txt_to_img_eff=alpha_txt_to_img_eff,
+                alpha_img_to_txt_eff=alpha_img_to_txt_eff,
+                eps=eps,
+            )
+        unified = build_confidence_aware_fusion(
             image_graph,
             text_graph,
             rho_img=rho_img,
@@ -481,6 +817,7 @@ def unify_topology(
             mu_f=mu_f,
             eps=eps,
         )
+        return unified, {}
     raise ValueError(f"Unsupported fusion mode: {mode}")
 
 
@@ -585,6 +922,9 @@ def build_summary(
     corrected_summary,
     unified_summary,
     unified_spectral_artifacts,
+    correction_diagnostics,
+    fusion_diagnostics,
+    effective_correction_fusion_mode,
 ):
     return {
         "dataset": args.dataset,
@@ -600,9 +940,23 @@ def build_summary(
         "tau_g": float(getattr(args, "tau_g", 0.5)),
         "correction_eps": float(getattr(args, "correction_eps", 1e-8)),
         "enable_local_node_confidence": bool(getattr(args, "enable_local_node_confidence", False)),
+        "local_node_confidence_mode": str(getattr(args, "local_node_confidence_mode", "multi_view")),
         "tau_l": float(getattr(args, "tau_l", 0.25)),
         "kappa_min": float(getattr(args, "kappa_min", 0.05)),
         "local_conf_eps": float(getattr(args, "local_conf_eps", 1e-8)),
+        "local_conf_weight_entropy": float(getattr(args, "local_conf_weight_entropy", 1.0)),
+        "local_conf_weight_agreement": float(getattr(args, "local_conf_weight_agreement", 1.0)),
+        "local_conf_weight_diffusion": float(getattr(args, "local_conf_weight_diffusion", 1.0)),
+        "local_conf_agreement_topk": int(getattr(args, "local_conf_agreement_topk", 15)),
+        "local_conf_agreement_type": str(getattr(args, "local_conf_agreement_type", "jaccard")),
+        "local_conf_diffusion_hops": int(getattr(args, "local_conf_diffusion_hops", 2)),
+        "local_conf_diffusion_type": str(getattr(args, "local_conf_diffusion_type", "p_vs_p2_cosine")),
+        "enable_directional_correction_gate": bool(getattr(args, "enable_directional_correction_gate", True)),
+        "correction_gate_tau_high": float(getattr(args, "correction_gate_tau_high", 0.6)),
+        "correction_gate_tau_low": float(getattr(args, "correction_gate_tau_low", 0.3)),
+        "correction_gate_tau_gap": float(getattr(args, "correction_gate_tau_gap", 0.15)),
+        "requested_correction_fusion_mode": str(getattr(args, "correction_fusion_mode", "thresholded_autonomy")),
+        "effective_correction_fusion_mode": str(effective_correction_fusion_mode),
         "fusion_mode": args.fusion_mode,
         "lambda_f": float(getattr(args, "lambda_f", 1.0)),
         "mu_f": float(getattr(args, "mu_f", 1.0)),
@@ -623,6 +977,8 @@ def build_summary(
         "corrected_text_summary": corrected_text_summary,
         "corrected_summary": corrected_summary,
         "unified_summary": unified_summary,
+        "correction_diagnostics": correction_diagnostics,
+        "fusion_diagnostics": fusion_diagnostics,
         "unified_first_eigenvalues": [
             float(x) for x in unified_spectral_artifacts["eigvals"][: min(10, len(unified_spectral_artifacts["eigvals"]))]
         ],
@@ -726,9 +1082,15 @@ def run_cross_modal_topology(args):
     log_cross_modal(f"global confidences: rho_img={rho_img:.4f}, rho_txt={rho_txt:.4f}")
     image_kappa_stats = None
     text_kappa_stats = None
+    correction_diagnostics = {}
+    fusion_diagnostics = {}
+    effective_correction_fusion_mode = str(getattr(args, "correction_fusion_mode", "thresholded_autonomy"))
 
     correction_mode = getattr(args, "correction_mode", "bidirectional")
     if correction_mode == "directional":
+        if effective_correction_fusion_mode != "legacy":
+            log_cross_modal("directional correction does not support thresholded_autonomy fusion; falling back to legacy fusion path")
+            effective_correction_fusion_mode = "legacy"
         log_cross_modal("applying directional healthy-to-collapsed correction")
         (
             corrected_image_directed,
@@ -746,8 +1108,11 @@ def run_cross_modal_topology(args):
         (
             alpha_txt_to_img,
             alpha_img_to_txt,
+            alpha_txt_to_img_eff,
+            alpha_img_to_txt_eff,
             image_kappa,
             text_kappa,
+            correction_diagnostics,
         ) = build_bidirectional_correction_weights(
             image_bundle["transition"],
             text_bundle["transition"],
@@ -755,20 +1120,92 @@ def run_cross_modal_topology(args):
             rho_txt=rho_txt,
             eps=getattr(args, "correction_eps", 1e-8),
             enable_local_node_confidence=bool(getattr(args, "enable_local_node_confidence", False)),
+            local_node_confidence_mode=str(getattr(args, "local_node_confidence_mode", "multi_view")),
             tau_l=getattr(args, "tau_l", 0.25),
             kappa_min=getattr(args, "kappa_min", 0.05),
             local_conf_eps=getattr(args, "local_conf_eps", 1e-8),
+            local_conf_weight_entropy=getattr(args, "local_conf_weight_entropy", 1.0),
+            local_conf_weight_agreement=getattr(args, "local_conf_weight_agreement", 1.0),
+            local_conf_weight_diffusion=getattr(args, "local_conf_weight_diffusion", 1.0),
+            local_conf_agreement_topk=getattr(args, "local_conf_agreement_topk", 15),
+            local_conf_agreement_type=getattr(args, "local_conf_agreement_type", "jaccard"),
+            local_conf_diffusion_hops=getattr(args, "local_conf_diffusion_hops", 2),
+            local_conf_diffusion_type=getattr(args, "local_conf_diffusion_type", "p_vs_p2_cosine"),
+            enable_directional_correction_gate=bool(getattr(args, "enable_directional_correction_gate", True)),
+            correction_gate_tau_high=getattr(args, "correction_gate_tau_high", 0.6),
+            correction_gate_tau_low=getattr(args, "correction_gate_tau_low", 0.3),
+            correction_gate_tau_gap=getattr(args, "correction_gate_tau_gap", 0.15),
         )
-        if image_kappa is not None and text_kappa is not None:
-            image_kappa_stats = summarize_vector(image_kappa)
-            text_kappa_stats = summarize_vector(text_kappa)
+        log_cross_modal(
+            f"correction_fusion_mode={effective_correction_fusion_mode}, "
+            f"enable_directional_correction_gate={bool(getattr(args, 'enable_directional_correction_gate', True))}, "
+            f"tau_high={float(getattr(args, 'correction_gate_tau_high', 0.6)):.4f}, "
+            f"tau_low={float(getattr(args, 'correction_gate_tau_low', 0.3)):.4f}, "
+            f"tau_gap={float(getattr(args, 'correction_gate_tau_gap', 0.15)):.4f}"
+        )
+        log_cross_modal(
+            "directional gate activation: "
+            f"T->I={correction_diagnostics.get('gate_activation_ratio_t2i', 0.0):.4f}, "
+            f"I->T={correction_diagnostics.get('gate_activation_ratio_i2t', 0.0):.4f}"
+        )
+        log_cross_modal(
+            "alpha T->I stats: "
+            f"before(mean={correction_diagnostics.get('alpha_t2i_stats_before_gate', {}).get('mean', 0.0):.4f}, "
+            f"std={correction_diagnostics.get('alpha_t2i_stats_before_gate', {}).get('std', 0.0):.4f}) "
+            f"after(mean={correction_diagnostics.get('alpha_t2i_stats_after_gate', {}).get('mean', 0.0):.4f}, "
+            f"std={correction_diagnostics.get('alpha_t2i_stats_after_gate', {}).get('std', 0.0):.4f})"
+        )
+        log_cross_modal(
+            "alpha I->T stats: "
+            f"before(mean={correction_diagnostics.get('alpha_i2t_stats_before_gate', {}).get('mean', 0.0):.4f}, "
+            f"std={correction_diagnostics.get('alpha_i2t_stats_before_gate', {}).get('std', 0.0):.4f}) "
+            f"after(mean={correction_diagnostics.get('alpha_i2t_stats_after_gate', {}).get('mean', 0.0):.4f}, "
+            f"std={correction_diagnostics.get('alpha_i2t_stats_after_gate', {}).get('std', 0.0):.4f})"
+        )
+        log_cross_modal(
+            f"local_node_confidence_mode={correction_diagnostics.get('effective_local_node_confidence_mode', 'none')} "
+            f"(requested={correction_diagnostics.get('requested_local_node_confidence_mode', 'none')})"
+        )
+        image_local_diag = correction_diagnostics.get("image_local_confidence_diagnostics", {})
+        text_local_diag = correction_diagnostics.get("text_local_confidence_diagnostics", {})
+        log_cross_modal(
+            "edge confidence stats: "
+            f"C^I(mean={correction_diagnostics.get('c_img_stats', {}).get('mean', 0.0):.4f}, "
+            f"std={correction_diagnostics.get('c_img_stats', {}).get('std', 0.0):.4f}) "
+            f"C^T(mean={correction_diagnostics.get('c_txt_stats', {}).get('mean', 0.0):.4f}, "
+            f"std={correction_diagnostics.get('c_txt_stats', {}).get('std', 0.0):.4f})"
+        )
+        log_cross_modal(
+            "image local views: "
+            f"entropy(mean={image_local_diag.get('entropy_view_stats', {}).get('mean', 0.0):.4f}) "
+            f"agreement(mean={image_local_diag.get('agreement_view_stats', {}).get('mean', 0.0):.4f}) "
+            f"diffusion(mean={image_local_diag.get('diffusion_view_stats', {}).get('mean', 0.0):.4f})"
+        )
+        log_cross_modal(
+            "text local views: "
+            f"entropy(mean={text_local_diag.get('entropy_view_stats', {}).get('mean', 0.0):.4f}) "
+            f"agreement(mean={text_local_diag.get('agreement_view_stats', {}).get('mean', 0.0):.4f}) "
+            f"diffusion(mean={text_local_diag.get('diffusion_view_stats', {}).get('mean', 0.0):.4f})"
+        )
+        if effective_correction_fusion_mode == "legacy":
+            log_cross_modal("legacy correction_fusion_mode detected: bypassing thresholded alpha gate during correction and reusing original confidence-aware fusion")
+            alpha_txt_to_img_used = alpha_txt_to_img
+            alpha_img_to_txt_used = alpha_img_to_txt
+        else:
+            alpha_txt_to_img_used = alpha_txt_to_img_eff
+            alpha_img_to_txt_used = alpha_img_to_txt_eff
+        if correction_diagnostics.get("image_kappa_stats") is not None and correction_diagnostics.get("text_kappa_stats") is not None:
+            image_kappa_stats = correction_diagnostics.get("image_kappa_stats")
+            text_kappa_stats = correction_diagnostics.get("text_kappa_stats")
             log_cross_modal(
-                "local node confidence enabled: "
+                "local node confidence stats: "
                 f"image(mean={image_kappa_stats['mean']:.4f}, std={image_kappa_stats['std']:.4f}, "
                 f"min={image_kappa_stats['min']:.4f}, max={image_kappa_stats['max']:.4f}), "
                 f"text(mean={text_kappa_stats['mean']:.4f}, std={text_kappa_stats['std']:.4f}, "
                 f"min={text_kappa_stats['min']:.4f}, max={text_kappa_stats['max']:.4f})"
             )
+        else:
+            log_cross_modal(str(correction_diagnostics.get("edge_confidence_note", "mode=none uses C=rho*P")))
         (
             corrected_image_directed,
             corrected_image_symmetric,
@@ -777,23 +1214,34 @@ def run_cross_modal_topology(args):
         ) = apply_bidirectional_correction(
             image_bundle["graph"],
             text_bundle["graph"],
-            alpha_txt_to_img,
-            alpha_img_to_txt,
+            alpha_txt_to_img_used,
+            alpha_img_to_txt_used,
         )
     else:
         raise ValueError(f"Unsupported correction mode: {correction_mode}")
 
     log_cross_modal("building unified topology B*")
-    unified_graph = unify_topology(
+    unified_graph, fusion_diagnostics = unify_topology(
         corrected_image_symmetric,
         corrected_text_symmetric,
         mode=args.fusion_mode,
+        correction_fusion_mode=effective_correction_fusion_mode,
         rho_img=rho_img,
         rho_txt=rho_txt,
         lambda_f=getattr(args, "lambda_f", 1.0),
         mu_f=getattr(args, "mu_f", 1.0),
         eps=getattr(args, "fusion_eps", 1e-8),
+        alpha_txt_to_img_eff=alpha_txt_to_img_eff if correction_mode == "bidirectional" else None,
+        alpha_img_to_txt_eff=alpha_img_to_txt_eff if correction_mode == "bidirectional" else None,
     )
+    if fusion_diagnostics:
+        log_cross_modal(
+            "autonomy fusion omega stats: "
+            f"omega^I(mean={fusion_diagnostics.get('omega_img_stats', {}).get('mean', 0.0):.4f}, "
+            f"std={fusion_diagnostics.get('omega_img_stats', {}).get('std', 0.0):.4f}), "
+            f"omega^T(mean={fusion_diagnostics.get('omega_txt_stats', {}).get('mean', 0.0):.4f}, "
+            f"std={fusion_diagnostics.get('omega_txt_stats', {}).get('std', 0.0):.4f})"
+        )
 
     log_cross_modal("summarizing corrected and unified graphs")
     corrected_image_summary = summarize_graph(corrected_image_symmetric)
@@ -825,6 +1273,9 @@ def run_cross_modal_topology(args):
         corrected_summary,
         unified_summary,
         unified_spectral_artifacts,
+        correction_diagnostics,
+        fusion_diagnostics,
+        effective_correction_fusion_mode,
     )
 
     output_dir = build_output_dir(args)
