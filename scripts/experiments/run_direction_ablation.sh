@@ -38,6 +38,14 @@ run_cross_stage() {
     return 0
   fi
 
+  local wavelet_extra_args=()
+  if [[ -n "${WAVELET_FUSION_WEIGHT_A_SCALES}" ]]; then
+    wavelet_extra_args+=(--wavelet_fusion_weight_a_scales "${WAVELET_FUSION_WEIGHT_A_SCALES}")
+  fi
+  if [[ -n "${WAVELET_FUSION_WEIGHT_B_SCALES}" ]]; then
+    wavelet_extra_args+=(--wavelet_fusion_weight_b_scales "${WAVELET_FUSION_WEIGHT_B_SCALES}")
+  fi
+
   stage_log "Cross-modal start: variant=${variant} correction=${correction_mode} fusion=${fusion_mode}"
   python "${PROJECT_ROOT}/run_cross_modal_topology.py" \
     --dataset "${DATASET}" \
@@ -52,7 +60,26 @@ run_cross_stage() {
     --k "${K_NEIGHBORS}" \
     --alpha "${ALPHA}" \
     --correction_mode "${correction_mode}" \
+    --correction_score_mode "${CORRECTION_SCORE_MODE}" \
+    --collapse_score_mode "${COLLAPSE_SCORE_MODE}" \
+    --collapse_score_weight_edge "${COLLAPSE_SCORE_WEIGHT_EDGE}" \
+    --collapse_score_weight_a2b "${COLLAPSE_SCORE_WEIGHT_A2B}" \
+    --collapse_score_weight_b2a "${COLLAPSE_SCORE_WEIGHT_B2A}" \
+    --collapse_score_weight_nbr2nbr "${COLLAPSE_SCORE_WEIGHT_NBR2NBR}" \
+    --collapse_neighbor_topk "${COLLAPSE_NEIGHBOR_TOPK}" \
+    --fusion_domain_mode "${FUSION_DOMAIN_MODE}" \
     --fusion_mode "${fusion_mode}" \
+    --wavelet_fusion_scales "${WAVELET_FUSION_SCALES}" \
+    --wavelet_fusion_impl "${WAVELET_FUSION_IMPL}" \
+    --wavelet_fusion_probe_mode "${WAVELET_FUSION_PROBE_MODE}" \
+    --wavelet_fusion_probe_dim "${WAVELET_FUSION_PROBE_DIM}" \
+    --wavelet_fusion_weight_mode "${WAVELET_FUSION_WEIGHT_MODE}" \
+    --wavelet_latent_lambda_sparse "${WAVELET_LATENT_LAMBDA_SPARSE}" \
+    --wavelet_latent_lambda_sym "${WAVELET_LATENT_LAMBDA_SYM}" \
+    --wavelet_latent_lambda_nonneg "${WAVELET_LATENT_LAMBDA_NONNEG}" \
+    --wavelet_latent_reconstruction_mode "${WAVELET_LATENT_RECONSTRUCTION_MODE}" \
+    --wavelet_latent_postprocess_topk "${WAVELET_LATENT_POSTPROCESS_TOPK}" \
+    --wavelet_latent_postprocess_threshold "${WAVELET_LATENT_POSTPROCESS_THRESHOLD}" \
     --tau_g 0.5 \
     --correction_eps 1e-8 \
     --lambda_f 1.0 \
@@ -61,6 +88,7 @@ run_cross_stage() {
     --num_eigs "${CROSS_MODAL_NUM_EIGS}" \
     --spectral_embedding_dim "${CROSS_MODAL_EMBED_DIM}" \
     --spectrum_solver_mode normalized_adjacency_largest \
+    "${wavelet_extra_args[@]}" \
     > "${log_path}" 2>&1
 }
 
@@ -123,7 +151,26 @@ run_selection_and_train() {
         --k "${K_NEIGHBORS}"
         --alpha "${ALPHA}"
         --correction_mode "${correction_mode}"
+        --correction_score_mode "${CORRECTION_SCORE_MODE}"
+        --collapse_score_mode "${COLLAPSE_SCORE_MODE}"
+        --collapse_score_weight_edge "${COLLAPSE_SCORE_WEIGHT_EDGE}"
+        --collapse_score_weight_a2b "${COLLAPSE_SCORE_WEIGHT_A2B}"
+        --collapse_score_weight_b2a "${COLLAPSE_SCORE_WEIGHT_B2A}"
+        --collapse_score_weight_nbr2nbr "${COLLAPSE_SCORE_WEIGHT_NBR2NBR}"
+        --collapse_neighbor_topk "${COLLAPSE_NEIGHBOR_TOPK}"
+        --fusion_domain_mode "${FUSION_DOMAIN_MODE}"
         --fusion_mode "${fusion_mode}"
+        --wavelet_fusion_scales "${WAVELET_FUSION_SCALES}"
+        --wavelet_fusion_impl "${WAVELET_FUSION_IMPL}"
+        --wavelet_fusion_probe_mode "${WAVELET_FUSION_PROBE_MODE}"
+        --wavelet_fusion_probe_dim "${WAVELET_FUSION_PROBE_DIM}"
+        --wavelet_fusion_weight_mode "${WAVELET_FUSION_WEIGHT_MODE}"
+        --wavelet_latent_lambda_sparse "${WAVELET_LATENT_LAMBDA_SPARSE}"
+        --wavelet_latent_lambda_sym "${WAVELET_LATENT_LAMBDA_SYM}"
+        --wavelet_latent_lambda_nonneg "${WAVELET_LATENT_LAMBDA_NONNEG}"
+        --wavelet_latent_reconstruction_mode "${WAVELET_LATENT_RECONSTRUCTION_MODE}"
+        --wavelet_latent_postprocess_topk "${WAVELET_LATENT_POSTPROCESS_TOPK}"
+        --wavelet_latent_postprocess_threshold "${WAVELET_LATENT_POSTPROCESS_THRESHOLD}"
         --tau_g 0.5
         --correction_eps 1e-8
         --lambda_f 1.0
@@ -165,6 +212,12 @@ run_selection_and_train() {
       fi
       if [[ "${PROXY_USE_DPP}" == "1" ]]; then
         benchmark_cmd+=(--use_dpp)
+      fi
+      if [[ -n "${WAVELET_FUSION_WEIGHT_A_SCALES}" ]]; then
+        benchmark_cmd+=(--wavelet_fusion_weight_a_scales "${WAVELET_FUSION_WEIGHT_A_SCALES}")
+      fi
+      if [[ -n "${WAVELET_FUSION_WEIGHT_B_SCALES}" ]]; then
+        benchmark_cmd+=(--wavelet_fusion_weight_b_scales "${WAVELET_FUSION_WEIGHT_B_SCALES}")
       fi
       "${benchmark_cmd[@]}" "${selection_extra_args[@]}" > "${select_log}" 2>&1
     else

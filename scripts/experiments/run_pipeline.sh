@@ -134,6 +134,25 @@ if [[ "${ENABLE_SELECTION_EFFICIENCY_BENCHMARK}" == "1" ]]; then
     --text_metric "$TOPOLOGY_METRIC_TEXT"
     --k "$K_NEIGHBORS"
     --alpha "$ALPHA"
+    --correction_score_mode "$CORRECTION_SCORE_MODE"
+    --collapse_score_mode "$COLLAPSE_SCORE_MODE"
+    --collapse_score_weight_edge "$COLLAPSE_SCORE_WEIGHT_EDGE"
+    --collapse_score_weight_a2b "$COLLAPSE_SCORE_WEIGHT_A2B"
+    --collapse_score_weight_b2a "$COLLAPSE_SCORE_WEIGHT_B2A"
+    --collapse_score_weight_nbr2nbr "$COLLAPSE_SCORE_WEIGHT_NBR2NBR"
+    --collapse_neighbor_topk "$COLLAPSE_NEIGHBOR_TOPK"
+    --fusion_domain_mode "$FUSION_DOMAIN_MODE"
+    --wavelet_fusion_scales "$WAVELET_FUSION_SCALES"
+    --wavelet_fusion_impl "$WAVELET_FUSION_IMPL"
+    --wavelet_fusion_probe_mode "$WAVELET_FUSION_PROBE_MODE"
+    --wavelet_fusion_probe_dim "$WAVELET_FUSION_PROBE_DIM"
+    --wavelet_fusion_weight_mode "$WAVELET_FUSION_WEIGHT_MODE"
+    --wavelet_latent_lambda_sparse "$WAVELET_LATENT_LAMBDA_SPARSE"
+    --wavelet_latent_lambda_sym "$WAVELET_LATENT_LAMBDA_SYM"
+    --wavelet_latent_lambda_nonneg "$WAVELET_LATENT_LAMBDA_NONNEG"
+    --wavelet_latent_reconstruction_mode "$WAVELET_LATENT_RECONSTRUCTION_MODE"
+    --wavelet_latent_postprocess_topk "$WAVELET_LATENT_POSTPROCESS_TOPK"
+    --wavelet_latent_postprocess_threshold "$WAVELET_LATENT_POSTPROCESS_THRESHOLD"
     --budget_ratio "$SUBSET_RATIO"
     --selection_method "$SELECTION_METHOD"
     --device "$DEVICE"
@@ -164,6 +183,12 @@ if [[ "${ENABLE_SELECTION_EFFICIENCY_BENCHMARK}" == "1" ]]; then
   if [[ -n "${TOPOLOGY_MULTI_SCALE_KS}" ]]; then
     BENCHMARK_CMD+=(--multi_scale_ks "$TOPOLOGY_MULTI_SCALE_KS")
   fi
+  if [[ -n "${WAVELET_FUSION_WEIGHT_A_SCALES}" ]]; then
+    BENCHMARK_CMD+=(--wavelet_fusion_weight_a_scales "$WAVELET_FUSION_WEIGHT_A_SCALES")
+  fi
+  if [[ -n "${WAVELET_FUSION_WEIGHT_B_SCALES}" ]]; then
+    BENCHMARK_CMD+=(--wavelet_fusion_weight_b_scales "$WAVELET_FUSION_WEIGHT_B_SCALES")
+  fi
   if [[ "${PROXY_USE_PDAS}" == "1" ]]; then
     BENCHMARK_CMD+=(--use_pdas)
   fi
@@ -190,11 +215,36 @@ else
     --text_metric "$TOPOLOGY_METRIC_TEXT"
     --k "$K_NEIGHBORS"
     --alpha "$ALPHA"
+    --correction_score_mode "$CORRECTION_SCORE_MODE"
+    --collapse_score_mode "$COLLAPSE_SCORE_MODE"
+    --collapse_score_weight_edge "$COLLAPSE_SCORE_WEIGHT_EDGE"
+    --collapse_score_weight_a2b "$COLLAPSE_SCORE_WEIGHT_A2B"
+    --collapse_score_weight_b2a "$COLLAPSE_SCORE_WEIGHT_B2A"
+    --collapse_score_weight_nbr2nbr "$COLLAPSE_SCORE_WEIGHT_NBR2NBR"
+    --collapse_neighbor_topk "$COLLAPSE_NEIGHBOR_TOPK"
+    --fusion_domain_mode "$FUSION_DOMAIN_MODE"
+    --wavelet_fusion_scales "$WAVELET_FUSION_SCALES"
+    --wavelet_fusion_impl "$WAVELET_FUSION_IMPL"
+    --wavelet_fusion_probe_mode "$WAVELET_FUSION_PROBE_MODE"
+    --wavelet_fusion_probe_dim "$WAVELET_FUSION_PROBE_DIM"
+    --wavelet_fusion_weight_mode "$WAVELET_FUSION_WEIGHT_MODE"
+    --wavelet_latent_lambda_sparse "$WAVELET_LATENT_LAMBDA_SPARSE"
+    --wavelet_latent_lambda_sym "$WAVELET_LATENT_LAMBDA_SYM"
+    --wavelet_latent_lambda_nonneg "$WAVELET_LATENT_LAMBDA_NONNEG"
+    --wavelet_latent_reconstruction_mode "$WAVELET_LATENT_RECONSTRUCTION_MODE"
+    --wavelet_latent_postprocess_topk "$WAVELET_LATENT_POSTPROCESS_TOPK"
+    --wavelet_latent_postprocess_threshold "$WAVELET_LATENT_POSTPROCESS_THRESHOLD"
     --num_eigs "$CROSS_MODAL_NUM_EIGS"
     --spectral_embedding_dim "$CROSS_MODAL_EMBED_DIM"
   )
   if [[ -n "${TOPOLOGY_MULTI_SCALE_KS}" ]]; then
     CROSS_MODAL_CMD+=(--multi_scale_ks "$TOPOLOGY_MULTI_SCALE_KS")
+  fi
+  if [[ -n "${WAVELET_FUSION_WEIGHT_A_SCALES}" ]]; then
+    CROSS_MODAL_CMD+=(--wavelet_fusion_weight_a_scales "$WAVELET_FUSION_WEIGHT_A_SCALES")
+  fi
+  if [[ -n "${WAVELET_FUSION_WEIGHT_B_SCALES}" ]]; then
+    CROSS_MODAL_CMD+=(--wavelet_fusion_weight_b_scales "$WAVELET_FUSION_WEIGHT_B_SCALES")
   fi
   "${CROSS_MODAL_CMD[@]}"
   stage_log "Stage 4/8 cross-modal topology done"

@@ -208,6 +208,12 @@ run_precompute_if_needed() {
   if [[ "${ENABLE_LOCAL_NODE_CONFIDENCE}" == "1" ]]; then
     cross_extra_args+=(--enable_local_node_confidence)
   fi
+  if [[ -n "${WAVELET_FUSION_WEIGHT_A_SCALES}" ]]; then
+    cross_extra_args+=(--wavelet_fusion_weight_a_scales "${WAVELET_FUSION_WEIGHT_A_SCALES}")
+  fi
+  if [[ -n "${WAVELET_FUSION_WEIGHT_B_SCALES}" ]]; then
+    cross_extra_args+=(--wavelet_fusion_weight_b_scales "${WAVELET_FUSION_WEIGHT_B_SCALES}")
+  fi
 
   stage_log "Cross-modal start: correction_fusion=${CORRECTION_FUSION_MODE} local_conf=${LOCAL_NODE_CONFIDENCE_MODE}"
   python "${PROJECT_ROOT}/run_cross_modal_topology.py" \
@@ -223,8 +229,27 @@ run_precompute_if_needed() {
     --k "${K_NEIGHBORS}" \
     --alpha "${ALPHA}" \
     --correction_mode "${CORRECTION_MODE}" \
+    --correction_score_mode "${CORRECTION_SCORE_MODE}" \
+    --collapse_score_mode "${COLLAPSE_SCORE_MODE}" \
+    --collapse_score_weight_edge "${COLLAPSE_SCORE_WEIGHT_EDGE}" \
+    --collapse_score_weight_a2b "${COLLAPSE_SCORE_WEIGHT_A2B}" \
+    --collapse_score_weight_b2a "${COLLAPSE_SCORE_WEIGHT_B2A}" \
+    --collapse_score_weight_nbr2nbr "${COLLAPSE_SCORE_WEIGHT_NBR2NBR}" \
+    --collapse_neighbor_topk "${COLLAPSE_NEIGHBOR_TOPK}" \
+    --fusion_domain_mode "${FUSION_DOMAIN_MODE}" \
     --fusion_mode "${FUSION_MODE}" \
     --correction_fusion_mode "${CORRECTION_FUSION_MODE}" \
+    --wavelet_fusion_scales "${WAVELET_FUSION_SCALES}" \
+    --wavelet_fusion_impl "${WAVELET_FUSION_IMPL}" \
+    --wavelet_fusion_probe_mode "${WAVELET_FUSION_PROBE_MODE}" \
+    --wavelet_fusion_probe_dim "${WAVELET_FUSION_PROBE_DIM}" \
+    --wavelet_fusion_weight_mode "${WAVELET_FUSION_WEIGHT_MODE}" \
+    --wavelet_latent_lambda_sparse "${WAVELET_LATENT_LAMBDA_SPARSE}" \
+    --wavelet_latent_lambda_sym "${WAVELET_LATENT_LAMBDA_SYM}" \
+    --wavelet_latent_lambda_nonneg "${WAVELET_LATENT_LAMBDA_NONNEG}" \
+    --wavelet_latent_reconstruction_mode "${WAVELET_LATENT_RECONSTRUCTION_MODE}" \
+    --wavelet_latent_postprocess_topk "${WAVELET_LATENT_POSTPROCESS_TOPK}" \
+    --wavelet_latent_postprocess_threshold "${WAVELET_LATENT_POSTPROCESS_THRESHOLD}" \
     --correction_gate_tau_high "${CORRECTION_GATE_TAU_HIGH}" \
     --correction_gate_tau_low "${CORRECTION_GATE_TAU_LOW}" \
     --correction_gate_tau_gap "${CORRECTION_GATE_TAU_GAP}" \

@@ -38,7 +38,13 @@ def build_parser():
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--proxy_projection_dim", type=int, default=128)
     parser.add_argument("--proxy_init_method", type=str, default="kmeans", choices=["kmeans", "minibatch_kmeans", "sample"])
-    parser.add_argument("--proxy_loss_type", type=str, default=None, choices=["pdcfd", "diffusion_mmd", "diffusion_swd", "diffusion_ms_swd"], help="Primary proxy distribution matching loss. If omitted, defaults to diffusion_ms_swd unless a deprecated legacy objective flag is explicitly set.")
+    parser.add_argument(
+        "--proxy_loss_type",
+        type=str,
+        default=None,
+        choices=["wavelet_main", "pdcfd", "diffusion_mmd", "diffusion_swd", "diffusion_ms_swd", "legacy_pdcfd", "legacy_cfd", "legacy_diffusion_mmd", "legacy_diffusion_swd", "legacy_diffusion_ms_swd"],
+        help="Primary proxy distribution matching loss. If omitted, defaults to wavelet_main unless a deprecated legacy objective flag is explicitly set.",
+    )
     parser.add_argument("--proxy_objective_mode", type=str, default=None, choices=["cfd", "pd_cfd"], help="Deprecated legacy objective switch kept for backward compatibility.")
     parser.add_argument("--use_pdcfd", action="store_true")
     parser.add_argument("--proxy_num_frequencies", type=int, default=64, help="Deprecated: only used by legacy CFD / PD-CFD paths.")
@@ -63,6 +69,13 @@ def build_parser():
     parser.add_argument("--wavelet_swd_num_projections", type=int, default=None)
     parser.add_argument("--wavelet_swd_p", type=float, default=None)
     parser.add_argument("--wavelet_schedule", type=str, default="coarse_to_fine", choices=["coarse_to_fine", "all"])
+    parser.add_argument("--lambda_main", type=float, default=1.0)
+    parser.add_argument("--wavelet_main_scales", type=str, default="1,2,4")
+    parser.add_argument("--wavelet_main_scale_weights", type=str, default=None)
+    parser.add_argument("--wavelet_main_swd_num_projections", type=int, default=None)
+    parser.add_argument("--wavelet_cov_weight", type=float, default=0.5)
+    parser.add_argument("--wavelet_edge_weight", type=float, default=0.25)
+    parser.add_argument("--wavelet_curriculum_schedule", type=str, default="coarse_to_fine", choices=["coarse_to_fine", "all"])
     parser.add_argument("--use_pdas", action="store_true", help="Deprecated: only used by legacy CFD / PD-CFD paths.")
     parser.add_argument("--pdas_num_stages", type=int, default=4, help="Deprecated: only used by legacy CFD / PD-CFD paths.")
     parser.add_argument("--pdas_schedule_mode", type=str, default="low_to_high", choices=["low_to_high", "uniform"], help="Deprecated: only used by legacy CFD / PD-CFD paths.")
@@ -85,6 +98,8 @@ def build_parser():
     parser.add_argument("--reg_beta_topo", type=float, default=1.0, help="Beta in L_reg = alpha * L_div + beta * L_topo + gamma * L_init.")
     parser.add_argument("--reg_gamma_init", type=float, default=1.0, help="Gamma in L_reg = alpha * L_div + beta * L_topo + gamma * L_init.")
     parser.add_argument("--enable_lsrc", action="store_true")
+    parser.add_argument("--keep_lsrc", action="store_true", default=True)
+    parser.add_argument("--disable_lsrc", action="store_false", dest="keep_lsrc")
     parser.add_argument("--lsrc_k", type=int, default=32)
     parser.add_argument("--lsrc_tau_r", type=float, default=1.0)
     parser.add_argument("--lsrc_tau_c", type=float, default=1.0)
@@ -102,8 +117,9 @@ def build_parser():
     parser.add_argument("--matching_cost_mode", type=str, default="candidate_topk", choices=["candidate_topk", "degree_aware_global"])
     parser.add_argument("--topology_weight", type=float, default=0.5)
     parser.add_argument("--topology_hop_weight", type=float, default=0.5)
-    parser.add_argument("--cost_alpha_diff", type=float, default=1.0)
-    parser.add_argument("--cost_beta_wavelet", type=float, default=0.25)
+    parser.add_argument("--cost_alpha_diff", type=float, default=0.25)
+    parser.add_argument("--cost_beta_wavelet", type=float, default=1.0)
+    parser.add_argument("--matching_wavelet_weight", type=float, default=1.0)
     parser.add_argument("--cost_gamma_topo", type=float, default=0.1)
     parser.add_argument("--cost_eta_lsrc", type=float, default=0.1)
     return parser
@@ -120,7 +136,7 @@ def main():
         elif args.proxy_objective_mode == "cfd":
             args.proxy_loss_type = "cfd"
         else:
-            args.proxy_loss_type = "diffusion_ms_swd"
+            args.proxy_loss_type = "wavelet_main"
     outputs = run_subset_selection(args)
     print("Subset selection finished:")
     print(f"  output_dir: {outputs['output_dir']}")

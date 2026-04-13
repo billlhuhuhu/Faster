@@ -331,6 +331,74 @@ def interpolate_proxy_wavelet_signature(proxy_points, anchor_points, anchor_sign
     return weights @ anchor_signatures
 
 
+def parse_scale_weight_values(scales, raw):
+    scales = parse_wavelet_scales(scales)
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        items = [item.strip() for item in raw.split(",") if item.strip()]
+    else:
+        items = list(raw)
+    if len(items) == 1 and len(scales) > 1:
+        return {int(scale): float(items[0]) for scale in scales}
+    if len(items) != len(scales):
+        raise ValueError(f"Scale weight count mismatch: got {len(items)} for {len(scales)} scales ({scales})")
+    return {int(scale): float(item) for scale, item in zip(scales, items)}
+
+
+def resolve_explicit_active_scale_weights(scales, active_scales, raw_weights, eps=1e-8):
+    active_scales = [int(scale) for scale in active_scales]
+    parsed = parse_scale_weight_values(scales, raw_weights)
+    if parsed is None:
+        weight = 1.0 / max(len(active_scales), 1)
+        return {int(scale): float(weight) for scale in active_scales}
+    selected = {int(scale): float(parsed[int(scale)]) for scale in active_scales}
+    total = sum(abs(value) for value in selected.values())
+    total = max(float(total), float(eps))
+    return {int(scale): float(value / total) for scale, value in selected.items()}
+
+
+def compute_wavelet_coverage_loss(proxy_signature, target_signature, tau=1.0, eps=1e-8):
+    tau = max(float(tau), float(eps))
+    sqdist = torch.cdist(target_signature, proxy_signature, p=2) ** 2
+    coverage = torch.exp(-sqdist / tau).sum(dim=1) / max(int(proxy_signature.shape[0]), 1)
+    loss = -torch.mean(torch.log(coverage + float(eps)))
+    return loss, coverage
+
+
+def compute_wavelet_edge_loss(proxy_signature, target_signature, eps=1e-8):
+    sqdist = torch.cdist(target_signature, proxy_signature, p=2) ** 2
+    nearest = torch.min(sqdist, dim=1).values
+    energy = torch.linalg.norm(target_signature, dim=1)
+    if energy.numel() == 0:
+        return torch.tensor(0.0, dtype=proxy_signature.dtype, device=proxy_signature.device), energy
+    weights = energy / torch.clamp(torch.mean(energy), min=float(eps))
+    loss = torch.mean(weights * nearest)
+    return loss, weights
+
+
+def resolve_proxy_loss_type(proxy_loss_type, objective_mode=None):
+    active_loss_type = str(proxy_loss_type or "").strip().lower()
+    if not active_loss_type:
+        objective_mode = str(objective_mode or "").strip().lower()
+        if objective_mode == "pd_cfd":
+            active_loss_type = "pdcfd"
+        elif objective_mode == "cfd":
+            active_loss_type = "cfd"
+        else:
+            active_loss_type = "wavelet_main"
+    alias_map = {
+        "pd_cfd": "pdcfd",
+        "legacy_pdcfd": "pdcfd",
+        "legacy_cfd": "cfd",
+        "legacy_diffusion_mmd": "diffusion_mmd",
+        "legacy_diffusion_swd": "diffusion_swd",
+        "legacy_diffusion_ms_swd": "diffusion_ms_swd",
+        "legacy_diffusion": "diffusion_ms_swd",
+    }
+    return alias_map.get(active_loss_type, active_loss_type)
+
+
 def dpp_diversity_loss(proxy_points, kernel="rbf", sigma=1.0, eps=1e-6):
     if kernel != "rbf":
         raise ValueError(f"Unsupported diversity kernel: {kernel}")
@@ -618,7 +686,7 @@ def optimize_proxy_points(
     reg_weight=1e-2,
     target_batch_size=4096,
     proxy_batch_size=4096,
-    proxy_loss_type="diffusion_ms_swd",
+    proxy_loss_type="wavelet_main",
     objective_mode="cfd",
     use_pdas=False,
     pdas_num_stages=4,
@@ -676,21 +744,32 @@ def optimize_proxy_points(
     swd_p=2,
     swd_projection_seed=None,
     swd_use_fixed_projections=False,
+    lambda_main=1.0,
+    wavelet_main_scales=None,
+    wavelet_main_scale_weights=None,
+    wavelet_main_swd_num_projections=None,
+    wavelet_cov_weight=0.5,
+    wavelet_edge_weight=0.25,
+    wavelet_curriculum_schedule="coarse_to_fine",
+    keep_lsrc=True,
 ):
-    active_loss_type = str(proxy_loss_type or "").strip().lower()
-    if not active_loss_type:
-        active_loss_type = "pdcfd" if str(objective_mode or "pd_cfd").lower() == "pd_cfd" else str(objective_mode).lower()
-    if active_loss_type == "pd_cfd":
-        active_loss_type = "pdcfd"
-    if active_loss_type not in {"diffusion_mmd", "diffusion_swd", "diffusion_ms_swd", "pdcfd", "cfd"}:
+    active_loss_type = resolve_proxy_loss_type(proxy_loss_type, objective_mode=objective_mode)
+    if active_loss_type not in {"wavelet_main", "diffusion_mmd", "diffusion_swd", "diffusion_ms_swd", "pdcfd", "cfd"}:
         raise ValueError(f"Unsupported proxy loss type: {active_loss_type}")
-    if bool(use_wavelet_multiscale) and active_loss_type not in {"diffusion_mmd", "diffusion_swd", "diffusion_ms_swd"}:
-        raise ValueError("Graph wavelet multiscale loss currently requires a diffusion-space proxy loss (diffusion_mmd, diffusion_swd, or diffusion_ms_swd).")
-    if active_loss_type == "diffusion_ms_swd" and not bool(use_wavelet_multiscale):
+    effective_use_wavelet_multiscale = bool(use_wavelet_multiscale or active_loss_type == "wavelet_main")
+    if effective_use_wavelet_multiscale and active_loss_type not in {"wavelet_main", "diffusion_mmd", "diffusion_swd", "diffusion_ms_swd"}:
+        raise ValueError(
+            "Graph wavelet multiscale loss currently requires wavelet_main or a diffusion-space proxy loss "
+            "(diffusion_mmd, diffusion_swd, or diffusion_ms_swd)."
+        )
+    if active_loss_type == "diffusion_ms_swd" and not effective_use_wavelet_multiscale:
         raise ValueError("diffusion_ms_swd requires wavelet multiscale features and an active scale schedule.")
+    if active_loss_type == "wavelet_main" and wavelet_graph is None:
+        raise ValueError("wavelet_main requires unified graph wavelet signatures, but wavelet_graph is None.")
 
     lambda_diff = float(lambda_diff)
     lambda_ms_effective = float(wavelet_loss_weight if lambda_ms is None else lambda_ms)
+    lambda_main = float(lambda_main)
     lambda_reg = float(lambda_reg)
     reg_alpha_div = float(reg_alpha_div)
     reg_beta_topo = float(reg_beta_topo)
@@ -701,10 +780,14 @@ def optimize_proxy_points(
     swd_use_fixed_projections = bool(swd_use_fixed_projections)
     wavelet_swd_num_projections = swd_num_projections if wavelet_swd_num_projections is None else max(1, int(wavelet_swd_num_projections))
     wavelet_swd_p = swd_p if wavelet_swd_p is None else max(float(wavelet_swd_p), 1.0)
-    effective_wavelet_distance_type = "swd" if active_loss_type == "diffusion_ms_swd" else wavelet_distance_type
+    wavelet_main_swd_num_projections = (
+        wavelet_swd_num_projections if wavelet_main_swd_num_projections is None else max(1, int(wavelet_main_swd_num_projections))
+    )
+    effective_wavelet_distance_type = "swd" if active_loss_type in {"diffusion_ms_swd", "wavelet_main"} else wavelet_distance_type
     legacy_lsrc_weight_mode = lambda_lsrc is None
     lambda_lsrc_effective = 1.0 if legacy_lsrc_weight_mode else float(lambda_lsrc)
     lsrc_mu_effective = float(lsrc_mu)
+    effective_keep_lsrc = bool(keep_lsrc) or bool(enable_lsrc)
 
     projected_representation, projection_matrix = random_project_representation(
         representation,
@@ -717,12 +800,13 @@ def optimize_proxy_points(
     lsrc_reference = projected_representation.astype(np.float32)
     wavelet_graph_signatures = None
     wavelet_scales = parse_wavelet_scales(wavelet_scales)
+    wavelet_main_scales = parse_wavelet_scales(wavelet_main_scales if wavelet_main_scales is not None else wavelet_scales)
     lsrc_relation_graph = None
     lsrc_relation_graphs = None
-    if bool(enable_lsrc):
+    if effective_keep_lsrc:
         if lsrc_image_graph is None or lsrc_text_graph is None:
             raise ValueError("LSRC is enabled but image/text graphs were not provided.")
-        lsrc_scale_list = wavelet_scales if bool(use_wavelet_multiscale) else [1]
+        lsrc_scale_list = wavelet_main_scales if effective_use_wavelet_multiscale else [1]
         lsrc_relation_graph_np = {
             int(scale): build_lsrc_relation_graph(
                 lsrc_reference,
@@ -742,7 +826,7 @@ def optimize_proxy_points(
     else:
         lsrc_relation_graph_np = None
 
-    if bool(use_wavelet_multiscale):
+    if effective_use_wavelet_multiscale:
         if wavelet_graph is None:
             raise ValueError("Wavelet multiscale loss is enabled but unified graph was not provided.")
         if effective_wavelet_distance_type not in {"mmd", "swd"}:
@@ -750,7 +834,7 @@ def optimize_proxy_points(
         wavelet_graph_signatures = build_multi_scale_wavelet_signatures(
             wavelet_graph,
             projected_representation,
-            wavelet_scales,
+            wavelet_main_scales if active_loss_type == "wavelet_main" else wavelet_scales,
             normalize=True,
         )
 
@@ -800,7 +884,7 @@ def optimize_proxy_points(
         }
         wavelet_anchor_signatures = {
             int(scale): wavelet_scale_tensors[int(scale)][anchor_indices]
-            for scale in wavelet_scales
+            for scale in (wavelet_main_scales if active_loss_type == "wavelet_main" else wavelet_scales)
         }
         wavelet_interp_tau = infer_mmd_bandwidth(wavelet_anchor_points, wavelet_anchor_points)
         if effective_wavelet_distance_type == "swd" and swd_use_fixed_projections:
@@ -812,7 +896,7 @@ def optimize_proxy_points(
                     dtype=wavelet_scale_tensors[int(scale)].dtype,
                     random_state=swd_projection_seed + int(scale),
                 )
-                for scale in wavelet_scales
+                for scale in (wavelet_main_scales if active_loss_type == "wavelet_main" else wavelet_scales)
             }
         else:
             wavelet_swd_fixed_projections = None
@@ -857,13 +941,21 @@ def optimize_proxy_points(
     final_lsrc_state = None
 
     for step in range(int(num_steps)):
-        if bool(use_wavelet_multiscale):
+        if effective_use_wavelet_multiscale:
+            active_scale_source = wavelet_main_scales if active_loss_type == "wavelet_main" else wavelet_scales
+            active_schedule = wavelet_curriculum_schedule if active_loss_type == "wavelet_main" else wavelet_schedule
             active_scales, scale_weights = resolve_active_scales(
-                wavelet_scales,
+                active_scale_source,
                 step=step,
                 total_steps=num_steps,
-                schedule=wavelet_schedule,
+                schedule=active_schedule,
             )
+            if active_loss_type == "wavelet_main":
+                scale_weights = resolve_explicit_active_scale_weights(
+                    active_scale_source,
+                    active_scales,
+                    wavelet_main_scale_weights,
+                )
         else:
             active_scales = [1]
             scale_weights = {1: 1.0}
@@ -959,7 +1051,7 @@ def optimize_proxy_points(
         ) if use_dpp or float(lambda_div) > 0 else torch.tensor(0.0, dtype=proxy_points.dtype, device=torch_device)
         match_loss = nearest_reference_loss(proxy_points, match_reference)
         graph_loss = nearest_reference_loss(proxy_points, graph_reference)
-        if bool(enable_lsrc):
+        if effective_keep_lsrc:
             lsrc_outputs = compute_multiscale_lsrc_outputs(
                 proxy_points,
                 full_repr,
@@ -990,7 +1082,7 @@ def optimize_proxy_points(
             lsrc_q = torch.tensor([], dtype=proxy_points.dtype, device=torch_device)
             lsrc_outputs = None
 
-        if bool(use_wavelet_multiscale):
+        if effective_use_wavelet_multiscale:
             sampled_target_indices = None
             if target_batch_size is not None and int(target_batch_size) > 0 and full_repr.shape[0] > int(target_batch_size):
                 sampled_target_indices = torch.randperm(full_repr.shape[0], device=torch_device)[: int(target_batch_size)]
@@ -1000,6 +1092,8 @@ def optimize_proxy_points(
             proxy_wavelet_points = proxy_points if sampled_proxy_indices is None else proxy_points[sampled_proxy_indices]
 
             loss_ms = torch.tensor(0.0, dtype=proxy_points.dtype, device=torch_device)
+            loss_wavelet_cov = torch.tensor(0.0, dtype=proxy_points.dtype, device=torch_device)
+            loss_wavelet_edge = torch.tensor(0.0, dtype=proxy_points.dtype, device=torch_device)
             per_scale_losses = {}
             for scale in active_scales:
                 target_signature = wavelet_scale_tensors[int(scale)]
@@ -1040,12 +1134,38 @@ def optimize_proxy_points(
                     )
                 per_scale_losses[int(scale)] = float(scale_loss.detach().cpu().item())
                 loss_ms = loss_ms + float(scale_weights[int(scale)]) * scale_loss
+                if active_loss_type == "wavelet_main":
+                    coverage_loss, coverage_values = compute_wavelet_coverage_loss(
+                        proxy_signature,
+                        target_signature,
+                        tau=wavelet_interp_tau,
+                        eps=lsrc_eps,
+                    )
+                    edge_loss, edge_weights = compute_wavelet_edge_loss(
+                        proxy_signature,
+                        target_signature,
+                        eps=lsrc_eps,
+                    )
+                    per_scale_losses[int(scale)] = {
+                        "dist": float(scale_loss.detach().cpu().item()),
+                        "cov": float(coverage_loss.detach().cpu().item()),
+                        "edge": float(edge_loss.detach().cpu().item()),
+                        "coverage_mean": float(coverage_values.detach().mean().cpu().item()),
+                        "edge_weight_mean": float(edge_weights.detach().mean().cpu().item()) if edge_weights.numel() > 0 else 0.0,
+                    }
+                    loss_wavelet_cov = loss_wavelet_cov + float(scale_weights[int(scale)]) * coverage_loss
+                    loss_wavelet_edge = loss_wavelet_edge + float(scale_weights[int(scale)]) * edge_loss
         else:
             per_scale_losses = {}
             loss_ms = torch.tensor(0.0, dtype=proxy_points.dtype, device=torch_device)
+            loss_wavelet_cov = torch.tensor(0.0, dtype=proxy_points.dtype, device=torch_device)
+            loss_wavelet_edge = torch.tensor(0.0, dtype=proxy_points.dtype, device=torch_device)
 
         old_global_swd = freq_loss if active_loss_type in {"diffusion_swd", "diffusion_ms_swd"} else torch.tensor(0.0, dtype=proxy_points.dtype, device=torch_device)
-        if active_loss_type == "diffusion_ms_swd":
+        if active_loss_type == "wavelet_main":
+            loss_main = loss_ms + float(wavelet_cov_weight) * loss_wavelet_cov + float(wavelet_edge_weight) * loss_wavelet_edge
+            loss_diff = loss_main
+        elif active_loss_type == "diffusion_ms_swd":
             loss_diff = loss_ms
         else:
             loss_diff = freq_loss
@@ -1054,8 +1174,8 @@ def optimize_proxy_points(
         loss_div = float(lambda_div) * div_loss
         loss_reg = reg_alpha_div * loss_div + reg_beta_topo * loss_topo + reg_gamma_init * loss_init
         loss_reg_block = lambda_reg * loss_reg
-        loss_global_alignment = lambda_diff * loss_diff
-        if active_loss_type == "diffusion_ms_swd":
+        loss_global_alignment = (lambda_main if active_loss_type == "wavelet_main" else lambda_diff) * loss_diff
+        if active_loss_type in {"diffusion_ms_swd", "wavelet_main"}:
             loss_multiscale = torch.tensor(0.0, dtype=proxy_points.dtype, device=torch_device)
         else:
             loss_multiscale = lambda_ms_effective * loss_ms
@@ -1071,11 +1191,12 @@ def optimize_proxy_points(
         optimizer.step()
 
         if step in {0, int(num_steps) - 1} or (step + 1) % max(1, int(num_steps) // 10) == 0:
-            if bool(use_wavelet_multiscale):
+            if effective_use_wavelet_multiscale:
                 print(
                     f"[proxy-opt] step={step + 1}/{int(num_steps)} active_scales={active_scales} "
                     f"loss_diff={float(loss_diff.detach().cpu().item()):.6f} "
                     f"loss_ms={float(loss_ms.detach().cpu().item()):.6f} "
+                    f"loss_main={float((loss_main.detach().cpu().item() if active_loss_type == 'wavelet_main' else loss_diff.detach().cpu().item())):.6f} "
                     f"loss_lsrc={float(loss_lsrc_block.detach().cpu().item()):.6f} "
                     f"loss_reg={float(loss_reg_block.detach().cpu().item()):.6f} "
                     f"scale_weights={{{', '.join(f'{int(scale)}:{float(scale_weights[scale]):.3f}' for scale in active_scales)}}}",
@@ -1087,7 +1208,10 @@ def optimize_proxy_points(
                     "total_loss": float(loss.detach().cpu().item()),
                     "loss_diff": float(loss_diff.detach().cpu().item()),
                     "loss_diff_type": active_loss_type,
+                    "loss_main": float((loss_main.detach().cpu().item() if active_loss_type == "wavelet_main" else loss_diff.detach().cpu().item())),
                     "loss_ms": float(loss_ms.detach().cpu().item()),
+                    "loss_wavelet_cov": float(loss_wavelet_cov.detach().cpu().item()),
+                    "loss_wavelet_edge": float(loss_wavelet_edge.detach().cpu().item()),
                     "loss_global_alignment": float(loss_global_alignment.detach().cpu().item()),
                     "loss_multiscale": float(loss_multiscale.detach().cpu().item()),
                     "loss_lsrc_block": float(loss_lsrc_block.detach().cpu().item()),
@@ -1116,15 +1240,27 @@ def optimize_proxy_points(
                         if active_loss_type == "diffusion_ms_swd"
                         else int(swd_num_projections) if active_loss_type == "diffusion_swd" else 0
                     ),
-                    "active_scales": [int(scale) for scale in active_scales] if bool(use_wavelet_multiscale) else [],
-                    "wavelet_scale_weights": {str(scale): float(scale_weights[scale]) for scale in active_scales} if bool(use_wavelet_multiscale) else {},
-                    "wavelet_scale_losses": {str(scale): float(per_scale_losses[scale]) for scale in per_scale_losses},
-                    "lsrc_scale_weights": {str(scale): float(scale_weights[scale]) for scale in active_scales} if bool(enable_lsrc) else {},
+                    "active_scales": [int(scale) for scale in active_scales] if effective_use_wavelet_multiscale else [],
+                    "wavelet_scale_weights": {str(scale): float(scale_weights[scale]) for scale in active_scales} if effective_use_wavelet_multiscale else {},
+                    "wavelet_scale_losses": {
+                        str(scale): (
+                            {k: float(v) for k, v in per_scale_losses[scale].items()}
+                            if isinstance(per_scale_losses[scale], dict)
+                            else float(per_scale_losses[scale])
+                        )
+                        for scale in per_scale_losses
+                    },
+                    "lsrc_scale_weights": {str(scale): float(scale_weights[scale]) for scale in active_scales} if effective_keep_lsrc else {},
                 }
             )
-            if bool(use_wavelet_multiscale):
-                history[-1].update({f"loss_ms_scale_{int(scale)}": float(per_scale_losses[int(scale)]) for scale in per_scale_losses})
-                history[-1].update({f"loss_diff_scale_{int(scale)}": float(per_scale_losses[int(scale)]) for scale in per_scale_losses})
+            if effective_use_wavelet_multiscale:
+                if active_loss_type == "wavelet_main":
+                    history[-1].update({f"loss_dist_scale_{int(scale)}": float(per_scale_losses[int(scale)]["dist"]) for scale in per_scale_losses})
+                    history[-1].update({f"loss_cov_scale_{int(scale)}": float(per_scale_losses[int(scale)]["cov"]) for scale in per_scale_losses})
+                    history[-1].update({f"loss_edge_scale_{int(scale)}": float(per_scale_losses[int(scale)]["edge"]) for scale in per_scale_losses})
+                else:
+                    history[-1].update({f"loss_ms_scale_{int(scale)}": float(per_scale_losses[int(scale)]) for scale in per_scale_losses})
+                    history[-1].update({f"loss_diff_scale_{int(scale)}": float(per_scale_losses[int(scale)]) for scale in per_scale_losses})
 
     optimized = proxy_points.detach().cpu().numpy().astype(np.float32)
     proxy_init_np = proxy_init.detach().cpu().numpy().astype(np.float32)
@@ -1139,10 +1275,14 @@ def optimize_proxy_points(
         "proxy_loss_type": active_loss_type,
         "objective_mode": objective_mode,
         "loss_structure": (
+            "lambda_main * L_main_wavelet + lambda_lsrc * L_lsrc + lambda_reg * L_reg"
+            if active_loss_type == "wavelet_main"
+            else
             "lambda_diff * L_diff_ms_swd + lambda_lsrc * L_lsrc + lambda_reg * L_reg"
             if active_loss_type == "diffusion_ms_swd"
             else "lambda_diff * L_diff + lambda_ms * L_ms + lambda_lsrc * L_lsrc + lambda_reg * L_reg"
         ),
+        "lambda_main": float(lambda_main),
         "lambda_diff": float(lambda_diff),
         "lambda_ms": float(lambda_ms_effective),
         "lambda_lsrc": float(lambda_lsrc_effective),
@@ -1164,6 +1304,7 @@ def optimize_proxy_points(
         "lambda_match": float(lambda_match),
         "lambda_graph": float(lambda_graph),
         "enable_lsrc": bool(enable_lsrc),
+        "keep_lsrc": bool(effective_keep_lsrc),
         "lsrc_k": int(lsrc_k),
         "lsrc_tau_r": float(lsrc_tau_r),
         "lsrc_tau_c": float(lsrc_tau_c),
@@ -1176,21 +1317,27 @@ def optimize_proxy_points(
         "lsrc_use_global_confidence": bool(lsrc_use_global_confidence),
         "lsrc_coverage_mode": lsrc_coverage_mode,
         "lsrc_rel_loss_mode": lsrc_rel_loss_mode,
-        "lsrc_geometry_space": "diffusion",
-        "lsrc_multiscale_enabled": bool(enable_lsrc and use_wavelet_multiscale),
-        "lsrc_scales": [int(scale) for scale in (wavelet_scales if bool(enable_lsrc and use_wavelet_multiscale) else [1])],
+        "lsrc_geometry_space": "unified_projected_representation",
+        "lsrc_multiscale_enabled": bool(effective_keep_lsrc and effective_use_wavelet_multiscale),
+        "lsrc_scales": [int(scale) for scale in (wavelet_main_scales if bool(effective_keep_lsrc and effective_use_wavelet_multiscale) else [1])],
         "mmd_kernel": mmd_kernel,
         "mmd_bandwidth": None if mmd_bandwidth is None else float(mmd_bandwidth),
         "mmd_use_median_heuristic": bool(mmd_use_median_heuristic),
         "loss_diff_type": active_loss_type,
-        "multiscale_as_main_alignment": bool(active_loss_type == "diffusion_ms_swd"),
+        "multiscale_as_main_alignment": bool(active_loss_type in {"diffusion_ms_swd", "wavelet_main"}),
         "swd_num_projections": int(swd_num_projections),
-        "effective_main_swd_num_projections": int(wavelet_swd_num_projections) if active_loss_type == "diffusion_ms_swd" else int(swd_num_projections),
+        "effective_main_swd_num_projections": int(wavelet_main_swd_num_projections) if active_loss_type == "wavelet_main" else int(wavelet_swd_num_projections) if active_loss_type == "diffusion_ms_swd" else int(swd_num_projections),
         "swd_p": float(swd_p),
         "swd_projection_seed": int(swd_projection_seed),
         "swd_use_fixed_projections": bool(swd_use_fixed_projections),
-        "use_wavelet_multiscale": bool(use_wavelet_multiscale),
+        "use_wavelet_multiscale": bool(effective_use_wavelet_multiscale),
         "wavelet_scales": [int(scale) for scale in wavelet_scales],
+        "wavelet_main_scales": [int(scale) for scale in wavelet_main_scales],
+        "wavelet_main_scale_weights": parse_scale_weight_values(wavelet_main_scales, wavelet_main_scale_weights),
+        "wavelet_main_swd_num_projections": int(wavelet_main_swd_num_projections),
+        "wavelet_cov_weight": float(wavelet_cov_weight),
+        "wavelet_edge_weight": float(wavelet_edge_weight),
+        "wavelet_curriculum_schedule": str(wavelet_curriculum_schedule),
         "wavelet_loss_weight": float(wavelet_loss_weight),
         "wavelet_distance_type": effective_wavelet_distance_type,
         "wavelet_swd_num_projections": int(wavelet_swd_num_projections) if effective_wavelet_distance_type == "swd" else 0,

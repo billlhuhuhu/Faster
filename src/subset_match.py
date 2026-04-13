@@ -11,7 +11,7 @@ from sklearn.neighbors import NearestNeighbors
 
 from data.subset_dataset import save_selected_indices
 from src.graph_wavelet import build_multi_scale_wavelet_signatures, parse_wavelet_scales
-from src.proxy_optimization import l2_normalize, optimize_proxy_points
+from src.proxy_optimization import l2_normalize, optimize_proxy_points, resolve_proxy_loss_type
 
 
 def sanitize_name(name):
@@ -33,7 +33,7 @@ def build_output_dir(args):
     model_tag = f"{sanitize_name(args.image_encoder)}_{sanitize_name(args.text_encoder)}"
     budget_tag = build_budget_tag(args)
     method_tag = sanitize_name(getattr(args, "selection_method", "baseline"))
-    if bool(getattr(args, "enable_lsrc", False)):
+    if bool(getattr(args, "keep_lsrc", True)) or bool(getattr(args, "enable_lsrc", False)):
         method_tag = f"{method_tag}_lsrc"
     seed_tag = f"seed_{int(getattr(args, 'random_state', 0))}"
     return Path(args.output_root) / args.dataset / args.split / model_tag / budget_tag / method_tag / seed_tag
@@ -709,6 +709,7 @@ def run_proxy_matching(
             "cost_weights": {
                 "alpha_diff": float(cost_alpha_diff),
                 "beta_wavelet": float(cost_beta_wavelet),
+                "matching_wavelet_weight": float(cost_beta_wavelet),
                 "gamma_topo": float(cost_gamma_topo),
                 "eta_lsrc": float(cost_eta_lsrc),
             },
@@ -763,6 +764,7 @@ def run_degree_aware_global_matching(
             "cost_weights": {
                 "alpha_diff": float(cost_alpha_diff),
                 "beta_wavelet": float(cost_beta_wavelet),
+                "matching_wavelet_weight": float(cost_beta_wavelet),
                 "gamma_topo": float(cost_gamma_topo),
                 "eta_lsrc": float(cost_eta_lsrc),
             },
@@ -966,13 +968,10 @@ def run_proxy_optimized_selection(args, representation, unified_graph):
         budget_ratio=getattr(args, "budget_ratio", None),
         budget_size=getattr(args, "budget_size", None),
     )
-    proxy_loss_type = str(
-        getattr(
-            args,
-            "proxy_loss_type",
-            "pdcfd" if str(getattr(args, "proxy_objective_mode", "pd_cfd")).lower() == "pd_cfd" else getattr(args, "proxy_objective_mode", "cfd"),
-        )
-    ).lower()
+    proxy_loss_type = resolve_proxy_loss_type(
+        getattr(args, "proxy_loss_type", None),
+        objective_mode=getattr(args, "proxy_objective_mode", None),
+    )
     reference_embedding = build_reference_embedding(
         representation,
         spectral_embedding=getattr(args, "_spectral_embedding", None),
@@ -1027,6 +1026,7 @@ def run_proxy_optimized_selection(args, representation, unified_graph):
         match_reference=optimization_embedding,
         graph_reference=graph_reference,
         enable_lsrc=bool(getattr(args, "enable_lsrc", False)),
+        keep_lsrc=bool(getattr(args, "keep_lsrc", True)),
         lsrc_image_graph=getattr(args, "_lsrc_image_graph", None),
         lsrc_text_graph=getattr(args, "_lsrc_text_graph", None),
         lsrc_k=getattr(args, "lsrc_k", 32),
@@ -1058,6 +1058,13 @@ def run_proxy_optimized_selection(args, representation, unified_graph):
         wavelet_schedule=getattr(args, "wavelet_schedule", "coarse_to_fine"),
         wavelet_swd_num_projections=getattr(args, "wavelet_swd_num_projections", None),
         wavelet_swd_p=getattr(args, "wavelet_swd_p", None),
+        lambda_main=getattr(args, "lambda_main", 1.0),
+        wavelet_main_scales=getattr(args, "wavelet_main_scales", None),
+        wavelet_main_scale_weights=getattr(args, "wavelet_main_scale_weights", None),
+        wavelet_main_swd_num_projections=getattr(args, "wavelet_main_swd_num_projections", None),
+        wavelet_cov_weight=getattr(args, "wavelet_cov_weight", 0.5),
+        wavelet_edge_weight=getattr(args, "wavelet_edge_weight", 0.25),
+        wavelet_curriculum_schedule=getattr(args, "wavelet_curriculum_schedule", "coarse_to_fine"),
         lambda_diff=getattr(args, "lambda_diff", 1.0),
         lambda_ms=getattr(args, "lambda_ms", None),
         lambda_lsrc=getattr(args, "lambda_lsrc", None),
@@ -1073,8 +1080,8 @@ def run_proxy_optimized_selection(args, representation, unified_graph):
     lsrc_confidence_q = None
     if proxy_bundle.get("lsrc_outputs") is not None:
         lsrc_confidence_q = np.asarray(proxy_bundle["lsrc_outputs"]["confidence_q"], dtype=np.float32)
-    cost_alpha_diff = float(getattr(args, "cost_alpha_diff", 1.0))
-    cost_beta_wavelet = float(getattr(args, "cost_beta_wavelet", 0.25))
+    cost_alpha_diff = float(getattr(args, "cost_alpha_diff", 0.25))
+    cost_beta_wavelet = float(getattr(args, "matching_wavelet_weight", getattr(args, "cost_beta_wavelet", 1.0)))
     cost_gamma_topo = float(getattr(args, "cost_gamma_topo", 0.1))
     cost_eta_lsrc = float(getattr(args, "cost_eta_lsrc", 0.1))
     matching_bundle = run_proxy_matching(
@@ -1133,12 +1140,21 @@ def run_proxy_optimized_selection(args, representation, unified_graph):
             "proxy_lr": float(args.proxy_lr),
             "proxy_reg_weight": float(args.proxy_reg_weight),
             "proxy_loss_type": getattr(args, "proxy_loss_type", None),
+            "proxy_loss_type_effective": proxy_loss_type,
             "proxy_objective_mode": getattr(args, "proxy_objective_mode", "pd_cfd"),
             "reference_embedding_mode": getattr(args, "reference_embedding_mode", "hybrid"),
             "enable_lsrc": bool(getattr(args, "enable_lsrc", False)),
+            "keep_lsrc": bool(getattr(args, "keep_lsrc", True)),
             "lsrc_k": int(getattr(args, "lsrc_k", 32)),
             "lambda_lsrc_cov": float(getattr(args, "lambda_lsrc_cov", 0.0)),
             "lambda_lsrc_rel": float(getattr(args, "lambda_lsrc_rel", 0.0)),
+            "lambda_main": float(getattr(args, "lambda_main", 1.0)),
+            "wavelet_main_scales": getattr(args, "wavelet_main_scales", None),
+            "wavelet_main_scale_weights": getattr(args, "wavelet_main_scale_weights", None),
+            "wavelet_cov_weight": float(getattr(args, "wavelet_cov_weight", 0.5)),
+            "wavelet_edge_weight": float(getattr(args, "wavelet_edge_weight", 0.25)),
+            "wavelet_curriculum_schedule": getattr(args, "wavelet_curriculum_schedule", "coarse_to_fine"),
+            "matching_wavelet_weight": float(getattr(args, "matching_wavelet_weight", getattr(args, "cost_beta_wavelet", 1.0))),
             "matching_top_k": int(args.matching_top_k),
             "geometry_weight": float(getattr(args, "geometry_weight", 1.0)),
             "topology_weight": float(args.topology_weight),
@@ -1151,6 +1167,7 @@ def run_proxy_optimized_selection(args, representation, unified_graph):
             "graph_loss": float(matching_bundle["matching_debug"]["graph_loss"]),
             "proxy_initial_loss": proxy_bundle["summary"]["initial_loss"],
             "proxy_final_loss": proxy_bundle["summary"]["final_loss"],
+            "selected_local_coverage_stats": matching_bundle["matching_debug"].get("selected_q_stats", {}),
         },
     }
 
