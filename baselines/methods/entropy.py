@@ -55,9 +55,12 @@ def select_subset(
     k = int(cfg.get("entropy_top_k", 64))
     temperature = float(cfg.get("entropy_temperature", 0.07))
 
-    score_img, _ = _local_entropy(img, txt, top_k=k, temperature=temperature)
-    score_txt, _ = _local_entropy(txt, img, top_k=k, temperature=temperature)
-    score_joint = np.mean(np.stack([score_img, score_txt], axis=1), axis=1)
+    # NOTE:
+    # Image/Text encoders can have different feature dimensions (e.g., nfnet vs bert),
+    # so branch entropy is computed within each branch space to keep NN lookup valid.
+    score_img, _ = _local_entropy(img, img, top_k=k, temperature=temperature)
+    score_txt, _ = _local_entropy(txt, txt, top_k=k, temperature=temperature)
+    score_joint, _ = _local_entropy(joint, joint, top_k=k, temperature=temperature)
     return make_result(
         method="entropy",
         ratio=ratio,
@@ -66,5 +69,5 @@ def select_subset(
         score_txt=score_txt,
         score_joint=score_joint,
         config=cfg,
-        notes="Uncertainty from local cross-modal neighborhood entropy.",
+        notes="Uncertainty from local in-branch neighborhood entropy with pair-level fusion.",
     )
