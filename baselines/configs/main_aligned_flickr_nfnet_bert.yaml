@@ -15,6 +15,7 @@ joint_feature_mode: concat
 output_root: artifacts/baselines
 log_root: artifacts/baselines/logs
 cache_root: artifacts/baselines/cache
+eval_output_root: artifacts/baselines/downstream_eval
 
 budgets: [100, 200, 500]
 methods: [entropy, el2n, grand, gradmatch, glister, ccs-rand, ccs-herd, ccs-kcenter, ccs-forget, dq, dfool, nms, adap_sne]
@@ -32,3 +33,17 @@ wavelet: on
 lsrc: on
 grouped_loss: on
 matching_fused_cost: on
+
+downstream_eval: true
+retrieval_train_entry: run_subset_train.py
+retrieval_eval_entry: run_subset_train.py
+subset_restore_mode: pair_level_indices
+metrics_to_collect: [I2T_R1, I2T_R5, I2T_R10, T2I_R1, T2I_R5, T2I_R10, MeanRecall]
+image_root: data/flickr30k
+ann_root: data/Flickr30k_ann
+train_epochs: 20
+train_batch_size: 64
+test_batch_size: 128
+text_batch_size: 1024
+num_workers: 4
+eval_interval: 1

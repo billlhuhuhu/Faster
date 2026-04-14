@@ -1,5 +1,6 @@
 import argparse
 import os
+import time
 from typing import Any, Dict, Optional
 
 from baselines.common.io import ratio_tag, sanitize_name, save_selection_outputs
@@ -203,6 +204,7 @@ def run_baseline_selection_once(
     cfg["ratio"] = float(resolved_ratio)
 
     method_fn = get_method(method)
+    select_started = time.time()
     outputs = method_fn(
         dataset=dataset,
         ratio=resolved_ratio,
@@ -210,6 +212,7 @@ def run_baseline_selection_once(
         text_features=dataset["text_features"],
         config=cfg,
     )
+    selection_time = float(time.time() - select_started)
     selected_local = [int(x) for x in outputs["selected_local_indices"]]
     selected_local = selected_local[:resolved_budget]
     if len(set(selected_local)) != len(selected_local):
@@ -264,6 +267,8 @@ def run_baseline_selection_once(
             "sample_unit": "pair_level_sample_idx",
             "evaluation_protocol": cfg.get("evaluation_protocol", "main_aligned_pair_selection"),
             "joint_feature_mode": cfg.get("joint_feature_mode", "concat"),
+            "seed": int(seed),
+            "selection_time": selection_time,
         },
     )
     return {
@@ -276,6 +281,7 @@ def run_baseline_selection_once(
         "paths": saved,
         "selected_indices": sample_idx,
         "config": cfg,
+        "selection_time": selection_time,
     }
 
 
@@ -319,6 +325,7 @@ def main():
     print(f"  ratio: {out['ratio']:.6f}")
     print(f"  total_train_size: {out['total_train_size']}")
     print(f"  subset_size: {out['subset_size']}")
+    print(f"  selection_time: {out['selection_time']:.3f}s")
     print(f"  output_dir: {out['output_dir']}")
     print(f"  selected_indices: {out['paths']['selected_indices']}")
     print(f"  selection_scores: {out['paths']['selection_scores']}")
@@ -327,4 +334,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

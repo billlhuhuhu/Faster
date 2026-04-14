@@ -138,3 +138,74 @@ Shell wrappers (baseline-only env vars):
 bash baselines/scripts/run_main_aligned_flickr_nfnet_bert.sh
 bash baselines/scripts/run_baseline_table_flickr.sh
 ```
+
+## 8) Unified baseline result tables
+
+After runs finish, you can export unified tables directly:
+
+```bash
+python -m baselines.runners.export_baseline_tables \
+  --root artifacts/baselines \
+  --output_dir artifacts/baselines \
+  --budgets 100 200 500
+```
+
+Generated files (under `artifacts/baselines/`):
+- `main_table_aligned.csv` / `main_table_aligned.json` / `main_table_aligned.md`
+- `main_table_aligned_agg.csv` / `main_table_aligned_agg.json`
+- `main_table_wide.csv` / `main_table_wide.json`
+- `baseline_method_status.csv` / `baseline_method_status.json`
+- `baseline_protocol_alignment.csv` / `baseline_protocol_alignment.json`
+- `benchmark_summary.csv` / `benchmark_summary.json`
+
+Notes:
+- The exporter is robust to missing fields and missing `downstream_metrics.json`.
+- Missing metrics are kept as empty/null values, rather than failing the whole export.
+
+## 9) Downstream retrieval evaluation for selected subsets
+
+Baselines now support full pipeline evaluation:
+1. Run subset selection (`selected_indices.json`)
+2. Reconstruct pair-level subset spec (`subset_spec.json`)
+3. Reuse mainline retrieval train/eval entry (`run_subset_train.py`)
+4. Save retrieval metrics to `downstream_metrics.json`
+
+Single-run downstream evaluation:
+```bash
+python -m baselines.runners.evaluate_baseline_subsets \
+  --baseline_result_dir artifacts/baselines/flickr/nfnet_bert/entropy/budget_0100/seed_0 \
+  --dataset_name flickr \
+  --image_encoder nfnet \
+  --text_encoder bert \
+  --feature_source artifacts/feature_cache \
+  --image_root data/flickr30k \
+  --ann_root data/Flickr30k_ann \
+  --device cuda:0
+```
+
+Main-aligned full pipeline (selection + downstream eval):
+```bash
+python -m baselines.runners.run_main_aligned_baselines \
+  --config baselines/configs/main_aligned_flickr_nfnet_bert.yaml \
+  --device cuda:0
+```
+
+Mode controls:
+```bash
+# only selection
+python -m baselines.runners.run_main_aligned_baselines \
+  --config baselines/configs/main_aligned_flickr_nfnet_bert.yaml \
+  --run_selection_only
+
+# only downstream eval (requires existing selected_indices outputs)
+python -m baselines.runners.run_main_aligned_baselines \
+  --config baselines/configs/main_aligned_flickr_nfnet_bert.yaml \
+  --run_eval_only
+```
+
+Saved under each run directory:
+- `selected_indices.json`
+- `baseline_summary.json`
+- `subset_spec.json`
+- `downstream_metrics.json`
+- `train_eval_log.txt`
