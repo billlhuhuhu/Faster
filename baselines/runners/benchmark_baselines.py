@@ -149,6 +149,8 @@ def main():
                     "evaluation_protocol": cfg.get("evaluation_protocol", "main_aligned_pair_selection_v1"),
                 },
                 output_layout="budget",
+                candidate_pool_size=cfg.get("candidate_pool_size"),
+                candidate_pool_mode=str(cfg.get("candidate_pool_mode", "head")),
             )
             baseline_run_dir = record["output_dir"]
         elif not os.path.exists(os.path.join(baseline_run_dir, "selected_indices.json")):

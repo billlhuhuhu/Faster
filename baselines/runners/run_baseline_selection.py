@@ -129,6 +129,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=str, default=None)
     parser.add_argument("--list_methods", action="store_true")
     parser.add_argument("--output_layout", type=str, default="ratio", choices=["ratio", "budget"])
+    parser.add_argument("--candidate_pool_size", type=int, default=None)
+    parser.add_argument("--candidate_pool_mode", type=str, default="head", choices=["head", "random"])
     return parser
 
 
@@ -147,9 +149,48 @@ def _merge_runtime_overrides(cfg: Dict[str, Any], args: argparse.Namespace) -> D
             "split": str(args.split),
             "feature_source": str(args.feature_source),
             "output_root": str(args.output_dir),
+            "candidate_pool_size": args.candidate_pool_size,
+            "candidate_pool_mode": str(args.candidate_pool_mode),
         }
     )
     return out
+
+
+def _apply_candidate_pool(dataset: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
+    pool_size = cfg.get("candidate_pool_size")
+    if pool_size is None:
+        return dataset
+    n = int(dataset["num_samples"])
+    k = max(1, min(int(pool_size), n))
+    if k >= n:
+        return dataset
+
+    mode = str(cfg.get("candidate_pool_mode", "head")).lower()
+    if mode == "head":
+        local_idx = list(range(k))
+    elif mode == "random":
+        import numpy as np
+        rng = np.random.default_rng(int(cfg.get("seed", 0)))
+        local_idx = [int(x) for x in np.sort(rng.choice(n, size=k, replace=False))]
+    else:
+        raise ValueError(f"Unsupported candidate_pool_mode={mode}")
+
+    def _slice(value):
+        try:
+            return value[local_idx]
+        except Exception:
+            return value
+
+    narrowed = dict(dataset)
+    for key in ("image_features", "text_features", "joint_features"):
+        narrowed[key] = _slice(dataset[key])
+    narrowed["sample_indices"] = [int(dataset["sample_indices"][i]) for i in local_idx]
+    if "sample_meta" in dataset and isinstance(dataset["sample_meta"], list):
+        narrowed["sample_meta"] = [dataset["sample_meta"][i] for i in local_idx]
+    narrowed["num_samples"] = int(k)
+    narrowed["candidate_pool_size"] = int(k)
+    narrowed["candidate_pool_mode"] = mode
+    return narrowed
 
 
 def run_baseline_selection_once(
@@ -168,6 +209,8 @@ def run_baseline_selection_once(
     config_path: Optional[str] = None,
     runtime_config_overrides: Optional[Dict[str, Any]] = None,
     output_layout: str = "ratio",
+    candidate_pool_size: Optional[int] = None,
+    candidate_pool_mode: str = "head",
 ) -> Dict[str, Any]:
     import baselines.methods  # noqa: F401
     from baselines.common.dataset_adapter import load_multimodal_dataset_bundle
@@ -186,6 +229,8 @@ def run_baseline_selection_once(
             "text_encoder": str(text_encoder),
             "feature_source": str(feature_source),
             "output_root": str(output_root),
+            "candidate_pool_size": candidate_pool_size,
+            "candidate_pool_mode": candidate_pool_mode,
         }
     )
     cfg["pair_score_weights"] = parse_pair_weights(cfg.get("pair_score_weights", [0.5, 0.5, 0.0]))
@@ -197,6 +242,7 @@ def run_baseline_selection_once(
         image_encoder=image_encoder,
         text_encoder=text_encoder,
     )
+    dataset = _apply_candidate_pool(dataset, cfg)
 
     total_train_size = int(dataset["num_samples"])
     resolved_budget, resolved_ratio = resolve_budget_and_ratio(total_train_size, ratio=ratio, budget=budget)
@@ -269,6 +315,8 @@ def run_baseline_selection_once(
             "joint_feature_mode": cfg.get("joint_feature_mode", "concat"),
             "seed": int(seed),
             "selection_time": selection_time,
+            "candidate_pool_size": cfg.get("candidate_pool_size"),
+            "candidate_pool_mode": cfg.get("candidate_pool_mode", "head"),
         },
     )
     return {
@@ -324,6 +372,8 @@ def main():
         config_path=args.config,
         runtime_config_overrides=runtime_overrides,
         output_layout=args.output_layout,
+        candidate_pool_size=args.candidate_pool_size,
+        candidate_pool_mode=args.candidate_pool_mode,
     )
     print("Baseline selection finished:")
     print(f"  method: {out['method']}")
