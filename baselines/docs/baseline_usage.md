@@ -121,6 +121,18 @@ python -m baselines.runners.benchmark_baselines \
   --seeds 0
 ```
 
+Progress display:
+```bash
+# tqdm progress is enabled by default when tqdm is installed
+python -m baselines.runners.run_main_aligned_baselines \
+  --config baselines/configs/main_aligned_flickr_nfnet_bert.yaml
+
+# disable progress bar explicitly (plain line logs only)
+python -m baselines.runners.run_main_aligned_baselines \
+  --config baselines/configs/main_aligned_flickr_nfnet_bert.yaml \
+  --no_progress
+```
+
 Shell wrappers (baseline-only env vars):
 ```bash
 bash baselines/scripts/run_main_aligned_flickr_nfnet_bert.sh

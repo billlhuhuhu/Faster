@@ -9,6 +9,10 @@ import baselines.methods  # noqa: F401
 from baselines.common.io import ensure_dir
 from baselines.registry import list_methods
 from baselines.runners.run_baseline_selection import load_config_chain, run_baseline_selection_once
+try:
+    from tqdm.auto import tqdm
+except Exception:  # pragma: no cover - graceful fallback when tqdm is unavailable
+    tqdm = None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -23,6 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seeds", nargs="*", type=int, default=None)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--output_root", type=str, default=None)
+    parser.add_argument("--no_progress", action="store_true")
     return parser
 
 
@@ -48,56 +53,69 @@ def main():
     ensure_dir(log_root)
 
     run_records: List[Dict[str, Any]] = []
+    allowed_methods = set(list_methods())
+    jobs: List[Dict[str, int | str]] = []
     for method in methods:
         method_name = str(method).lower()
-        if method_name not in set(list_methods()):
+        if method_name not in allowed_methods:
             raise ValueError(f"Unknown method '{method_name}'. Available methods: {list_methods()}")
         for budget in budgets:
             for seed in seeds:
-                record = run_baseline_selection_once(
-                    method=method_name,
-                    dataset_name=str(cfg.get("dataset_name", "flickr")),
-                    split=str(cfg.get("split", "train")),
-                    image_encoder=str(cfg.get("image_encoder", "nfnet")),
-                    text_encoder=str(cfg.get("text_encoder", "bert")),
-                    feature_source=str(cfg.get("feature_source", "artifacts/feature_cache")),
-                    output_root=output_root,
-                    seed=int(seed),
-                    device=device,
-                    budget=int(budget),
-                    config_path=args.config,
-                    runtime_config_overrides={
-                        "pair_score_fusion": cfg.get("pair_score_fusion", "weighted_sum"),
-                        "pair_score_weights": cfg.get("pair_score_weights", [0.5, 0.5, 0.0]),
-                        "score_normalization": cfg.get("score_normalization", "zscore"),
-                        "joint_feature_mode": cfg.get("joint_feature_mode", "concat"),
-                        "evaluation_protocol": cfg.get("evaluation_protocol", "main_aligned_pair_selection_v1"),
-                    },
-                    output_layout="budget",
-                )
-                run_records.append(
-                    {
-                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "method": record["method"],
-                        "budget": record["budget"],
-                        "ratio": record["ratio"],
-                        "subset_size": record["subset_size"],
-                        "total_train_size": record["total_train_size"],
-                        "seed": int(seed),
-                        "dataset_name": str(cfg.get("dataset_name", "flickr")),
-                        "image_encoder": str(cfg.get("image_encoder", "nfnet")),
-                        "text_encoder": str(cfg.get("text_encoder", "bert")),
-                        "feature_source": str(cfg.get("feature_source", "artifacts/feature_cache")),
-                        "sample_unit": "pair_level_sample_idx",
-                        "output_dir": record["output_dir"],
-                        "selected_indices_path": record["paths"]["selected_indices"],
-                        "baseline_summary_path": record["paths"]["baseline_summary"],
-                    }
-                )
-                print(
-                    f"[main-aligned] method={record['method']} budget={record['budget']} "
-                    f"seed={seed} -> {record['paths']['selected_indices']}"
-                )
+                jobs.append({"method": method_name, "budget": int(budget), "seed": int(seed)})
+
+    use_progress = (not args.no_progress) and (tqdm is not None)
+    iterator = tqdm(jobs, desc="main-aligned", unit="job", dynamic_ncols=True) if use_progress else jobs
+
+    for job in iterator:
+        method_name = str(job["method"])
+        budget = int(job["budget"])
+        seed = int(job["seed"])
+        if use_progress:
+            iterator.set_postfix_str(f"{method_name}|b{budget}|s{seed}")  # type: ignore[attr-defined]
+        record = run_baseline_selection_once(
+            method=method_name,
+            dataset_name=str(cfg.get("dataset_name", "flickr")),
+            split=str(cfg.get("split", "train")),
+            image_encoder=str(cfg.get("image_encoder", "nfnet")),
+            text_encoder=str(cfg.get("text_encoder", "bert")),
+            feature_source=str(cfg.get("feature_source", "artifacts/feature_cache")),
+            output_root=output_root,
+            seed=seed,
+            device=device,
+            budget=budget,
+            config_path=args.config,
+            runtime_config_overrides={
+                "pair_score_fusion": cfg.get("pair_score_fusion", "weighted_sum"),
+                "pair_score_weights": cfg.get("pair_score_weights", [0.5, 0.5, 0.0]),
+                "score_normalization": cfg.get("score_normalization", "zscore"),
+                "joint_feature_mode": cfg.get("joint_feature_mode", "concat"),
+                "evaluation_protocol": cfg.get("evaluation_protocol", "main_aligned_pair_selection_v1"),
+            },
+            output_layout="budget",
+        )
+        run_records.append(
+            {
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "method": record["method"],
+                "budget": record["budget"],
+                "ratio": record["ratio"],
+                "subset_size": record["subset_size"],
+                "total_train_size": record["total_train_size"],
+                "seed": seed,
+                "dataset_name": str(cfg.get("dataset_name", "flickr")),
+                "image_encoder": str(cfg.get("image_encoder", "nfnet")),
+                "text_encoder": str(cfg.get("text_encoder", "bert")),
+                "feature_source": str(cfg.get("feature_source", "artifacts/feature_cache")),
+                "sample_unit": "pair_level_sample_idx",
+                "output_dir": record["output_dir"],
+                "selected_indices_path": record["paths"]["selected_indices"],
+                "baseline_summary_path": record["paths"]["baseline_summary"],
+            }
+        )
+        print(
+            f"[main-aligned] method={record['method']} budget={record['budget']} "
+            f"seed={seed} -> {record['paths']['selected_indices']}"
+        )
 
     summary_json = os.path.join(output_root, "main_aligned_run_records.json")
     summary_csv = os.path.join(output_root, "main_aligned_run_records.csv")
@@ -116,4 +134,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
