@@ -1,0 +1,12 @@
+method: entropy
+pair_score_fusion: weighted_sum
+pair_score_weights: [0.5, 0.5, 0.0]
+score_normalization: zscore
+seed: 0
+device: cpu
+surrogate_epochs: 5
+surrogate_batch_size: 256
+surrogate_proj_dim: 128
+surrogate_lr: 0.01
+surrogate_temperature: 0.07
+

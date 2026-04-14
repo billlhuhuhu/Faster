@@ -1,0 +1,4 @@
+method: entropy
+entropy_top_k: 64
+entropy_temperature: 0.07
+

@@ -1,0 +1,4 @@
+method: ccs-forget
+surrogate_epochs: 8
+forget_threshold: 0.5
+

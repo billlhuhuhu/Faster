@@ -1,0 +1,9 @@
+method: nms
+nms_manifold_method: pca
+nms_pca_dim: 64
+nms_manifold_dim: 2
+nms_perplexity: 30.0
+nms_learning_rate: 200.0
+nms_w_joint: 0.6
+nms_w_img: 0.2
+nms_w_txt: 0.2

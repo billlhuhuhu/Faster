@@ -1,0 +1,4 @@
+method: glister
+surrogate_epochs: 5
+glister_val_ratio: 0.1
+

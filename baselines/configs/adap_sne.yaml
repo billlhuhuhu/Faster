@@ -1,0 +1,6 @@
+method: adap_sne
+adapsne_perplexity: 30.0
+adapsne_learning_rate: 200.0
+adapsne_density_k: 16
+adapsne_center_dist_weight: 0.3
+

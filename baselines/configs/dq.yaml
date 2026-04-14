@@ -1,0 +1,4 @@
+method: dq
+dq_w_joint: 0.5
+dq_w_img: 0.25
+dq_w_txt: 0.25

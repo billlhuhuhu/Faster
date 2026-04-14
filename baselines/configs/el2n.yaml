@@ -1,0 +1,4 @@
+method: el2n
+el2n_epoch_window: 3
+surrogate_epochs: 5
+
