@@ -9,6 +9,7 @@ os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
 os.environ.setdefault("BLIS_NUM_THREADS", "1")
 
 from src.cross_modal_topology import run_cross_modal_topology
+from src.topology_visualization import add_topology_visualization_args, extract_topology_visualization_config, visualize_cross_modal_topology_results
 
 
 def build_parser():
@@ -85,15 +86,26 @@ def build_parser():
     parser.add_argument("--diffusion_time", type=float, default=1.0)
     parser.add_argument("--diffusion_eig_solver", type=str, default="auto", choices=["auto", "dense", "sparse"])
     parser.add_argument("--save_eigenvectors", action="store_true")
+    add_topology_visualization_args(parser)
     return parser
 
 
 def main():
     args = build_parser().parse_args()
     outputs = run_cross_modal_topology(args)
+    if args.enable_topology_visualization:
+        viz_outputs = visualize_cross_modal_topology_results(
+            outputs["output_dir"],
+            **extract_topology_visualization_config(args),
+        )
+        outputs["visualization_dir"] = viz_outputs["output_dir"]
+        outputs["visualization_summary_path"] = viz_outputs["summary_path"]
     print("Cross-modal topology saved:")
     print(f"  output_dir: {outputs['output_dir']}")
     print(f"  summary_path: {outputs['summary_path']}")
+    if args.enable_topology_visualization:
+        print(f"  visualization_dir: {outputs['visualization_dir']}")
+        print(f"  visualization_summary_path: {outputs['visualization_summary_path']}")
     summary = outputs["summary"]
     print(f"  healthy_modality: {summary['healthy_modality']}")
     print(f"  corrected_summary: {summary['corrected_summary']}")
