@@ -1022,7 +1022,7 @@ def optimize_proxy_points(
                 p=swd_p,
                 projections=current_swd_projections,
             )
-        elif active_loss_type == "diffusion_ms_swd":
+        elif active_loss_type in {"diffusion_ms_swd", "wavelet_main"}:
             freq_loss = torch.tensor(0.0, dtype=proxy_points.dtype, device=torch_device)
         elif active_loss_type == "pdcfd":
             freq_loss = pd_cfd_loss(
