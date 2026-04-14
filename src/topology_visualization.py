@@ -385,6 +385,73 @@ def _save_matrix_heatmap(plt, matrix, output_path, title, cmap="magma", vmin=Non
     plt.close(fig)
 
 
+def _ordered_unique_labels(labels):
+    labels = np.asarray(labels)
+    unique_labels, first_positions = np.unique(labels, return_index=True)
+    order = np.argsort(first_positions, kind="stable")
+    return unique_labels[order]
+
+
+def _aggregate_matrix_by_labels(matrix, labels):
+    matrix = np.asarray(matrix, dtype=np.float32)
+    labels = np.asarray(labels)
+    unique_labels = _ordered_unique_labels(labels)
+    block = np.zeros((unique_labels.size, unique_labels.size), dtype=np.float32)
+    block_sizes = np.zeros(unique_labels.size, dtype=np.int32)
+    groups = []
+    for idx, label in enumerate(unique_labels.tolist()):
+        group = np.where(labels == label)[0]
+        groups.append(group)
+        block_sizes[idx] = int(group.size)
+    for i, row_group in enumerate(groups):
+        row_scale = max(int(row_group.size), 1)
+        for j, col_group in enumerate(groups):
+            sub_block = matrix[np.ix_(row_group, col_group)]
+            block[i, j] = float(np.sum(sub_block, dtype=np.float64) / row_scale)
+    return block.astype(np.float32), unique_labels.astype(np.int32), block_sizes
+
+
+def _save_dual_heatmap_figure(
+    plt,
+    raw_matrix,
+    block_matrix,
+    output_path,
+    title,
+    cmap="magma",
+    vmin=None,
+    vmax=None,
+    colorbar_label=None,
+    block_labels=None,
+):
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6), dpi=160)
+    cmap_obj = plt.get_cmap(cmap).copy()
+    cmap_obj.set_bad(color="white")
+
+    raw_image = axes[0].imshow(raw_matrix, cmap=cmap_obj, vmin=vmin, vmax=vmax, interpolation="nearest", aspect="auto")
+    axes[0].set_title("Node-Level")
+    axes[0].set_xlabel("Ordered Nodes")
+    axes[0].set_ylabel("Ordered Nodes")
+
+    block_image = axes[1].imshow(block_matrix, cmap=cmap_obj, vmin=vmin, vmax=vmax, interpolation="nearest", aspect="auto")
+    axes[1].set_title("Cluster-Aggregated")
+    axes[1].set_xlabel("Cluster Index")
+    axes[1].set_ylabel("Cluster Index")
+    if block_labels is not None and len(block_labels) <= 24:
+        tick_positions = np.arange(len(block_labels))
+        axes[1].set_xticks(tick_positions)
+        axes[1].set_yticks(tick_positions)
+        axes[1].set_xticklabels([str(x) for x in block_labels], rotation=45, ha="right")
+        axes[1].set_yticklabels([str(x) for x in block_labels])
+
+    cbar = fig.colorbar(block_image, ax=axes.tolist(), shrink=0.82)
+    if colorbar_label:
+        cbar.set_label(colorbar_label)
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+
+
 def _prepare_edge_segments(graph, coords, topk_edges):
     if topk_edges is not None and int(topk_edges) > 0:
         graph = sparsify_sparse_matrix(graph, topk=max(1, int(topk_edges)), threshold=None, use_abs=True)
@@ -411,6 +478,11 @@ def _save_layout_figure(
     title,
     topk_edges=8,
     colorbar=False,
+    cmap="tab20",
+    node_vmin=None,
+    node_vmax=None,
+    colorbar_label=None,
+    node_sizes=None,
 ):
     fig, ax = plt.subplots(figsize=(8, 8), dpi=160)
     graph = graph.tocsr().astype(np.float32)
@@ -419,13 +491,26 @@ def _save_layout_figure(
         alpha = np.clip(weights / max(np.percentile(weights, 95), 1e-8), 0.05, 1.0)
         lc = LineCollection(segments, colors=[(0.45, 0.45, 0.45, float(a) * 0.6) for a in alpha], linewidths=0.5)
         ax.add_collection(lc)
-    scatter = ax.scatter(coords[:, 0], coords[:, 1], c=node_colors, s=12, cmap="tab20", linewidths=0.0)
+    if node_sizes is None:
+        node_sizes = 12
+    scatter = ax.scatter(
+        coords[:, 0],
+        coords[:, 1],
+        c=node_colors,
+        s=node_sizes,
+        cmap=cmap,
+        vmin=node_vmin,
+        vmax=node_vmax,
+        linewidths=0.0,
+    )
     ax.set_title(title)
     ax.set_xticks([])
     ax.set_yticks([])
     ax.set_aspect("equal")
     if colorbar:
-        fig.colorbar(scatter, ax=ax, shrink=0.8)
+        cbar = fig.colorbar(scatter, ax=ax, shrink=0.8)
+        if colorbar_label:
+            cbar.set_label(colorbar_label)
     fig.tight_layout()
     fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
@@ -469,6 +554,36 @@ def _save_graph_overview_plot(plt, graph_stats, output_path):
     fig.tight_layout()
     fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
+
+
+def _compute_positive_vector_scale(values_list, eps=1e-8):
+    positives = []
+    for values in values_list:
+        values = np.asarray(values, dtype=np.float32)
+        cur = values[values > 0]
+        if cur.size:
+            positives.append(cur.astype(np.float32))
+    if not positives:
+        return {"lower_ref": 1.0, "upper_ref": 1.0, "display_vmax": 1.0}
+    merged = np.concatenate(positives, axis=0).astype(np.float32)
+    lower_ref = float(np.percentile(merged, 10))
+    upper_ref = float(np.percentile(merged, 99))
+    lower_ref = max(lower_ref, float(eps))
+    upper_ref = max(upper_ref, lower_ref + float(eps))
+    return {
+        "lower_ref": lower_ref,
+        "upper_ref": upper_ref,
+        "display_vmax": float(np.log1p(upper_ref / lower_ref)),
+    }
+
+
+def _transform_positive_vector(values, lower_ref, eps=1e-8):
+    values = np.asarray(values, dtype=np.float32)
+    transformed = np.zeros_like(values, dtype=np.float32)
+    mask = values > 0
+    if np.any(mask):
+        transformed[mask] = np.log1p(values[mask] / max(float(lower_ref), float(eps))).astype(np.float32)
+    return transformed.astype(np.float32)
 
 
 def _build_local_case_scores(graphs):
@@ -615,17 +730,47 @@ def visualize_cross_modal_topology_results(
     display_coords = coords_full[display_indices]
 
     labels, label_key = _extract_optional_labels(bundle["sample_meta"])
-    if not visualization_show_labels_if_available or labels is None:
-        node_colors_full = cluster_labels
-        node_color_source = "fused_cluster"
-    else:
+    if visualization_show_labels_if_available and labels is not None:
         unique_labels = {str(item): idx for idx, item in enumerate(sorted(set(labels.tolist())))}
         node_colors_full = np.asarray([unique_labels[str(item)] for item in labels.tolist()], dtype=np.int32)
         node_color_source = str(label_key)
-    display_node_colors = node_colors_full[display_indices]
+        layout_node_color_mode = "label"
+        layout_node_color_payload = None
+        layout_node_vmax = None
+        layout_node_colorbar_label = None
+        layout_node_sizes = None
+    else:
+        node_colors_full = cluster_labels
+        node_color_source = "graph_degree_shared_log"
+        layout_node_color_mode = "graph_degree_shared_log"
+        graph_stats_preview = {key: _graph_stats(graph) for key, graph in graphs.items()}
+        degree_scale = _compute_positive_vector_scale([stats["degree"] for stats in graph_stats_preview.values()])
+        layout_node_color_payload = {
+            key: _transform_positive_vector(stats["degree"], degree_scale["lower_ref"])
+            for key, stats in graph_stats_preview.items()
+        }
+        layout_node_vmax = degree_scale["display_vmax"]
+        layout_node_colorbar_label = "log1p(weighted degree / q10)"
+        layout_node_sizes = {
+            key: 12.0 + 28.0 * np.clip(
+                layout_node_color_payload[key] / max(layout_node_vmax, 1e-8),
+                0.0,
+                1.0,
+            )
+            for key in graphs.keys()
+        }
 
     graph_matrices = {key: _gather_heatmap_matrix(graph, display_indices) for key, graph in graphs.items()}
     positive_heatmap_scale = _compute_positive_heatmap_scale(list(graph_matrices.values()))
+    display_cluster_labels = cluster_labels[display_indices]
+    block_graph_matrices = {}
+    block_label_reference = None
+    for key, matrix in graph_matrices.items():
+        block_matrix, block_labels, _ = _aggregate_matrix_by_labels(matrix, display_cluster_labels)
+        block_graph_matrices[key] = block_matrix
+        if block_label_reference is None:
+            block_label_reference = block_labels
+    positive_block_scale = _compute_positive_heatmap_scale(list(block_graph_matrices.values()))
 
     for key, filename in {
         "modal_A": "heatmap_modal_A.png",
@@ -634,18 +779,30 @@ def visualize_cross_modal_topology_results(
         "corr_B": "heatmap_corr_B.png",
         "fused": "heatmap_fused.png",
     }.items():
-        _save_matrix_heatmap(
+        _save_dual_heatmap_figure(
             plt,
             _transform_positive_heatmap(graph_matrices[key], positive_heatmap_scale["lower_ref"]),
+            _transform_positive_heatmap(block_graph_matrices[key], positive_block_scale["lower_ref"]),
             output_dir / filename,
-            title=f"Adjacency Heatmap: {bundle['modality_name_map'][key]} (log-enhanced, zero masked)",
+            title=f"Adjacency Heatmap: {bundle['modality_name_map'][key]} (node + cluster view)",
             cmap="magma",
             vmin=0.0,
-            vmax=positive_heatmap_scale["display_vmax"],
+            vmax=positive_block_scale["display_vmax"],
             colorbar_label="log1p(weight / q10)",
+            block_labels=block_label_reference,
         )
 
     display_subgraphs = {key: graph[display_indices][:, display_indices].tocsr() for key, graph in graphs.items()}
+    if layout_node_color_mode == "label":
+        display_layout_node_colors = {key: node_colors_full[display_indices] for key in graphs.keys()}
+        display_layout_node_sizes = {key: 12.0 for key in graphs.keys()}
+    else:
+        display_layout_node_colors = {
+            key: layout_node_color_payload[key][display_indices] for key in graphs.keys()
+        }
+        display_layout_node_sizes = {
+            key: layout_node_sizes[key][display_indices] for key in graphs.keys()
+        }
     for key, filename in {
         "modal_A": "layout_modal_A.png",
         "modal_B": "layout_modal_B.png",
@@ -658,11 +815,16 @@ def visualize_cross_modal_topology_results(
             LineCollection,
             display_subgraphs[key],
             display_coords,
-            display_node_colors,
+            display_layout_node_colors[key],
             output_dir / filename,
             title=f"Shared Layout: {bundle['modality_name_map'][key]}",
             topk_edges=visualization_topk_edges,
-            colorbar=False,
+            colorbar=True,
+            cmap="viridis" if layout_node_color_mode != "label" else "tab20",
+            node_vmin=0.0 if layout_node_color_mode != "label" else None,
+            node_vmax=layout_node_vmax if layout_node_color_mode != "label" else None,
+            colorbar_label=layout_node_colorbar_label if layout_node_color_mode != "label" else node_color_source,
+            node_sizes=display_layout_node_sizes[key],
         )
 
     delta_matrices = {
@@ -671,7 +833,12 @@ def visualize_cross_modal_topology_results(
         "delta_fused_vs_A": graph_matrices["fused"] - graph_matrices["modal_A"],
         "delta_fused_vs_B": graph_matrices["fused"] - graph_matrices["modal_B"],
     }
+    block_delta_matrices = {}
+    for key, matrix in delta_matrices.items():
+        block_matrix, _, _ = _aggregate_matrix_by_labels(matrix, display_cluster_labels)
+        block_delta_matrices[key] = block_matrix
     signed_heatmap_scale = _compute_signed_heatmap_scale(list(delta_matrices.values()))
+    signed_block_scale = _compute_signed_heatmap_scale(list(block_delta_matrices.values()))
 
     for key, filename, title in [
         ("delta_corr_A", "delta_corr_A.png", "Delta Corr A = B_hat^A - B^A"),
@@ -679,18 +846,20 @@ def visualize_cross_modal_topology_results(
         ("delta_fused_vs_A", "delta_fused_vs_A.png", "Delta Fused vs A = B* - B^A"),
         ("delta_fused_vs_B", "delta_fused_vs_B.png", "Delta Fused vs B = B* - B^B"),
     ]:
-        _save_matrix_heatmap(
+        _save_dual_heatmap_figure(
             plt,
             _transform_signed_heatmap(delta_matrices[key], signed_heatmap_scale["lower_ref"]),
+            _transform_signed_heatmap(block_delta_matrices[key], signed_block_scale["lower_ref"]),
             output_dir / filename,
-            title=f"{title} (signed log-enhanced, zero masked)",
+            title=f"{title} (node + cluster view)",
             cmap="coolwarm",
-            vmin=-signed_heatmap_scale["display_vmax"],
-            vmax=signed_heatmap_scale["display_vmax"],
+            vmin=-signed_block_scale["display_vmax"],
+            vmax=signed_block_scale["display_vmax"],
             colorbar_label="sign(x) * log1p(|x| / q10)",
+            block_labels=block_label_reference,
         )
 
-    graph_stats = {key: _graph_stats(graph) for key, graph in graphs.items()}
+    graph_stats = graph_stats_preview if layout_node_color_mode != "label" else {key: _graph_stats(graph) for key, graph in graphs.items()}
     _save_distribution_plot(
         plt,
         {key: stats["degree"] for key, stats in graph_stats.items()},
@@ -777,6 +946,7 @@ def visualize_cross_modal_topology_results(
         "layout": {
             "mode": str(visualization_layout_mode),
             "node_color_source": node_color_source,
+            "node_color_mode": layout_node_color_mode,
         },
         "heatmap_transform": {
             "adjacency": {
@@ -784,10 +954,21 @@ def visualize_cross_modal_topology_results(
                 "lower_ref_q10": float(positive_heatmap_scale["lower_ref"]),
                 "upper_ref_q99": float(positive_heatmap_scale["upper_ref"]),
             },
+            "adjacency_block": {
+                "type": "cluster_aggregated_row_normalized_log_nonzero_masked",
+                "lower_ref_q10": float(positive_block_scale["lower_ref"]),
+                "upper_ref_q99": float(positive_block_scale["upper_ref"]),
+                "num_clusters": int(len(block_label_reference)) if block_label_reference is not None else 0,
+            },
             "delta": {
                 "type": "shared_signed_log_nonzero_masked",
                 "lower_ref_q10_abs": float(signed_heatmap_scale["lower_ref"]),
                 "upper_ref_q99_abs": float(signed_heatmap_scale["upper_ref"]),
+            },
+            "delta_block": {
+                "type": "cluster_aggregated_row_normalized_signed_log_nonzero_masked",
+                "lower_ref_q10_abs": float(signed_block_scale["lower_ref"]),
+                "upper_ref_q99_abs": float(signed_block_scale["upper_ref"]),
             },
         },
         "graph_summary": {
