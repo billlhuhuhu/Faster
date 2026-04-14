@@ -3,5 +3,5 @@ entropy_top_k: 64
 entropy_temperature: 0.07
 entropy_batch_size: 2048
 entropy_show_progress: true
-entropy_knn_n_jobs: -1
+entropy_knn_n_jobs: 1
 entropy_use_cache: true

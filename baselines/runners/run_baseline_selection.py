@@ -288,6 +288,12 @@ def run_baseline_selection_once(
 def main():
     parser = build_parser()
     args = parser.parse_args()
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "8")
+    os.environ.setdefault("OMP_NUM_THREADS", "8")
+    os.environ.setdefault("MKL_NUM_THREADS", "8")
+    os.environ.setdefault("NUMEXPR_NUM_THREADS", "8")
+    os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "8")
+    os.environ.setdefault("BLIS_NUM_THREADS", "8")
     if args.list_methods:
         import baselines.methods  # noqa: F401
 

@@ -41,7 +41,10 @@ def _local_entropy(
     top_k = max(2, min(int(top_k), int(key_feat.shape[0])))
     q = query_feat / np.maximum(np.linalg.norm(query_feat, axis=1, keepdims=True), 1e-8)
     k = key_feat / np.maximum(np.linalg.norm(key_feat, axis=1, keepdims=True), 1e-8)
-    nn = NearestNeighbors(n_neighbors=top_k, metric="cosine", n_jobs=int(n_jobs))
+    nn_jobs = int(n_jobs)
+    if nn_jobs <= 0:
+        nn_jobs = 1
+    nn = NearestNeighbors(n_neighbors=top_k, metric="cosine", n_jobs=nn_jobs)
     nn.fit(k)
     n = q.shape[0]
     batch_size = max(1, int(batch_size))

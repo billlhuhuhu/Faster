@@ -5,7 +5,6 @@ import os
 import time
 from typing import Any, Dict, List
 
-import baselines.methods  # noqa: F401
 from baselines.common.io import ensure_dir
 from baselines.common.io import sanitize_name
 from baselines.common.result_aggregation import export_all_tables
@@ -57,9 +56,20 @@ def _expected_run_dir(output_root: str, dataset_name: str, image_encoder: str, t
     )
 
 
+def _configure_thread_env(cfg: Dict[str, Any]) -> None:
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", str(cfg.get("openblas_num_threads", 8)))
+    os.environ.setdefault("OMP_NUM_THREADS", str(cfg.get("omp_num_threads", 8)))
+    os.environ.setdefault("MKL_NUM_THREADS", str(cfg.get("mkl_num_threads", 8)))
+    os.environ.setdefault("NUMEXPR_NUM_THREADS", str(cfg.get("numexpr_num_threads", 8)))
+    os.environ.setdefault("VECLIB_MAXIMUM_THREADS", str(cfg.get("veclib_maximum_threads", 8)))
+    os.environ.setdefault("BLIS_NUM_THREADS", str(cfg.get("blis_num_threads", 8)))
+
+
 def main():
     args = build_parser().parse_args()
     cfg = load_config_chain(args.config, method=None)
+    _configure_thread_env(cfg)
+    import baselines.methods  # noqa: F401
 
     methods = args.methods if args.methods else _as_list(cfg.get("methods"), list_methods())
     budgets = args.budgets if args.budgets else _as_list(cfg.get("budgets"), [100, 200, 500])
