@@ -7,7 +7,7 @@ source "${SCRIPT_DIR}/common.sh"
 DATASET="${WAVELET_MAIN_LATEST_DATASET:-flickr}"
 BACKBONE="${WAVELET_MAIN_LATEST_BACKBONE:-nfnet}"
 TEXT_ENCODER="${WAVELET_MAIN_LATEST_TEXT_ENCODER:-bert}"
-VARIANT="${WAVELET_MAIN_LATEST_VARIANT:-wavelet_main_latest}"
+VARIANT="${WAVELET_MAIN_LATEST_VARIANT:-wavelet_main_latest_collapse_aware}"
 SEEDS_STR="${WAVELET_MAIN_LATEST_SEEDS:-0}"
 read -r -a SEEDS <<< "${SEEDS_STR}"
 BUDGETS_STR="${WAVELET_MAIN_LATEST_BUDGETS:-100 200 500}"
@@ -15,14 +15,17 @@ read -r -a BUDGETS <<< "${BUDGETS_STR}"
 RATIOS_STR="${WAVELET_MAIN_LATEST_RATIOS:-0.01}"
 read -r -a RATIOS <<< "${RATIOS_STR}"
 
-CROSS_OUTPUT_ROOT="${WAVELET_MAIN_LATEST_CROSS_OUTPUT_ROOT:-artifacts/cross_modal_topology_wavelet_main_latest}"
-SELECTION_OUTPUT_ROOT="${WAVELET_MAIN_LATEST_SELECTION_OUTPUT_ROOT:-artifacts/subset_selection_wavelet_main_latest}"
-TRAIN_OUTPUT_ROOT="${WAVELET_MAIN_LATEST_TRAIN_OUTPUT_ROOT:-artifacts/subset_train_wavelet_main_latest}"
-REPORT_NAME="${WAVELET_MAIN_LATEST_REPORT_NAME:-wavelet_main_latest_combo}"
+CROSS_OUTPUT_ROOT="${WAVELET_MAIN_LATEST_CROSS_OUTPUT_ROOT:-artifacts/cross_modal_topology_wavelet_main_latest_collapse_aware}"
+SELECTION_OUTPUT_ROOT="${WAVELET_MAIN_LATEST_SELECTION_OUTPUT_ROOT:-artifacts/subset_selection_wavelet_main_latest_collapse_aware}"
+TRAIN_OUTPUT_ROOT="${WAVELET_MAIN_LATEST_TRAIN_OUTPUT_ROOT:-artifacts/subset_train_wavelet_main_latest_collapse_aware}"
+REPORT_NAME="${WAVELET_MAIN_LATEST_REPORT_NAME:-wavelet_main_latest_combo_collapse_aware}"
 
 CORRECTION_MODE="${WAVELET_MAIN_LATEST_CORRECTION_MODE:-bidirectional}"
 FUSION_MODE="${WAVELET_MAIN_LATEST_FUSION_MODE:-confidence_aware}"
 ENABLE_LOCAL_NODE_CONFIDENCE="${WAVELET_MAIN_LATEST_ENABLE_LOCAL_NODE_CONFIDENCE:-0}"
+WAVELET_FUSION_WEIGHT_MODE="${WAVELET_MAIN_LATEST_WAVELET_FUSION_WEIGHT_MODE:-collapse_aware}"
+WAVELET_FUSION_WEIGHT_A_SCALES="${WAVELET_MAIN_LATEST_WAVELET_FUSION_WEIGHT_A_SCALES:-${WAVELET_FUSION_WEIGHT_A_SCALES:-}}"
+WAVELET_FUSION_WEIGHT_B_SCALES="${WAVELET_MAIN_LATEST_WAVELET_FUSION_WEIGHT_B_SCALES:-${WAVELET_FUSION_WEIGHT_B_SCALES:-}}"
 
 PROXY_LOSS_TYPE="${WAVELET_MAIN_LATEST_PROXY_LOSS_TYPE:-wavelet_main}"
 PROXY_INIT_METHOD="${WAVELET_MAIN_LATEST_PROXY_INIT_METHOD:-kmeans}"
@@ -212,7 +215,7 @@ run_precompute_if_needed() {
     return 0
   fi
 
-  stage_log "Cross-modal start: correction=${CORRECTION_MODE} fusion_domain=${FUSION_DOMAIN_MODE}"
+  stage_log "Cross-modal start: correction=${CORRECTION_MODE} fusion_domain=${FUSION_DOMAIN_MODE} weight_mode=${WAVELET_FUSION_WEIGHT_MODE}"
   python "${PROJECT_ROOT}/run_cross_modal_topology.py" \
     --dataset "${DATASET}" \
     --split train \
@@ -524,7 +527,7 @@ run_selection_ratio() {
 cd "${PROJECT_ROOT}"
 run_precompute_if_needed
 
-stage_log "Wavelet-main latest combo start: dataset=${DATASET} budgets=${BUDGETS[*]} ratios=${RATIOS[*]} seeds=${SEEDS[*]}"
+stage_log "Wavelet-main latest combo start: dataset=${DATASET} budgets=${BUDGETS[*]} ratios=${RATIOS[*]} seeds=${SEEDS[*]} fusion_weight_mode=${WAVELET_FUSION_WEIGHT_MODE}"
 
 for budget in "${BUDGETS[@]}"; do
   for seed in "${SEEDS[@]}"; do
