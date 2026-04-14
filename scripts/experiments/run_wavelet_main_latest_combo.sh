@@ -75,7 +75,9 @@ COST_ETA_LSRC="${WAVELET_MAIN_LATEST_COST_ETA_LSRC:-0.1}"
 
 RUN_TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
 RUN_LOG_DIR="${EXPERIMENT_LOG_ROOT}/${REPORT_NAME}_${DATASET}_${RUN_TIMESTAMP}"
+REPORT_DIR="${REPORT_ROOT}/${REPORT_NAME}_${DATASET}_${RUN_TIMESTAMP}"
 mkdir -p "${RUN_LOG_DIR}"
+mkdir -p "${REPORT_DIR}"
 
 MODEL_TAG="$(sanitize_component "${BACKBONE}")_$(sanitize_component "${TEXT_ENCODER}")"
 IMAGE_ROOT="$(get_image_root "${DATASET}")"
@@ -536,4 +538,159 @@ for ratio in "${RATIOS[@]}"; do
   done
 done
 
+RAW_CSV_PATH="${REPORT_DIR}/wavelet_main_latest_combo_raw.csv"
+SUMMARY_CSV_PATH="${REPORT_DIR}/wavelet_main_latest_combo_summary.csv"
+MISSING_TXT_PATH="${REPORT_DIR}/missing_metrics.txt"
+
+python - "${TRAIN_OUTPUT_ROOT}" "${DATASET}" "${MODEL_TAG}" "${VARIANT}" "${RAW_CSV_PATH}" "${SUMMARY_CSV_PATH}" "${MISSING_TXT_PATH}" "${BUDGETS[*]}" "${RATIOS[*]}" "${SEEDS[*]}" <<'PY'
+import csv
+import json
+import statistics
+import sys
+from pathlib import Path
+
+
+def safe_std(values):
+    if len(values) <= 1:
+        return 0.0
+    return float(statistics.stdev(values))
+
+
+subset_train_root = Path(sys.argv[1])
+dataset = sys.argv[2]
+model_tag = sys.argv[3]
+variant = sys.argv[4]
+raw_csv_path = Path(sys.argv[5])
+summary_csv_path = Path(sys.argv[6])
+missing_txt_path = Path(sys.argv[7])
+budgets = [item for item in sys.argv[8].split() if item.strip()]
+ratios = [item for item in sys.argv[9].split() if item.strip()]
+seeds = [item for item in sys.argv[10].split() if item.strip()]
+
+raw_rows = []
+missing = []
+
+targets = []
+for budget in budgets:
+    targets.append(("abs", f"size_{int(budget):04d}", str(int(budget))))
+for ratio in ratios:
+    ratio_value = float(ratio)
+    targets.append(("ratio", f"ratio_{int(round(ratio_value * 100)):02d}", f"{ratio_value:.6f}"))
+
+for budget_type, budget_tag, budget_value in targets:
+    for seed in seeds:
+        metrics_path = subset_train_root / dataset / model_tag / budget_tag / variant / f"seed_{int(seed)}" / "metrics.json"
+        if not metrics_path.exists():
+            missing.append(str(metrics_path))
+            continue
+        payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+        raw_rows.append(
+            {
+                "dataset": dataset,
+                "model_tag": model_tag,
+                "variant": variant,
+                "budget_type": budget_type,
+                "budget_tag": budget_tag,
+                "budget_value": budget_value,
+                "seed": int(seed),
+                "i2t_r1": float(payload["i2t_r1"]),
+                "i2t_r5": float(payload["i2t_r5"]),
+                "i2t_r10": float(payload["i2t_r10"]),
+                "t2i_r1": float(payload["t2i_r1"]),
+                "t2i_r5": float(payload["t2i_r5"]),
+                "t2i_r10": float(payload["t2i_r10"]),
+                "mean_recall": float(payload["mean_recall"]),
+                "metrics_path": str(metrics_path),
+            }
+        )
+
+raw_csv_path.parent.mkdir(parents=True, exist_ok=True)
+raw_fields = [
+    "dataset",
+    "model_tag",
+    "variant",
+    "budget_type",
+    "budget_tag",
+    "budget_value",
+    "seed",
+    "i2t_r1",
+    "i2t_r5",
+    "i2t_r10",
+    "t2i_r1",
+    "t2i_r5",
+    "t2i_r10",
+    "mean_recall",
+    "metrics_path",
+]
+with raw_csv_path.open("w", encoding="utf-8", newline="") as handle:
+    writer = csv.DictWriter(handle, fieldnames=raw_fields)
+    writer.writeheader()
+    writer.writerows(raw_rows)
+
+grouped = {}
+for row in raw_rows:
+    key = (row["dataset"], row["model_tag"], row["variant"], row["budget_type"], row["budget_tag"], row["budget_value"])
+    grouped.setdefault(key, []).append(row)
+
+summary_rows = []
+for key in sorted(grouped.keys()):
+    dataset, model_tag, variant, budget_type, budget_tag, budget_value = key
+    rows = grouped[key]
+    summary = {
+        "dataset": dataset,
+        "model_tag": model_tag,
+        "variant": variant,
+        "budget_type": budget_type,
+        "budget_tag": budget_tag,
+        "budget_value": budget_value,
+        "num_runs": len(rows),
+    }
+    for metric in ["i2t_r1", "i2t_r5", "i2t_r10", "t2i_r1", "t2i_r5", "t2i_r10", "mean_recall"]:
+        values = [float(item[metric]) for item in rows]
+        summary[f"{metric}_mean"] = float(sum(values) / len(values))
+        summary[f"{metric}_std"] = safe_std(values)
+    summary_rows.append(summary)
+
+summary_fields = [
+    "dataset",
+    "model_tag",
+    "variant",
+    "budget_type",
+    "budget_tag",
+    "budget_value",
+    "num_runs",
+    "i2t_r1_mean",
+    "i2t_r1_std",
+    "i2t_r5_mean",
+    "i2t_r5_std",
+    "i2t_r10_mean",
+    "i2t_r10_std",
+    "t2i_r1_mean",
+    "t2i_r1_std",
+    "t2i_r5_mean",
+    "t2i_r5_std",
+    "t2i_r10_mean",
+    "t2i_r10_std",
+    "mean_recall_mean",
+    "mean_recall_std",
+]
+with summary_csv_path.open("w", encoding="utf-8", newline="") as handle:
+    writer = csv.DictWriter(handle, fieldnames=summary_fields)
+    writer.writeheader()
+    writer.writerows(summary_rows)
+
+with missing_txt_path.open("w", encoding="utf-8") as handle:
+    for item in missing:
+        handle.write(item + "\n")
+
+print(f"saved raw csv: {raw_csv_path}")
+print(f"saved summary csv: {summary_csv_path}")
+print(f"saved missing list: {missing_txt_path}")
+print(f"collected runs: {len(raw_rows)}")
+print(f"grouped entries: {len(summary_rows)}")
+PY
+
 stage_log "Wavelet-main latest combo completed. Logs saved to ${RUN_LOG_DIR}"
+stage_log "Wavelet-main latest combo report dir: ${REPORT_DIR}"
+stage_log "Wavelet-main latest combo raw csv: ${RAW_CSV_PATH}"
+stage_log "Wavelet-main latest combo summary csv: ${SUMMARY_CSV_PATH}"

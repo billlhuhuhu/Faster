@@ -306,9 +306,74 @@ def _gather_heatmap_matrix(graph, ordered_indices):
     return matrix
 
 
+def _compute_positive_heatmap_scale(matrices, eps=1e-8):
+    positives = []
+    for matrix in matrices:
+        matrix = np.asarray(matrix, dtype=np.float32)
+        values = matrix[matrix > 0]
+        if values.size:
+            positives.append(values.astype(np.float32))
+    if not positives:
+        return {"lower_ref": 1.0, "upper_ref": 1.0, "display_vmax": 1.0}
+    merged = np.concatenate(positives, axis=0).astype(np.float32)
+    lower_ref = float(np.percentile(merged, 10))
+    upper_ref = float(np.percentile(merged, 99))
+    lower_ref = max(lower_ref, float(eps))
+    upper_ref = max(upper_ref, lower_ref + float(eps))
+    display_vmax = float(np.log1p(upper_ref / lower_ref))
+    return {
+        "lower_ref": lower_ref,
+        "upper_ref": upper_ref,
+        "display_vmax": max(display_vmax, float(eps)),
+    }
+
+
+def _transform_positive_heatmap(matrix, lower_ref, eps=1e-8):
+    matrix = np.asarray(matrix, dtype=np.float32)
+    transformed = np.zeros_like(matrix, dtype=np.float32)
+    mask = matrix > 0
+    if np.any(mask):
+        transformed[mask] = np.log1p(matrix[mask] / max(float(lower_ref), float(eps))).astype(np.float32)
+    return np.ma.masked_where(~mask, transformed)
+
+
+def _compute_signed_heatmap_scale(matrices, eps=1e-8):
+    nonzero_values = []
+    for matrix in matrices:
+        matrix = np.asarray(matrix, dtype=np.float32)
+        values = np.abs(matrix[np.abs(matrix) > 0])
+        if values.size:
+            nonzero_values.append(values.astype(np.float32))
+    if not nonzero_values:
+        return {"lower_ref": 1.0, "upper_ref": 1.0, "display_vmax": 1.0}
+    merged = np.concatenate(nonzero_values, axis=0).astype(np.float32)
+    lower_ref = float(np.percentile(merged, 10))
+    upper_ref = float(np.percentile(merged, 99))
+    lower_ref = max(lower_ref, float(eps))
+    upper_ref = max(upper_ref, lower_ref + float(eps))
+    display_vmax = float(np.log1p(upper_ref / lower_ref))
+    return {
+        "lower_ref": lower_ref,
+        "upper_ref": upper_ref,
+        "display_vmax": max(display_vmax, float(eps)),
+    }
+
+
+def _transform_signed_heatmap(matrix, lower_ref, eps=1e-8):
+    matrix = np.asarray(matrix, dtype=np.float32)
+    transformed = np.zeros_like(matrix, dtype=np.float32)
+    abs_matrix = np.abs(matrix)
+    mask = abs_matrix > 0
+    if np.any(mask):
+        transformed[mask] = np.sign(matrix[mask]) * np.log1p(abs_matrix[mask] / max(float(lower_ref), float(eps))).astype(np.float32)
+    return np.ma.masked_where(~mask, transformed)
+
+
 def _save_matrix_heatmap(plt, matrix, output_path, title, cmap="magma", vmin=None, vmax=None, colorbar_label=None):
     fig, ax = plt.subplots(figsize=(8, 7), dpi=160)
-    image = ax.imshow(matrix, cmap=cmap, vmin=vmin, vmax=vmax, interpolation="nearest", aspect="auto")
+    cmap_obj = plt.get_cmap(cmap).copy()
+    cmap_obj.set_bad(color="white")
+    image = ax.imshow(matrix, cmap=cmap_obj, vmin=vmin, vmax=vmax, interpolation="nearest", aspect="auto")
     ax.set_title(title)
     ax.set_xlabel("Ordered Nodes")
     ax.set_ylabel("Ordered Nodes")
@@ -321,7 +386,8 @@ def _save_matrix_heatmap(plt, matrix, output_path, title, cmap="magma", vmin=Non
 
 
 def _prepare_edge_segments(graph, coords, topk_edges):
-    graph = sparsify_sparse_matrix(graph, topk=max(1, int(topk_edges)), threshold=None, use_abs=True)
+    if topk_edges is not None and int(topk_edges) > 0:
+        graph = sparsify_sparse_matrix(graph, topk=max(1, int(topk_edges)), threshold=None, use_abs=True)
     coo = sparse.triu(graph, k=1).tocoo()
     if coo.nnz == 0:
         return np.empty((0, 2, 2), dtype=np.float32), np.empty(0, dtype=np.float32)
@@ -422,6 +488,39 @@ def _build_local_case_scores(graphs):
     return score.astype(np.float32)
 
 
+def _select_local_case_nodes(graphs, num_cases):
+    num_cases = max(0, int(num_cases))
+    if num_cases <= 0:
+        return np.empty(0, dtype=np.int64)
+    scores = _build_local_case_scores(graphs)
+    fused_degree = np.asarray(graphs["fused"].sum(axis=1)).reshape(-1).astype(np.float32)
+    modal_support = (
+        np.asarray(graphs["modal_A"].sum(axis=1)).reshape(-1).astype(np.float32)
+        + np.asarray(graphs["modal_B"].sum(axis=1)).reshape(-1).astype(np.float32)
+    )
+    valid_primary = np.where((fused_degree > 0) & (modal_support > 0))[0]
+    valid_secondary = np.where(modal_support > 0)[0]
+
+    ordered = []
+    if valid_primary.size > 0:
+        ordered.extend(valid_primary[np.argsort(-scores[valid_primary], kind="stable")].tolist())
+    if len(ordered) < num_cases and valid_secondary.size > 0:
+        secondary = valid_secondary[np.argsort(-scores[valid_secondary], kind="stable")].tolist()
+        for idx in secondary:
+            if idx not in ordered:
+                ordered.append(int(idx))
+                if len(ordered) >= num_cases:
+                    break
+    if len(ordered) < num_cases:
+        fallback = np.argsort(-scores, kind="stable").tolist()
+        for idx in fallback:
+            if idx not in ordered:
+                ordered.append(int(idx))
+                if len(ordered) >= num_cases:
+                    break
+    return np.asarray(ordered[:num_cases], dtype=np.int64)
+
+
 def _topk_neighbors(graph, node_idx, topk):
     row = graph.getrow(int(node_idx))
     if row.nnz == 0:
@@ -461,7 +560,7 @@ def _save_local_case_figure(
     fig, axes = plt.subplots(1, len(graph_keys), figsize=(24, 5), dpi=160)
     for ax, key in zip(axes, graph_keys):
         subgraph = graphs[key][case_nodes][:, case_nodes].tocsr().astype(np.float32)
-        segments, weights = _prepare_edge_segments(subgraph, coords, topk_edges=max(3, min(int(topk), 10)))
+        segments, weights = _prepare_edge_segments(subgraph, coords, topk_edges=None)
         if segments.shape[0] > 0:
             alpha = np.clip(weights / max(np.percentile(weights, 95), 1e-8), 0.05, 1.0)
             lc = LineCollection(segments, colors=[(0.4, 0.4, 0.4, float(a) * 0.7) for a in alpha], linewidths=0.7)
@@ -469,7 +568,10 @@ def _save_local_case_figure(
         ax.scatter(coords[:, 0], coords[:, 1], c=colors, s=28, cmap="tab20", linewidths=0.0)
         center = coords[local_index[int(node_idx)]]
         ax.scatter(center[0], center[1], s=80, facecolors="none", edgecolors="black", linewidths=1.5)
-        ax.set_title(key)
+        title = key
+        if subgraph.nnz == 0:
+            title = f"{key}\n(no local edges)"
+        ax.set_title(title)
         ax.set_xticks([])
         ax.set_yticks([])
         ax.set_aspect("equal")
@@ -523,11 +625,7 @@ def visualize_cross_modal_topology_results(
     display_node_colors = node_colors_full[display_indices]
 
     graph_matrices = {key: _gather_heatmap_matrix(graph, display_indices) for key, graph in graphs.items()}
-    max_positive = 1e-8
-    for matrix in graph_matrices.values():
-        positive = matrix[matrix > 0]
-        if positive.size:
-            max_positive = max(max_positive, float(np.percentile(positive, 99)))
+    positive_heatmap_scale = _compute_positive_heatmap_scale(list(graph_matrices.values()))
 
     for key, filename in {
         "modal_A": "heatmap_modal_A.png",
@@ -538,13 +636,13 @@ def visualize_cross_modal_topology_results(
     }.items():
         _save_matrix_heatmap(
             plt,
-            graph_matrices[key],
+            _transform_positive_heatmap(graph_matrices[key], positive_heatmap_scale["lower_ref"]),
             output_dir / filename,
-            title=f"Adjacency Heatmap: {bundle['modality_name_map'][key]}",
+            title=f"Adjacency Heatmap: {bundle['modality_name_map'][key]} (log-enhanced, zero masked)",
             cmap="magma",
             vmin=0.0,
-            vmax=max_positive,
-            colorbar_label="Edge Weight",
+            vmax=positive_heatmap_scale["display_vmax"],
+            colorbar_label="log1p(weight / q10)",
         )
 
     display_subgraphs = {key: graph[display_indices][:, display_indices].tocsr() for key, graph in graphs.items()}
@@ -573,10 +671,7 @@ def visualize_cross_modal_topology_results(
         "delta_fused_vs_A": graph_matrices["fused"] - graph_matrices["modal_A"],
         "delta_fused_vs_B": graph_matrices["fused"] - graph_matrices["modal_B"],
     }
-    max_delta = 1e-8
-    for matrix in delta_matrices.values():
-        if matrix.size:
-            max_delta = max(max_delta, float(np.percentile(np.abs(matrix.reshape(-1)), 99)))
+    signed_heatmap_scale = _compute_signed_heatmap_scale(list(delta_matrices.values()))
 
     for key, filename, title in [
         ("delta_corr_A", "delta_corr_A.png", "Delta Corr A = B_hat^A - B^A"),
@@ -586,13 +681,13 @@ def visualize_cross_modal_topology_results(
     ]:
         _save_matrix_heatmap(
             plt,
-            delta_matrices[key],
+            _transform_signed_heatmap(delta_matrices[key], signed_heatmap_scale["lower_ref"]),
             output_dir / filename,
-            title=title,
+            title=f"{title} (signed log-enhanced, zero masked)",
             cmap="coolwarm",
-            vmin=-max_delta,
-            vmax=max_delta,
-            colorbar_label="Signed Difference",
+            vmin=-signed_heatmap_scale["display_vmax"],
+            vmax=signed_heatmap_scale["display_vmax"],
+            colorbar_label="sign(x) * log1p(|x| / q10)",
         )
 
     graph_stats = {key: _graph_stats(graph) for key, graph in graphs.items()}
@@ -617,8 +712,7 @@ def visualize_cross_modal_topology_results(
     )
 
     local_case_scores = _build_local_case_scores(graphs)
-    case_order = np.argsort(-local_case_scores)
-    case_nodes = case_order[: max(0, int(visualization_num_local_cases))]
+    case_nodes = _select_local_case_nodes(graphs, visualization_num_local_cases)
     local_case_records = []
     degA = graph_stats["modal_A"]["degree"]
     degB = graph_stats["modal_B"]["degree"]
@@ -683,6 +777,18 @@ def visualize_cross_modal_topology_results(
         "layout": {
             "mode": str(visualization_layout_mode),
             "node_color_source": node_color_source,
+        },
+        "heatmap_transform": {
+            "adjacency": {
+                "type": "shared_log_nonzero_masked",
+                "lower_ref_q10": float(positive_heatmap_scale["lower_ref"]),
+                "upper_ref_q99": float(positive_heatmap_scale["upper_ref"]),
+            },
+            "delta": {
+                "type": "shared_signed_log_nonzero_masked",
+                "lower_ref_q10_abs": float(signed_heatmap_scale["lower_ref"]),
+                "upper_ref_q99_abs": float(signed_heatmap_scale["upper_ref"]),
+            },
         },
         "graph_summary": {
             key: {
