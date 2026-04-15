@@ -50,15 +50,27 @@ def run_surrogate_training(
 
     history_loss: List[np.ndarray] = []
     history_conf: List[np.ndarray] = []
+    history_conf_img: List[np.ndarray] = []
+    history_conf_txt: List[np.ndarray] = []
     history_el2n: List[np.ndarray] = []
+    history_el2n_img: List[np.ndarray] = []
+    history_el2n_txt: List[np.ndarray] = []
     history_grand: List[np.ndarray] = []
+    history_grand_img: List[np.ndarray] = []
+    history_grand_txt: List[np.ndarray] = []
 
     for _ in range(int(cfg.epochs)):
         indices = torch.randperm(n, device=device)
         loss_epoch = torch.zeros(n, device=device)
         conf_epoch = torch.zeros(n, device=device)
+        conf_img_epoch = torch.zeros(n, device=device)
+        conf_txt_epoch = torch.zeros(n, device=device)
         el2n_epoch = torch.zeros(n, device=device)
+        el2n_img_epoch = torch.zeros(n, device=device)
+        el2n_txt_epoch = torch.zeros(n, device=device)
         grand_epoch = torch.zeros(n, device=device)
+        grand_img_epoch = torch.zeros(n, device=device)
+        grand_txt_epoch = torch.zeros(n, device=device)
 
         for start in range(0, n, int(cfg.batch_size)):
             batch_ids = indices[start:start + int(cfg.batch_size)]
@@ -84,18 +96,34 @@ def run_surrogate_training(
             el2n_row = torch.norm(p_row - one_hot, dim=1)
             el2n_col = torch.norm(p_col - one_hot, dim=1)
             conf = (p_row[torch.arange(bsz), target] + p_col[torch.arange(bsz), target]) / 2.0
-            grand = torch.norm(p_row - one_hot, dim=1) + torch.norm(p_col - one_hot, dim=1)
+            conf_img = p_row[torch.arange(bsz), target]
+            conf_txt = p_col[torch.arange(bsz), target]
+            grand_img = torch.norm(p_row - one_hot, dim=1)
+            grand_txt = torch.norm(p_col - one_hot, dim=1)
+            grand = grand_img + grand_txt
 
             per_sample_loss = (loss_row + loss_col) / 2.0
             loss_epoch[batch_ids] = per_sample_loss.detach()
             conf_epoch[batch_ids] = conf.detach()
+            conf_img_epoch[batch_ids] = conf_img.detach()
+            conf_txt_epoch[batch_ids] = conf_txt.detach()
             el2n_epoch[batch_ids] = ((el2n_row + el2n_col) / 2.0).detach()
+            el2n_img_epoch[batch_ids] = el2n_row.detach()
+            el2n_txt_epoch[batch_ids] = el2n_col.detach()
             grand_epoch[batch_ids] = grand.detach()
+            grand_img_epoch[batch_ids] = grand_img.detach()
+            grand_txt_epoch[batch_ids] = grand_txt.detach()
 
         history_loss.append(loss_epoch.detach().cpu().numpy().astype(np.float32))
         history_conf.append(conf_epoch.detach().cpu().numpy().astype(np.float32))
+        history_conf_img.append(conf_img_epoch.detach().cpu().numpy().astype(np.float32))
+        history_conf_txt.append(conf_txt_epoch.detach().cpu().numpy().astype(np.float32))
         history_el2n.append(el2n_epoch.detach().cpu().numpy().astype(np.float32))
+        history_el2n_img.append(el2n_img_epoch.detach().cpu().numpy().astype(np.float32))
+        history_el2n_txt.append(el2n_txt_epoch.detach().cpu().numpy().astype(np.float32))
         history_grand.append(grand_epoch.detach().cpu().numpy().astype(np.float32))
+        history_grand_img.append(grand_img_epoch.detach().cpu().numpy().astype(np.float32))
+        history_grand_txt.append(grand_txt_epoch.detach().cpu().numpy().astype(np.float32))
 
     model.eval()
     with torch.no_grad():
@@ -108,8 +136,14 @@ def run_surrogate_training(
         "history": {
             "loss": history_loss,
             "confidence": history_conf,
+            "confidence_img": history_conf_img,
+            "confidence_txt": history_conf_txt,
             "el2n": history_el2n,
+            "el2n_img": history_el2n_img,
+            "el2n_txt": history_el2n_txt,
             "grand": history_grand,
+            "grand_img": history_grand_img,
+            "grand_txt": history_grand_txt,
         },
     }
 
@@ -148,4 +182,3 @@ def cosine_similarity_matrix(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     x_norm = x / np.maximum(np.linalg.norm(x, axis=1, keepdims=True), 1e-8)
     y_norm = y / np.maximum(np.linalg.norm(y, axis=1, keepdims=True), 1e-8)
     return x_norm @ y_norm.T
-

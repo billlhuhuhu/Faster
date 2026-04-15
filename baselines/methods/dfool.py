@@ -27,13 +27,12 @@ from baselines.registry import register_method
 from ._utils import make_result
 
 
-def _margin_score(sim: np.ndarray) -> np.ndarray:
+def _row_margin(sim: np.ndarray) -> np.ndarray:
     diag = np.diag(sim)
     masked = sim.copy()
     np.fill_diagonal(masked, -np.inf)
     hardest = np.max(masked, axis=1)
-    margin = diag - hardest
-    return margin
+    return diag - hardest
 
 
 @register_method("dfool")
@@ -60,16 +59,19 @@ def select_subset(
     )
     outputs = run_surrogate_training(img, txt, train_cfg)
     sim = cosine_similarity_matrix(outputs["img_embed"], outputs["txt_embed"])
-    margin = _margin_score(sim)
+    margin_img = _row_margin(sim)
+    margin_txt = _row_margin(sim.T)
     # Assumed Dfool: smaller margin => easier to fool => higher selection score.
-    score = (1.0 / np.maximum(margin, 1e-4)).astype(np.float32)
+    score_img = (1.0 / np.maximum(margin_img, 1e-4)).astype(np.float32)
+    score_txt = (1.0 / np.maximum(margin_txt, 1e-4)).astype(np.float32)
+    score_joint = ((score_img + score_txt) / 2.0).astype(np.float32)
     return make_result(
         method="dfool",
         ratio=ratio,
         n=img.shape[0],
-        score_img=score,
-        score_txt=score,
-        score_joint=score,
+        score_img=score_img,
+        score_txt=score_txt,
+        score_joint=score_joint,
         config=cfg,
-        notes="Assumed Dfool version: pair-level fooling score via inverse retrieval margin.",
+        notes="Assumed Dfool version: branch-specific inverse retrieval margin (image/text) with pair aggregation.",
     )

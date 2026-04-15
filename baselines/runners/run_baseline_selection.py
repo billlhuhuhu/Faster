@@ -4,6 +4,7 @@ import time
 from typing import Any, Dict, Optional
 
 from baselines.common.io import ratio_tag, sanitize_name, save_selection_outputs
+from baselines.common.multimodal_scoring import fuse_pair_scores
 from baselines.common.selection_utils import resolve_budget_and_ratio
 from baselines.registry import get_method, list_methods
 
@@ -193,6 +194,34 @@ def _apply_candidate_pool(dataset: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[
     return narrowed
 
 
+def _enforce_fusion_contract(outputs: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
+    scores = dict(outputs.get("scores", {}))
+    if "score_img" not in scores or "score_txt" not in scores:
+        raise ValueError(
+            f"Method {outputs.get('method')} must provide score_img and score_txt. "
+            "score_pair is forbidden as primary output and will be recomputed externally."
+        )
+    score_img = scores["score_img"]
+    score_txt = scores["score_txt"]
+    score_joint = scores.get("score_joint")
+    fused = fuse_pair_scores(
+        score_img=score_img,
+        score_txt=score_txt,
+        score_joint=score_joint,
+        fusion=str(cfg.get("pair_score_fusion", "weighted_sum")),
+        weights=tuple(cfg.get("pair_score_weights", [0.5, 0.5, 0.0])),
+        normalize_mode=str(cfg.get("score_normalization", "zscore")),
+    )
+    outputs = dict(outputs)
+    outputs["scores"] = fused
+    meta = dict(outputs.get("meta", {}))
+    meta["fusion_enforced"] = True
+    meta["fusion_mode"] = str(cfg.get("pair_score_fusion", "weighted_sum"))
+    meta["score_normalization"] = str(cfg.get("score_normalization", "zscore"))
+    outputs["meta"] = meta
+    return outputs
+
+
 def run_baseline_selection_once(
     *,
     method: str,
@@ -258,6 +287,7 @@ def run_baseline_selection_once(
         text_features=dataset["text_features"],
         config=cfg,
     )
+    outputs = _enforce_fusion_contract(outputs, cfg)
     selection_time = float(time.time() - select_started)
     selected_local = [int(x) for x in outputs["selected_local_indices"]]
     selected_local = selected_local[:resolved_budget]

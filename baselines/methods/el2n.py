@@ -47,17 +47,21 @@ def select_subset(
         device=str(cfg.get("device", "cpu")),
     )
     outputs = run_surrogate_training(img, txt, train_cfg)
-    history = outputs["history"]["el2n"]
-    stacked = np.stack(history, axis=0)
-    window = int(cfg.get("el2n_epoch_window", min(3, stacked.shape[0])))
-    score = np.mean(stacked[:window], axis=0)
+    hist_img = outputs["history"]["el2n_img"]
+    hist_txt = outputs["history"]["el2n_txt"]
+    stacked_img = np.stack(hist_img, axis=0)
+    stacked_txt = np.stack(hist_txt, axis=0)
+    window = int(cfg.get("el2n_epoch_window", min(3, stacked_img.shape[0], stacked_txt.shape[0])))
+    score_img = np.mean(stacked_img[:window], axis=0)
+    score_txt = np.mean(stacked_txt[:window], axis=0)
+    score_joint = (score_img + score_txt) / 2.0
     return make_result(
         method="el2n",
         ratio=ratio,
         n=img.shape[0],
-        score_img=score,
-        score_txt=score,
-        score_joint=score,
+        score_img=score_img,
+        score_txt=score_txt,
+        score_joint=score_joint,
         config=cfg,
-        notes="Early-epoch L2 error norm using surrogate pair-matching training dynamics.",
+        notes="Early-epoch L2 error norm using branch-specific surrogate dynamics.",
     )

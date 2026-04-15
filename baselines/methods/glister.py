@@ -59,10 +59,27 @@ def select_subset(
     train_grads = grads[train_idx]
     val_grad = np.mean(grads[val_idx], axis=0)
 
-    k = resolve_subset_size(train_grads.shape[0], ratio)
-    selected_train_local, residual = glister_greedy(train_grads, val_grad, k)
+    target_k = resolve_subset_size(grads.shape[0], ratio)
+    k_train = min(int(target_k), int(train_grads.shape[0]))
+    selected_train_local, residual = glister_greedy(train_grads, val_grad, k_train)
     selected = [int(train_idx[idx]) for idx in selected_train_local]
     score = (grads @ val_grad).astype(np.float32)
+
+    # Budget-equality fix:
+    # GLISTER greedy runs on train split; if train subset is smaller than target budget,
+    # fill the remainder from non-selected samples by global validation-gain proxy.
+    if len(selected) < int(target_k):
+        picked = set(selected)
+        order = np.argsort(-score)
+        for idx in order:
+            idx = int(idx)
+            if idx in picked:
+                continue
+            selected.append(idx)
+            picked.add(idx)
+            if len(selected) >= int(target_k):
+                break
+    selected = selected[: int(target_k)]
     return {
         "method": "glister",
         "ratio": float(ratio),
@@ -71,14 +88,14 @@ def select_subset(
             "score_img": score,
             "score_txt": score,
             "score_joint": score,
-            "score_pair": score,
         },
         "meta": {
-            "subset_size": int(k),
+            "subset_size": int(target_k),
             "num_samples": int(grads.shape[0]),
             "train_size": int(train_idx.shape[0]),
             "val_size": int(val_idx.shape[0]),
             "residual_norm": float(np.linalg.norm(residual)),
+            "budget_equalized": True,
             "notes": "Practical GLISTER approximation using held-out surrogate validation gradient.",
             "config": cfg,
         },
