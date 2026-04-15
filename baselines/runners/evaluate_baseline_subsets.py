@@ -34,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eval_interval", type=int, default=1)
     parser.add_argument("--subset_tag", type=str, default=None)
     parser.add_argument("--subset_restore_mode", type=str, default="pair_level_indices")
+    parser.add_argument("--no_aug", action="store_true", default=True)
     return parser
 
 
@@ -89,6 +90,7 @@ def run_downstream_eval(
     eval_interval: int,
     subset_tag: Optional[str],
     subset_restore_mode: str,
+    no_aug: bool = True,
 ) -> Dict[str, Any]:
     summary = _infer_defaults_from_summary(baseline_result_dir)
     dataset_name = dataset_name or summary.get("dataset_name") or summary.get("dataset")
@@ -159,6 +161,8 @@ def run_downstream_eval(
         "--device",
         str(device),
     ]
+    if no_aug:
+        cmd.append("--no_aug")
 
     started = time.time()
     proc = subprocess.run(
@@ -248,6 +252,7 @@ def main():
         eval_interval=args.eval_interval,
         subset_tag=args.subset_tag,
         subset_restore_mode=args.subset_restore_mode,
+        no_aug=bool(args.no_aug),
     )
     print("Downstream eval finished:")
     print(f"  method={out['method']} budget={out['budget']} seed={out['seed']}")
@@ -257,4 +262,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

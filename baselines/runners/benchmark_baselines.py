@@ -183,6 +183,7 @@ def main():
                 eval_interval=int(cfg.get("eval_interval", 1)),
                 subset_tag=method_name,
                 subset_restore_mode=str(cfg.get("subset_restore_mode", "pair_level_indices")),
+                no_aug=bool(cfg.get("train_no_aug", True)),
             )
 
         row = {
