@@ -11,7 +11,13 @@ from src.graph_wavelet import (
     parse_wavelet_scales,
     sparsify_sparse_matrix,
 )
-from src.topology_graph import build_laplacian, build_spectral_embedding, compute_spectrum, parse_multi_scale_ks
+from src.topology_graph import (
+    build_laplacian,
+    build_spectral_embedding,
+    compute_collapse_metrics,
+    compute_spectrum,
+    parse_multi_scale_ks,
+)
 
 
 def log_cross_modal(message):
@@ -1088,6 +1094,25 @@ def compute_response_collapse_metrics(response, eps=1e-8):
     }
 
 
+def compute_graph_collapse_metrics(graph, num_eigs=64, spectrum_solver_mode="normalized_adjacency_largest"):
+    graph = graph.tocsr().astype(np.float32)
+    target_num_eigs = max(2, min(int(num_eigs), max(2, int(graph.shape[0]) - 1)))
+    laplacian = build_laplacian(graph, normalized=True)
+    eigenvalues, _ = compute_spectrum(
+        laplacian,
+        target_num_eigs,
+        return_eigenvectors=False,
+        solver_mode=spectrum_solver_mode,
+    )
+    collapse_metrics = compute_collapse_metrics(eigenvalues)
+    collapse_metrics = dict(collapse_metrics)
+    collapse_metrics["first_eigenvalues"] = [float(x) for x in np.asarray(eigenvalues[: min(10, len(eigenvalues))], dtype=np.float32)]
+    collapse_metrics["num_nodes"] = int(graph.shape[0])
+    collapse_metrics["nnz"] = int(graph.nnz)
+    collapse_metrics["spectrum_solver_mode"] = str(spectrum_solver_mode)
+    return collapse_metrics
+
+
 def compute_modal_multiscale_responses(graph, probes, scales, impl="diffusion_difference", eps=1e-8):
     impl = str(impl or "diffusion_difference")
     if impl not in {"diffusion_difference", "graph_wavelet"}:
@@ -1109,6 +1134,8 @@ def resolve_latent_wavelet_scale_weights(
     weight_mode="fixed_per_scale",
     weights_a=None,
     weights_b=None,
+    modal_graph_collapse_a=None,
+    modal_graph_collapse_b=None,
     eps=1e-8,
 ):
     scales = parse_wavelet_scales(scales)
@@ -1137,6 +1164,28 @@ def resolve_latent_wavelet_scale_weights(
         return resolved, collapse_stats
 
     if weight_mode == "collapse_aware":
+        if modal_graph_collapse_a is not None and modal_graph_collapse_b is not None:
+            health_a = max(1.0 - float(modal_graph_collapse_a["collapse_score"]), float(eps))
+            health_b = max(1.0 - float(modal_graph_collapse_b["collapse_score"]), float(eps))
+            denom = health_a + health_b
+            alpha = float(health_a / denom)
+            beta = float(health_b / denom)
+            graph_collapse_stats = {
+                "A": dict(modal_graph_collapse_a),
+                "B": dict(modal_graph_collapse_b),
+                "omega_A": alpha,
+                "omega_B": beta,
+                "source": "corrected_graph",
+            }
+            for scale in scales:
+                resolved[int(scale)] = {"alpha": alpha, "beta": beta}
+                collapse_stats[str(scale)] = {
+                    "A": dict(modal_graph_collapse_a),
+                    "B": dict(modal_graph_collapse_b),
+                    "source": "corrected_graph",
+                }
+            collapse_stats["_graph"] = graph_collapse_stats
+            return resolved, collapse_stats
         for scale in scales:
             metrics_a = compute_response_collapse_metrics(responses_a[int(scale)], eps=eps)
             metrics_b = compute_response_collapse_metrics(responses_b[int(scale)], eps=eps)
@@ -1203,6 +1252,8 @@ def build_wavelet_latent_fusion(
     wavelet_fusion_weight_mode="fixed_per_scale",
     wavelet_fusion_weight_a_scales=None,
     wavelet_fusion_weight_b_scales=None,
+    modal_graph_collapse_a=None,
+    modal_graph_collapse_b=None,
     wavelet_latent_lambda_sparse=0.01,
     wavelet_latent_lambda_sym=1.0,
     wavelet_latent_lambda_nonneg=1.0,
@@ -1228,6 +1279,8 @@ def build_wavelet_latent_fusion(
         weight_mode=wavelet_fusion_weight_mode,
         weights_a=wavelet_fusion_weight_a_scales,
         weights_b=wavelet_fusion_weight_b_scales,
+        modal_graph_collapse_a=modal_graph_collapse_a,
+        modal_graph_collapse_b=modal_graph_collapse_b,
         eps=eps,
     )
 
@@ -1348,6 +1401,8 @@ def build_wavelet_latent_fusion(
     }
     if collapse_stats:
         diagnostics["collapse_aware_scale_stats"] = collapse_stats
+    if collapse_stats.get("_graph") is not None:
+        diagnostics["collapse_aware_graph_stats"] = collapse_stats["_graph"]
     return final_graph, diagnostics
 
 
@@ -1451,6 +1506,8 @@ def unify_topology(
     wavelet_fusion_weight_mode="fixed_per_scale",
     wavelet_fusion_weight_a_scales=None,
     wavelet_fusion_weight_b_scales=None,
+    modal_graph_collapse_a=None,
+    modal_graph_collapse_b=None,
     wavelet_latent_lambda_sparse=0.01,
     wavelet_latent_lambda_sym=1.0,
     wavelet_latent_lambda_nonneg=1.0,
@@ -1485,6 +1542,8 @@ def unify_topology(
             wavelet_fusion_weight_mode=wavelet_fusion_weight_mode,
             wavelet_fusion_weight_a_scales=wavelet_fusion_weight_a_scales,
             wavelet_fusion_weight_b_scales=wavelet_fusion_weight_b_scales,
+            modal_graph_collapse_a=modal_graph_collapse_a,
+            modal_graph_collapse_b=modal_graph_collapse_b,
             wavelet_latent_lambda_sparse=wavelet_latent_lambda_sparse,
             wavelet_latent_lambda_sym=wavelet_latent_lambda_sym,
             wavelet_latent_lambda_nonneg=wavelet_latent_lambda_nonneg,
@@ -1495,13 +1554,13 @@ def unify_topology(
     raise ValueError(f"Unsupported fusion_domain_mode: {fusion_domain_mode}")
 
 
-def summarize_graph(graph):
+def summarize_graph(graph, collapse_metrics=None):
     num_nodes = int(graph.shape[0])
     num_edges = int(graph.nnz)
     avg_degree = float(num_edges / max(num_nodes, 1))
     degree = np.asarray(graph.sum(axis=1)).reshape(-1)
     nonzero_degree = degree[degree > 0]
-    return {
+    summary = {
         "num_nodes": num_nodes,
         "num_edges": num_edges,
         "avg_degree": avg_degree,
@@ -1510,6 +1569,16 @@ def summarize_graph(graph):
         "mean_nonzero_degree": float(nonzero_degree.mean()) if nonzero_degree.size else 0.0,
         "density": float(num_edges / max(num_nodes * num_nodes, 1)),
     }
+    if collapse_metrics is not None:
+        summary.update(
+            {
+                "spectral_entropy": float(collapse_metrics.get("spectral_entropy", 0.0)),
+                "collapse_score": float(collapse_metrics.get("collapse_score", 1.0)),
+                "num_eigs_used": int(collapse_metrics.get("num_eigs_used", 0)),
+                "collapse_first_eigenvalues": [float(x) for x in collapse_metrics.get("first_eigenvalues", [])],
+            }
+        )
+    return summary
 
 
 def build_unified_spectral_artifacts(
@@ -1962,6 +2031,25 @@ def run_cross_modal_topology(args):
     else:
         raise ValueError(f"Unsupported correction mode: {correction_mode}")
 
+    log_cross_modal("recomputing corrected modality collapse scores")
+    corrected_image_collapse_metrics = compute_graph_collapse_metrics(
+        corrected_image_symmetric,
+        num_eigs=getattr(args, "num_eigs", 64),
+        spectrum_solver_mode=getattr(args, "spectrum_solver_mode", "normalized_adjacency_largest"),
+    )
+    corrected_text_collapse_metrics = compute_graph_collapse_metrics(
+        corrected_text_symmetric,
+        num_eigs=getattr(args, "num_eigs", 64),
+        spectrum_solver_mode=getattr(args, "spectrum_solver_mode", "normalized_adjacency_largest"),
+    )
+    log_cross_modal(
+        "corrected graph collapse: "
+        f"A(collapse={corrected_image_collapse_metrics.get('collapse_score', 1.0):.4f}, "
+        f"entropy={corrected_image_collapse_metrics.get('spectral_entropy', 0.0):.4f}) "
+        f"B(collapse={corrected_text_collapse_metrics.get('collapse_score', 1.0):.4f}, "
+        f"entropy={corrected_text_collapse_metrics.get('spectral_entropy', 0.0):.4f})"
+    )
+
     fusion_domain_mode = str(getattr(args, "fusion_domain_mode", "wavelet_latent"))
     log_cross_modal(f"building unified topology B*: fusion_domain_mode={fusion_domain_mode}, graph_fusion_mode={args.fusion_mode}")
     unified_graph, fusion_diagnostics = unify_topology(
@@ -1984,6 +2072,8 @@ def run_cross_modal_topology(args):
         wavelet_fusion_weight_mode=getattr(args, "wavelet_fusion_weight_mode", "fixed_per_scale"),
         wavelet_fusion_weight_a_scales=getattr(args, "wavelet_fusion_weight_a_scales", None),
         wavelet_fusion_weight_b_scales=getattr(args, "wavelet_fusion_weight_b_scales", None),
+        modal_graph_collapse_a=corrected_image_collapse_metrics,
+        modal_graph_collapse_b=corrected_text_collapse_metrics,
         wavelet_latent_lambda_sparse=getattr(args, "wavelet_latent_lambda_sparse", 0.01),
         wavelet_latent_lambda_sym=getattr(args, "wavelet_latent_lambda_sym", 1.0),
         wavelet_latent_lambda_nonneg=getattr(args, "wavelet_latent_lambda_nonneg", 1.0),
@@ -2019,8 +2109,18 @@ def run_cross_modal_topology(args):
                     f"W_target(mean={scale_diag.get('target', {}).get('mean', 0.0):.4f}, row_norm={scale_diag.get('target', {}).get('mean_row_norm', 0.0):.4f}), "
                     f"W_star(mean={scale_diag.get('star', {}).get('mean', 0.0):.4f}, row_norm={scale_diag.get('star', {}).get('mean_row_norm', 0.0):.4f})"
                 )
-            if "collapse_aware_scale_stats" in fusion_diagnostics:
+            if "collapse_aware_graph_stats" in fusion_diagnostics:
+                graph_diag = fusion_diagnostics.get("collapse_aware_graph_stats", {})
+                log_cross_modal(
+                    "wavelet_latent corrected-graph collapse-aware weights: "
+                    f"omega_A={graph_diag.get('omega_A', 0.0):.4f}, omega_B={graph_diag.get('omega_B', 0.0):.4f}, "
+                    f"A(collapse={graph_diag.get('A', {}).get('collapse_score', 0.0):.4f}, entropy={graph_diag.get('A', {}).get('spectral_entropy', 0.0):.4f}), "
+                    f"B(collapse={graph_diag.get('B', {}).get('collapse_score', 0.0):.4f}, entropy={graph_diag.get('B', {}).get('spectral_entropy', 0.0):.4f})"
+                )
+            elif "collapse_aware_scale_stats" in fusion_diagnostics:
                 for scale_key, scale_diag in fusion_diagnostics.get("collapse_aware_scale_stats", {}).items():
+                    if str(scale_key).startswith("_"):
+                        continue
                     log_cross_modal(
                         f"wavelet_latent collapse-aware scale={scale_key}: "
                         f"A(collapse={scale_diag.get('A', {}).get('collapse_score', 0.0):.4f}, entropy={scale_diag.get('A', {}).get('spectral_entropy', 0.0):.4f}), "
@@ -2035,8 +2135,8 @@ def run_cross_modal_topology(args):
             )
 
     log_cross_modal("summarizing corrected and unified graphs")
-    corrected_image_summary = summarize_graph(corrected_image_symmetric)
-    corrected_text_summary = summarize_graph(corrected_text_symmetric)
+    corrected_image_summary = summarize_graph(corrected_image_symmetric, collapse_metrics=corrected_image_collapse_metrics)
+    corrected_text_summary = summarize_graph(corrected_text_symmetric, collapse_metrics=corrected_text_collapse_metrics)
     corrected_summary = corrected_text_summary if healthy_modality == "image" else corrected_image_summary
     unified_summary = summarize_graph(unified_graph)
     unified_spectral_artifacts = build_unified_spectral_artifacts(
