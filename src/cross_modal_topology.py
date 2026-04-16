@@ -489,130 +489,127 @@ def sparse_matrix_from_union_keys(union_keys, values, shape):
     return matrix
 
 
-def build_topk_neighbor_average_graph(graph, topk=10):
-    neighbors = extract_row_topk_neighbors(graph, topk=topk)
-    total_nnz = int(sum(int(row.size) for row in neighbors))
-    if total_nnz <= 0:
-        return sparse.csr_matrix(graph.shape, dtype=np.float32)
+def gather_row_values_on_columns(graph, row_idx, columns):
+    columns = np.asarray(columns, dtype=np.int64)
+    if columns.size == 0:
+        return np.zeros(0, dtype=np.float32)
+    graph = graph.tocsr()
+    start = int(graph.indptr[int(row_idx)])
+    end = int(graph.indptr[int(row_idx) + 1])
+    row_cols = graph.indices[start:end].astype(np.int64, copy=False)
+    row_vals = graph.data[start:end].astype(np.float32, copy=False)
+    gathered = np.zeros(columns.shape[0], dtype=np.float32)
+    if row_cols.size == 0:
+        return gathered
+    positions = np.searchsorted(row_cols, columns)
+    valid = positions < row_cols.size
+    matched = np.zeros_like(valid, dtype=bool)
+    if np.any(valid):
+        matched[valid] = row_cols[positions[valid]] == columns[valid]
+    if np.any(matched):
+        gathered[matched] = row_vals[positions[matched]]
+    return gathered.astype(np.float32)
 
-    rows = np.empty(total_nnz, dtype=np.int32)
-    cols = np.empty(total_nnz, dtype=np.int32)
-    data = np.empty(total_nnz, dtype=np.float32)
-    cursor = 0
-    for node_idx, row_neighbors in enumerate(neighbors):
-        count = int(row_neighbors.size)
-        if count <= 0:
+
+def compute_local_relation_redundancy(graph, neighborhoods, eps=1e-8):
+    graph = graph.tocsr().astype(np.float32)
+    num_nodes = int(graph.shape[0])
+    scores = np.zeros(num_nodes, dtype=np.float32)
+    eps = float(eps)
+    for node_idx in range(num_nodes):
+        local_neighbors = np.asarray(neighborhoods[node_idx], dtype=np.int64)
+        if local_neighbors.size <= 1:
             continue
-        rows[cursor : cursor + count] = int(node_idx)
-        cols[cursor : cursor + count] = row_neighbors.astype(np.int32, copy=False)
-        data[cursor : cursor + count] = np.float32(1.0 / max(count, 1))
-        cursor += count
-
-    avg_graph = sparse.csr_matrix((data, (rows, cols)), shape=graph.shape, dtype=np.float32)
-    avg_graph.eliminate_zeros()
-    return avg_graph
-
-
-def robust_unit_scale(values, eps=1e-8, upper_quantile=95.0):
-    values = np.asarray(values, dtype=np.float32)
-    positive = values[values > 0]
-    if positive.size == 0:
-        scaled = np.zeros_like(values, dtype=np.float32)
-        diagnostics = {
-            "raw_stats": summarize_vector(values),
-            "normalized_stats": summarize_vector(scaled),
-            "normalization": {
-                "type": "robust_quantile_clip",
-                "upper_quantile": float(upper_quantile),
-                "scale": 1.0,
-            },
-        }
-        return scaled, diagnostics
-
-    scale = float(np.percentile(positive.astype(np.float64), float(upper_quantile)))
-    if scale <= float(eps):
-        scale = float(np.max(positive))
-    scale = max(scale, float(eps))
-    scaled = np.clip(values / scale, 0.0, 1.0).astype(np.float32)
+        base_vector = gather_row_values_on_columns(graph, node_idx, local_neighbors)
+        base_norm = float(np.linalg.norm(base_vector))
+        if base_norm <= eps:
+            continue
+        similarities = []
+        for neighbor_idx in local_neighbors.tolist():
+            neighbor_vector = gather_row_values_on_columns(graph, int(neighbor_idx), local_neighbors)
+            neighbor_norm = float(np.linalg.norm(neighbor_vector))
+            if neighbor_norm <= eps:
+                similarities.append(0.0)
+                continue
+            cosine = float(np.dot(base_vector, neighbor_vector) / max(base_norm * neighbor_norm, eps))
+            similarities.append(float(np.clip(cosine, 0.0, 1.0)))
+        if similarities:
+            scores[node_idx] = np.float32(np.clip(np.mean(similarities), 0.0, 1.0))
     diagnostics = {
-        "raw_stats": summarize_vector(values),
-        "normalized_stats": summarize_vector(scaled),
-        "normalization": {
-            "type": "robust_quantile_clip",
-            "upper_quantile": float(upper_quantile),
-            "scale": float(scale),
-        },
+        "raw_stats": summarize_vector(scores),
+        "window_type": "local_candidate_neighborhood",
     }
-    return scaled, diagnostics
+    return scores.astype(np.float32), diagnostics
 
 
-def build_edge_collapse_scores(
-    transition,
-    union_keys,
-    collapse_score_mode="edge_plus_neighborhood",
-    collapse_neighbor_topk=10,
-    collapse_score_weight_edge=1.0,
-    collapse_score_weight_a2b=1.0,
-    collapse_score_weight_b2a=1.0,
-    collapse_score_weight_nbr2nbr=1.0,
+def compute_local_separability_degradation(graph, neighborhoods, eps=1e-8):
+    graph = graph.tocsr().astype(np.float32)
+    num_nodes = int(graph.shape[0])
+    scores = np.zeros(num_nodes, dtype=np.float32)
+    eps = float(eps)
+    for node_idx in range(num_nodes):
+        local_neighbors = np.asarray(neighborhoods[node_idx], dtype=np.int64)
+        if local_neighbors.size <= 1:
+            continue
+        local_weights = gather_row_values_on_columns(graph, node_idx, local_neighbors)
+        weight_sum = float(np.sum(local_weights))
+        if weight_sum <= eps:
+            continue
+        prob = np.clip(local_weights / max(weight_sum, eps), eps, None).astype(np.float64)
+        prob = prob / max(np.sum(prob), eps)
+        entropy = -float(np.sum(prob * np.log(prob + eps)))
+        normalized_entropy = entropy / max(np.log(float(local_neighbors.size) + eps), eps)
+        scores[node_idx] = np.float32(np.clip(normalized_entropy, 0.0, 1.0))
+    diagnostics = {
+        "raw_stats": summarize_vector(scores),
+        "window_type": "local_candidate_neighborhood",
+    }
+    return scores.astype(np.float32), diagnostics
+
+
+def compute_local_discriminative_degradation(
+    graph,
+    local_window_topk=10,
+    relation_alpha=0.5,
     eps=1e-8,
 ):
-    transition = transition.tocsr().astype(np.float32)
-    collapse_score_mode = str(collapse_score_mode or "edge_plus_neighborhood")
-    if collapse_score_mode not in {"edge_only", "edge_plus_neighborhood"}:
-        raise ValueError(f"Unsupported collapse score mode: {collapse_score_mode}")
-
-    edge_raw = gather_sparse_data_on_keys(transition, union_keys)
-    zero = np.zeros_like(edge_raw, dtype=np.float32)
-    a2b_raw = zero
-    b2a_raw = zero
-    nbr2nbr_raw = zero
-
-    if collapse_score_mode == "edge_plus_neighborhood":
-        neighbor_average = build_topk_neighbor_average_graph(
-            transition,
-            topk=max(1, int(collapse_neighbor_topk)),
-        )
-        neighbor_to_node = (neighbor_average @ transition).tocsr()
-        neighbor_to_node.eliminate_zeros()
-        neighbor_to_neighbor = (neighbor_to_node @ neighbor_average.transpose()).tocsr()
-        neighbor_to_neighbor.eliminate_zeros()
-
-        a2b_raw = gather_sparse_data_on_keys(neighbor_to_node, union_keys)
-        b2a_raw = gather_sparse_data_on_keys(neighbor_to_node.transpose().tocsr(), union_keys)
-        nbr2nbr_raw = gather_sparse_data_on_keys(neighbor_to_neighbor, union_keys)
-
-    edge_norm, edge_diag = robust_unit_scale(edge_raw, eps=eps)
-    a2b_norm, a2b_diag = robust_unit_scale(a2b_raw, eps=eps)
-    b2a_norm, b2a_diag = robust_unit_scale(b2a_raw, eps=eps)
-    nbr2nbr_norm, nbr2nbr_diag = robust_unit_scale(nbr2nbr_raw, eps=eps)
-
-    q = (
-        float(collapse_score_weight_edge) * edge_norm
-        + float(collapse_score_weight_a2b) * a2b_norm
-        + float(collapse_score_weight_b2a) * b2a_norm
-        + float(collapse_score_weight_nbr2nbr) * nbr2nbr_norm
+    graph = graph.tocsr().astype(np.float32)
+    neighborhoods = extract_row_topk_neighbors(graph, topk=max(1, int(local_window_topk)))
+    relation_redundancy, relation_diag = compute_local_relation_redundancy(graph, neighborhoods, eps=eps)
+    separability_degradation, separability_diag = compute_local_separability_degradation(graph, neighborhoods, eps=eps)
+    relation_alpha = float(np.clip(relation_alpha, 0.0, 1.0))
+    local_collapse = (
+        relation_alpha * relation_redundancy + (1.0 - relation_alpha) * separability_degradation
     ).astype(np.float32)
-
+    local_collapse = np.clip(local_collapse, 0.0, 1.0).astype(np.float32)
     diagnostics = {
-        "collapse_score_mode": collapse_score_mode,
-        "collapse_neighbor_topk": int(collapse_neighbor_topk),
-        "collapse_score_input": "transition",
-        "collapse_score_weights": {
-            "edge": float(collapse_score_weight_edge),
-            "a2b": float(collapse_score_weight_a2b),
-            "b2a": float(collapse_score_weight_b2a),
-            "nbr2nbr": float(collapse_score_weight_nbr2nbr),
-        },
-        "components": {
-            "edge": edge_diag,
-            "a2b": a2b_diag,
-            "b2a": b2a_diag,
-            "nbr2nbr": nbr2nbr_diag,
-        },
-        "q_stats": summarize_vector(q),
+        "local_window_topk": int(local_window_topk),
+        "relation_alpha": float(relation_alpha),
+        "relation_redundancy_stats": summarize_vector(relation_redundancy),
+        "separability_degradation_stats": summarize_vector(separability_degradation),
+        "local_collapse_score_stats": summarize_vector(local_collapse),
+        "relation_redundancy": relation_diag,
+        "separability_degradation": separability_diag,
+        "window_note": "Local candidate neighborhoods are used as local structure evaluation windows.",
     }
-    return q, diagnostics
+    return local_collapse.astype(np.float32), neighborhoods, diagnostics
+
+
+def build_edge_confidence_from_local_collapse(local_collapse, union_keys, shape, tau=4.0, eps=1e-8):
+    local_collapse = np.asarray(local_collapse, dtype=np.float32)
+    num_cols = int(shape[1])
+    rows = (union_keys // num_cols).astype(np.int32)
+    cols = (union_keys % num_cols).astype(np.int32)
+    avg_collapse = 0.5 * (local_collapse[rows] + local_collapse[cols])
+    tau = max(float(tau), float(eps))
+    edge_confidence = np.exp(-tau * avg_collapse).astype(np.float32)
+    edge_confidence = np.clip(edge_confidence, 0.0, 1.0).astype(np.float32)
+    diagnostics = {
+        "tau": float(tau),
+        "avg_local_collapse_stats": summarize_vector(avg_collapse),
+        "edge_confidence_stats": summarize_vector(edge_confidence),
+    }
+    return edge_confidence.astype(np.float32), diagnostics
 
 
 def build_confidence_based_bidirectional_correction_weights(
@@ -761,8 +758,8 @@ def build_confidence_based_bidirectional_correction_weights(
 
 
 def build_collapse_score_bidirectional_correction_weights(
-    image_transition,
-    text_transition,
+    image_graph,
+    text_graph,
     eps=1e-8,
     collapse_score_mode="edge_plus_neighborhood",
     collapse_neighbor_topk=10,
@@ -770,59 +767,89 @@ def build_collapse_score_bidirectional_correction_weights(
     collapse_score_weight_a2b=1.0,
     collapse_score_weight_b2a=1.0,
     collapse_score_weight_nbr2nbr=1.0,
+    local_relation_alpha=0.5,
+    edge_confidence_tau=4.0,
+    asymmetric_correction_lambda=1.0,
 ):
-    union_keys, _, _ = build_union_keys(image_transition, text_transition)
-    q_img, image_q_diag = build_edge_collapse_scores(
-        image_transition,
-        union_keys,
-        collapse_score_mode=collapse_score_mode,
-        collapse_neighbor_topk=collapse_neighbor_topk,
-        collapse_score_weight_edge=collapse_score_weight_edge,
-        collapse_score_weight_a2b=collapse_score_weight_a2b,
-        collapse_score_weight_b2a=collapse_score_weight_b2a,
-        collapse_score_weight_nbr2nbr=collapse_score_weight_nbr2nbr,
+    image_graph = image_graph.tocsr().astype(np.float32)
+    text_graph = text_graph.tocsr().astype(np.float32)
+    union_keys, _, _ = build_union_keys(image_graph, text_graph)
+
+    image_local_collapse, _, image_local_diag = compute_local_discriminative_degradation(
+        image_graph,
+        local_window_topk=collapse_neighbor_topk,
+        relation_alpha=local_relation_alpha,
         eps=eps,
     )
-    q_txt, text_q_diag = build_edge_collapse_scores(
-        text_transition,
-        union_keys,
-        collapse_score_mode=collapse_score_mode,
-        collapse_neighbor_topk=collapse_neighbor_topk,
-        collapse_score_weight_edge=collapse_score_weight_edge,
-        collapse_score_weight_a2b=collapse_score_weight_a2b,
-        collapse_score_weight_b2a=collapse_score_weight_b2a,
-        collapse_score_weight_nbr2nbr=collapse_score_weight_nbr2nbr,
+    text_local_collapse, _, text_local_diag = compute_local_discriminative_degradation(
+        text_graph,
+        local_window_topk=collapse_neighbor_topk,
+        relation_alpha=local_relation_alpha,
         eps=eps,
     )
 
-    denom = np.abs(q_img) + np.abs(q_txt) + float(eps)
-    alpha_txt_to_img_data = (np.maximum(q_img - q_txt, 0.0) / denom).astype(np.float32)
-    alpha_img_to_txt_data = (np.maximum(q_txt - q_img, 0.0) / denom).astype(np.float32)
+    q_img, image_q_diag = build_edge_confidence_from_local_collapse(
+        image_local_collapse,
+        union_keys,
+        image_graph.shape,
+        tau=edge_confidence_tau,
+        eps=eps,
+    )
+    q_txt, text_q_diag = build_edge_confidence_from_local_collapse(
+        text_local_collapse,
+        union_keys,
+        text_graph.shape,
+        tau=edge_confidence_tau,
+        eps=eps,
+    )
 
-    alpha_txt_to_img = sparse_matrix_from_union_keys(union_keys, alpha_txt_to_img_data, image_transition.shape)
-    alpha_img_to_txt = sparse_matrix_from_union_keys(union_keys, alpha_img_to_txt_data, image_transition.shape)
+    lambda_corr = float(np.clip(asymmetric_correction_lambda, 0.0, 1.0))
+    weak_img_alignment_weight = (
+        lambda_corr * np.maximum(1.0 - (q_img / (q_txt + float(eps))), 0.0) * (q_txt >= q_img).astype(np.float32)
+    ).astype(np.float32)
+    weak_txt_alignment_weight = (
+        lambda_corr * np.maximum(1.0 - (q_txt / (q_img + float(eps))), 0.0) * (q_img > q_txt).astype(np.float32)
+    ).astype(np.float32)
+    weak_img_alignment_weight = np.clip(weak_img_alignment_weight, 0.0, 1.0).astype(np.float32)
+    weak_txt_alignment_weight = np.clip(weak_txt_alignment_weight, 0.0, 1.0).astype(np.float32)
+
+    alpha_txt_to_img = sparse_matrix_from_union_keys(union_keys, weak_img_alignment_weight, image_graph.shape)
+    alpha_img_to_txt = sparse_matrix_from_union_keys(union_keys, weak_txt_alignment_weight, image_graph.shape)
 
     diagnostics = {
         "correction_score_mode": "collapse_score",
-        "collapse_score_mode": str(collapse_score_mode),
+        "collapse_score_mode": "local_discriminative_degradation",
         "collapse_neighbor_topk": int(collapse_neighbor_topk),
         "collapse_score_weights": {
-            "edge": float(collapse_score_weight_edge),
-            "a2b": float(collapse_score_weight_a2b),
-            "b2a": float(collapse_score_weight_b2a),
-            "nbr2nbr": float(collapse_score_weight_nbr2nbr),
+            "relation_alpha": float(local_relation_alpha),
+            "edge_confidence_tau": float(edge_confidence_tau),
+            "asymmetric_correction_lambda": float(lambda_corr),
         },
-        "image_q_stats": image_q_diag["q_stats"],
-        "text_q_stats": text_q_diag["q_stats"],
-        "image_q_components": image_q_diag["components"],
-        "text_q_components": text_q_diag["components"],
-        "alpha_t2i_stats_before_gate": summarize_vector(alpha_txt_to_img_data),
-        "alpha_t2i_stats_after_gate": summarize_vector(alpha_txt_to_img_data),
-        "alpha_i2t_stats_before_gate": summarize_vector(alpha_img_to_txt_data),
-        "alpha_i2t_stats_after_gate": summarize_vector(alpha_img_to_txt_data),
+        "image_q_stats": image_q_diag["edge_confidence_stats"],
+        "text_q_stats": text_q_diag["edge_confidence_stats"],
+        "image_q_components": {
+            "relation_redundancy": image_local_diag["relation_redundancy_stats"],
+            "separability_degradation": image_local_diag["separability_degradation_stats"],
+            "local_collapse_score": image_local_diag["local_collapse_score_stats"],
+            "edge_confidence": image_q_diag["edge_confidence_stats"],
+        },
+        "text_q_components": {
+            "relation_redundancy": text_local_diag["relation_redundancy_stats"],
+            "separability_degradation": text_local_diag["separability_degradation_stats"],
+            "local_collapse_score": text_local_diag["local_collapse_score_stats"],
+            "edge_confidence": text_q_diag["edge_confidence_stats"],
+        },
+        "image_local_discriminative_diagnostics": image_local_diag,
+        "text_local_discriminative_diagnostics": text_local_diag,
+        "alpha_t2i_stats_before_gate": summarize_vector(weak_img_alignment_weight),
+        "alpha_t2i_stats_after_gate": summarize_vector(weak_img_alignment_weight),
+        "alpha_i2t_stats_before_gate": summarize_vector(weak_txt_alignment_weight),
+        "alpha_i2t_stats_after_gate": summarize_vector(weak_txt_alignment_weight),
+        "weak_side_alignment_weight_t2i_stats": summarize_vector(weak_img_alignment_weight),
+        "weak_side_alignment_weight_i2t_stats": summarize_vector(weak_txt_alignment_weight),
         "gate_activation_ratio_t2i": 1.0,
         "gate_activation_ratio_i2t": 1.0,
-        "edge_collapse_note": "collapse-score bidirectional correction uses transition-edge and neighborhood support without gates or thresholds",
+        "edge_collapse_note": "Collapse is modeled as local loss of discriminability: relation redundancy plus separability degradation, converted into edge confidence and used for asymmetric guided cross-modal alignment. The stronger side stays unchanged while the weaker side interpolates toward the stronger topology expression.",
         "requested_local_node_confidence_mode": "none",
         "effective_local_node_confidence_mode": "none",
         "image_local_confidence_diagnostics": {
@@ -894,6 +921,11 @@ def build_bidirectional_correction_weights(
     collapse_score_weight_a2b=1.0,
     collapse_score_weight_b2a=1.0,
     collapse_score_weight_nbr2nbr=1.0,
+    image_graph=None,
+    text_graph=None,
+    local_relation_alpha=0.5,
+    edge_confidence_tau=4.0,
+    asymmetric_correction_lambda=1.0,
     enable_directional_correction_gate=True,
     correction_gate_tau_high=0.6,
     correction_gate_tau_low=0.3,
@@ -925,9 +957,11 @@ def build_bidirectional_correction_weights(
             correction_gate_tau_gap=correction_gate_tau_gap,
         )
     if correction_score_mode == "collapse_score":
+        if image_graph is None or text_graph is None:
+            raise ValueError("collapse_score correction requires original modality graphs for local discriminative degradation.")
         return build_collapse_score_bidirectional_correction_weights(
-            image_transition,
-            text_transition,
+            image_graph,
+            text_graph,
             eps=eps,
             collapse_score_mode=collapse_score_mode,
             collapse_neighbor_topk=collapse_neighbor_topk,
@@ -935,6 +969,9 @@ def build_bidirectional_correction_weights(
             collapse_score_weight_a2b=collapse_score_weight_a2b,
             collapse_score_weight_b2a=collapse_score_weight_b2a,
             collapse_score_weight_nbr2nbr=collapse_score_weight_nbr2nbr,
+            local_relation_alpha=local_relation_alpha,
+            edge_confidence_tau=edge_confidence_tau,
+            asymmetric_correction_lambda=asymmetric_correction_lambda,
         )
     raise ValueError(f"Unsupported correction score mode: {correction_score_mode}")
 
@@ -989,6 +1026,53 @@ def apply_bidirectional_correction(image_graph, text_graph, alpha_txt_to_img, al
         corrected_image_symmetric,
         corrected_text_directed,
         corrected_text_symmetric,
+    )
+
+
+def apply_guided_edge_alignment(image_graph, text_graph, alpha_txt_to_img, alpha_img_to_txt):
+    image_graph = image_graph.tocsr().astype(np.float32)
+    text_graph = text_graph.tocsr().astype(np.float32)
+    union_keys, rows, cols = build_union_keys(image_graph, text_graph)
+    image_data = gather_sparse_data_on_keys(image_graph, union_keys)
+    text_data = gather_sparse_data_on_keys(text_graph, union_keys)
+    weak_img_alignment_weight = gather_sparse_data_on_keys(alpha_txt_to_img, union_keys)
+    weak_txt_alignment_weight = gather_sparse_data_on_keys(alpha_img_to_txt, union_keys)
+
+    corrected_image_data = (
+        (1.0 - weak_img_alignment_weight) * image_data + weak_img_alignment_weight * text_data
+    ).astype(np.float32)
+    corrected_text_data = (
+        (1.0 - weak_txt_alignment_weight) * text_data + weak_txt_alignment_weight * image_data
+    ).astype(np.float32)
+    corrected_image_data = np.clip(corrected_image_data, 0.0, None).astype(np.float32)
+    corrected_text_data = np.clip(corrected_text_data, 0.0, None).astype(np.float32)
+
+    corrected_image_directed = sparse.csr_matrix((corrected_image_data, (rows, cols)), shape=image_graph.shape, dtype=np.float32)
+    corrected_text_directed = sparse.csr_matrix((corrected_text_data, (rows, cols)), shape=text_graph.shape, dtype=np.float32)
+    corrected_image_directed.eliminate_zeros()
+    corrected_text_directed.eliminate_zeros()
+
+    corrected_image_symmetric = fuzzy_union_symmetrize(corrected_image_directed)
+    corrected_text_symmetric = fuzzy_union_symmetrize(corrected_text_directed)
+    corrected_image_symmetric.eliminate_zeros()
+    corrected_text_symmetric.eliminate_zeros()
+    return (
+        corrected_image_directed,
+        corrected_image_symmetric,
+        corrected_text_directed,
+        corrected_text_symmetric,
+    )
+
+
+def apply_asymmetric_cross_modal_correction(image_graph, text_graph, alpha_txt_to_img, alpha_img_to_txt):
+    # Backward-compatible wrapper. The actual stage-two behavior is now
+    # single-sided guided alignment: the more reliable modality stays fixed,
+    # and the weaker side interpolates toward the stronger side.
+    return apply_guided_edge_alignment(
+        image_graph,
+        text_graph,
+        alpha_txt_to_img,
+        alpha_img_to_txt,
     )
 
 
@@ -1078,19 +1162,46 @@ def compute_response_stats(response):
     return flat_summary
 
 
-def compute_response_collapse_metrics(response, eps=1e-8):
+def compute_scale_energy_entropy_metrics(response, eps=1e-8):
     response = np.asarray(response, dtype=np.float32)
-    if response.ndim != 2 or response.shape[1] <= 1:
-        return {"spectral_entropy": 0.0, "collapse_score": 1.0}
-    gram = response.T @ response
-    eigenvalues = np.linalg.eigvalsh(gram.astype(np.float64))
-    eigenvalues = np.maximum(eigenvalues.astype(np.float32), float(eps))
-    weights = eigenvalues / max(float(np.sum(eigenvalues)), float(eps))
-    entropy = float(-(weights * np.log(weights + float(eps))).sum() / max(np.log(float(len(weights)) + float(eps)), float(eps)))
-    entropy = float(np.clip(entropy, 0.0, 1.0))
+    num_nodes = int(response.shape[0]) if response.ndim >= 1 else 0
+    if response.ndim != 2 or num_nodes <= 1:
+        return {
+            "num_nodes": int(max(num_nodes, 0)),
+            "total_scale_energy": 0.0,
+            "mean_scale_energy": 0.0,
+            "max_scale_energy": 0.0,
+            "normalized_scale_entropy": 0.0,
+            "scale_collapse_score": 1.0,
+        }
+    scale_energy = np.sum(response * response, axis=1, dtype=np.float32)
+    total_scale_energy = float(np.sum(scale_energy, dtype=np.float32))
+    if total_scale_energy <= float(eps):
+        return {
+            "num_nodes": int(num_nodes),
+            "total_scale_energy": 0.0,
+            "mean_scale_energy": 0.0,
+            "max_scale_energy": 0.0,
+            "normalized_scale_entropy": 0.0,
+            "scale_collapse_score": 1.0,
+        }
+    scale_energy_prob = scale_energy / max(total_scale_energy, float(eps))
+    entropy_denom = float(np.log(float(num_nodes)))
+    if entropy_denom <= float(eps):
+        normalized_entropy = 0.0
+    else:
+        normalized_entropy = float(
+            -np.sum(scale_energy_prob * np.log(scale_energy_prob + float(eps)), dtype=np.float64) / entropy_denom
+        )
+    normalized_entropy = float(np.clip(normalized_entropy, 0.0, 1.0))
+    scale_collapse_score = float(np.clip(1.0 - normalized_entropy, 0.0, 1.0))
     return {
-        "spectral_entropy": float(entropy),
-        "collapse_score": float(1.0 - entropy),
+        "num_nodes": int(num_nodes),
+        "total_scale_energy": float(total_scale_energy),
+        "mean_scale_energy": float(np.mean(scale_energy, dtype=np.float32)),
+        "max_scale_energy": float(np.max(scale_energy)),
+        "normalized_scale_entropy": normalized_entropy,
+        "scale_collapse_score": scale_collapse_score,
     }
 
 
@@ -1136,6 +1247,7 @@ def resolve_latent_wavelet_scale_weights(
     weights_b=None,
     modal_graph_collapse_a=None,
     modal_graph_collapse_b=None,
+    entropy_temperature=1.0,
     eps=1e-8,
 ):
     scales = parse_wavelet_scales(scales)
@@ -1143,7 +1255,7 @@ def resolve_latent_wavelet_scale_weights(
     parsed_a = parse_scale_weight_values(scales, weights_a)
     parsed_b = parse_scale_weight_values(scales, weights_b)
     resolved = {}
-    collapse_stats = {}
+    scale_entropy_stats = {}
 
     if weight_mode == "fixed_per_scale":
         for idx, scale in enumerate(scales):
@@ -1161,40 +1273,35 @@ def resolve_latent_wavelet_scale_weights(
                 beta = parsed_b[idx]
             denom = max(abs(alpha) + abs(beta), float(eps))
             resolved[int(scale)] = {"alpha": float(alpha / denom), "beta": float(beta / denom)}
-        return resolved, collapse_stats
+        return resolved, scale_entropy_stats
 
     if weight_mode == "collapse_aware":
-        if modal_graph_collapse_a is not None and modal_graph_collapse_b is not None:
-            health_a = max(1.0 - float(modal_graph_collapse_a["collapse_score"]), float(eps))
-            health_b = max(1.0 - float(modal_graph_collapse_b["collapse_score"]), float(eps))
-            denom = health_a + health_b
-            alpha = float(health_a / denom)
-            beta = float(health_b / denom)
-            graph_collapse_stats = {
-                "A": dict(modal_graph_collapse_a),
-                "B": dict(modal_graph_collapse_b),
-                "omega_A": alpha,
-                "omega_B": beta,
-                "source": "corrected_graph",
-            }
-            for scale in scales:
-                resolved[int(scale)] = {"alpha": alpha, "beta": beta}
-                collapse_stats[str(scale)] = {
-                    "A": dict(modal_graph_collapse_a),
-                    "B": dict(modal_graph_collapse_b),
-                    "source": "corrected_graph",
-                }
-            collapse_stats["_graph"] = graph_collapse_stats
-            return resolved, collapse_stats
+        # Stage-three adaptive fusion no longer uses a single corrected-graph collapse
+        # prior shared by all scales. Each scale derives its own fusion weights from
+        # scale energy entropy computed on that scale's modal response.
+        eta = max(float(entropy_temperature), float(eps))
         for scale in scales:
-            metrics_a = compute_response_collapse_metrics(responses_a[int(scale)], eps=eps)
-            metrics_b = compute_response_collapse_metrics(responses_b[int(scale)], eps=eps)
-            health_a = max(1.0 - float(metrics_a["collapse_score"]), float(eps))
-            health_b = max(1.0 - float(metrics_b["collapse_score"]), float(eps))
-            denom = health_a + health_b
-            resolved[int(scale)] = {"alpha": float(health_a / denom), "beta": float(health_b / denom)}
-            collapse_stats[str(scale)] = {"A": metrics_a, "B": metrics_b}
-        return resolved, collapse_stats
+            metrics_a = compute_scale_energy_entropy_metrics(responses_a[int(scale)], eps=eps)
+            metrics_b = compute_scale_energy_entropy_metrics(responses_b[int(scale)], eps=eps)
+            logits = np.asarray(
+                [
+                    -eta * float(metrics_a["scale_collapse_score"]),
+                    -eta * float(metrics_b["scale_collapse_score"]),
+                ],
+                dtype=np.float64,
+            )
+            logits = logits - np.max(logits)
+            weights = np.exp(logits)
+            weights = weights / max(float(np.sum(weights)), float(eps))
+            resolved[int(scale)] = {"alpha": float(weights[0]), "beta": float(weights[1])}
+            scale_entropy_stats[str(scale)] = {
+                "A": metrics_a,
+                "B": metrics_b,
+                "omega_A": float(weights[0]),
+                "omega_B": float(weights[1]),
+                "eta": float(eta),
+            }
+        return resolved, scale_entropy_stats
 
     raise ValueError(f"Unsupported wavelet_fusion_weight_mode: {weight_mode}")
 
@@ -1250,6 +1357,7 @@ def build_wavelet_latent_fusion(
     wavelet_fusion_probe_mode="random",
     wavelet_fusion_probe_dim=32,
     wavelet_fusion_weight_mode="fixed_per_scale",
+    wavelet_fusion_entropy_temperature=1.0,
     wavelet_fusion_weight_a_scales=None,
     wavelet_fusion_weight_b_scales=None,
     modal_graph_collapse_a=None,
@@ -1272,7 +1380,7 @@ def build_wavelet_latent_fusion(
     impl = str(wavelet_fusion_impl or "diffusion_difference")
     response_a = compute_modal_multiscale_responses(image_graph, probes, scales, impl=impl, eps=eps)
     response_b = compute_modal_multiscale_responses(text_graph, probes, scales, impl=impl, eps=eps)
-    resolved_scale_weights, collapse_stats = resolve_latent_wavelet_scale_weights(
+    resolved_scale_weights, scale_entropy_stats = resolve_latent_wavelet_scale_weights(
         scales,
         response_a,
         response_b,
@@ -1281,6 +1389,7 @@ def build_wavelet_latent_fusion(
         weights_b=wavelet_fusion_weight_b_scales,
         modal_graph_collapse_a=modal_graph_collapse_a,
         modal_graph_collapse_b=modal_graph_collapse_b,
+        entropy_temperature=wavelet_fusion_entropy_temperature,
         eps=eps,
     )
 
@@ -1298,8 +1407,8 @@ def build_wavelet_latent_fusion(
             "omega_A": alpha,
             "omega_B": beta,
         }
-        if str(scale) in collapse_stats:
-            scale_diag["collapse"] = collapse_stats[str(scale)]
+        if str(scale) in scale_entropy_stats:
+            scale_diag["scale_energy_entropy"] = scale_entropy_stats[str(scale)]
         per_scale_stats[str(scale)] = scale_diag
 
     union_keys, rows, cols = build_union_keys(image_graph, text_graph)
@@ -1371,6 +1480,7 @@ def build_wavelet_latent_fusion(
         "wavelet_fusion_probe_mode": str(wavelet_fusion_probe_mode),
         "wavelet_fusion_probe_dim": int(probe_dim),
         "wavelet_fusion_weight_mode": str(wavelet_fusion_weight_mode),
+        "wavelet_fusion_entropy_temperature": float(wavelet_fusion_entropy_temperature),
         "wavelet_scale_weights": {
             str(scale): {
                 "omega_A": float(resolved_scale_weights[int(scale)]["alpha"]),
@@ -1397,12 +1507,10 @@ def build_wavelet_latent_fusion(
         "post_sparsify_reconstructed_nnz": int(final_graph.nnz),
         "final_graph_stats": final_graph_stats,
         "per_scale_stats": per_scale_stats,
-        "latent_graph_note": "Approximate latent graph fitting: fuse modal multiscale responses first, then infer B* on the union candidate edge set by response-similarity graph learning.",
+        "latent_graph_note": "Approximate latent graph fitting: compute per-scale fusion weights from scale energy entropy, construct target scale responses, then infer B* on the union candidate edge set by response-similarity graph learning.",
     }
-    if collapse_stats:
-        diagnostics["collapse_aware_scale_stats"] = collapse_stats
-    if collapse_stats.get("_graph") is not None:
-        diagnostics["collapse_aware_graph_stats"] = collapse_stats["_graph"]
+    if scale_entropy_stats:
+        diagnostics["scale_energy_entropy_stats"] = scale_entropy_stats
     return final_graph, diagnostics
 
 
@@ -1504,6 +1612,7 @@ def unify_topology(
     wavelet_fusion_probe_mode="random",
     wavelet_fusion_probe_dim=32,
     wavelet_fusion_weight_mode="fixed_per_scale",
+    wavelet_fusion_entropy_temperature=1.0,
     wavelet_fusion_weight_a_scales=None,
     wavelet_fusion_weight_b_scales=None,
     modal_graph_collapse_a=None,
@@ -1540,6 +1649,7 @@ def unify_topology(
             wavelet_fusion_probe_mode=wavelet_fusion_probe_mode,
             wavelet_fusion_probe_dim=wavelet_fusion_probe_dim,
             wavelet_fusion_weight_mode=wavelet_fusion_weight_mode,
+            wavelet_fusion_entropy_temperature=wavelet_fusion_entropy_temperature,
             wavelet_fusion_weight_a_scales=wavelet_fusion_weight_a_scales,
             wavelet_fusion_weight_b_scales=wavelet_fusion_weight_b_scales,
             modal_graph_collapse_a=modal_graph_collapse_a,
@@ -1687,6 +1797,9 @@ def build_summary(
         "collapse_score_weight_a2b": float(getattr(args, "collapse_score_weight_a2b", 1.0)),
         "collapse_score_weight_b2a": float(getattr(args, "collapse_score_weight_b2a", 1.0)),
         "collapse_score_weight_nbr2nbr": float(getattr(args, "collapse_score_weight_nbr2nbr", 1.0)),
+        "local_relation_alpha": float(getattr(args, "local_relation_alpha", 0.5)),
+        "edge_confidence_tau": float(getattr(args, "edge_confidence_tau", 4.0)),
+        "asymmetric_correction_lambda": float(getattr(args, "asymmetric_correction_lambda", 1.0)),
         "tau_g": float(getattr(args, "tau_g", 0.5)),
         "correction_eps": float(getattr(args, "correction_eps", 1e-8)),
         "enable_local_node_confidence": bool(getattr(args, "enable_local_node_confidence", False)),
@@ -1717,6 +1830,7 @@ def build_summary(
         "wavelet_fusion_probe_mode": str(getattr(args, "wavelet_fusion_probe_mode", "random")),
         "wavelet_fusion_probe_dim": int(getattr(args, "wavelet_fusion_probe_dim", 32)),
         "wavelet_fusion_weight_mode": str(getattr(args, "wavelet_fusion_weight_mode", "fixed_per_scale")),
+        "wavelet_fusion_entropy_temperature": float(getattr(args, "wavelet_fusion_entropy_temperature", 1.0)),
         "wavelet_fusion_weight_a_scales": getattr(args, "wavelet_fusion_weight_a_scales", None),
         "wavelet_fusion_weight_b_scales": getattr(args, "wavelet_fusion_weight_b_scales", None),
         "wavelet_latent_lambda_sparse": float(getattr(args, "wavelet_latent_lambda_sparse", 0.01)),
@@ -1902,6 +2016,11 @@ def run_cross_modal_topology(args):
             collapse_score_weight_a2b=getattr(args, "collapse_score_weight_a2b", 1.0),
             collapse_score_weight_b2a=getattr(args, "collapse_score_weight_b2a", 1.0),
             collapse_score_weight_nbr2nbr=getattr(args, "collapse_score_weight_nbr2nbr", 1.0),
+            image_graph=image_bundle["graph"],
+            text_graph=text_bundle["graph"],
+            local_relation_alpha=getattr(args, "local_relation_alpha", 0.5),
+            edge_confidence_tau=getattr(args, "edge_confidence_tau", 4.0),
+            asymmetric_correction_lambda=getattr(args, "asymmetric_correction_lambda", 1.0),
             enable_directional_correction_gate=bool(getattr(args, "enable_directional_correction_gate", True)),
             correction_gate_tau_high=getattr(args, "correction_gate_tau_high", 0.6),
             correction_gate_tau_low=getattr(args, "correction_gate_tau_low", 0.3),
@@ -1960,36 +2079,42 @@ def run_cross_modal_topology(args):
         else:
             collapse_weights = correction_diagnostics.get("collapse_score_weights", {})
             log_cross_modal(
-                "collapse-score config: "
-                f"mode={correction_diagnostics.get('collapse_score_mode', 'edge_plus_neighborhood')}, "
+                "local discriminative degradation config: "
+                f"mode={correction_diagnostics.get('collapse_score_mode', 'local_discriminative_degradation')}, "
                 f"topk={correction_diagnostics.get('collapse_neighbor_topk', 10)}, "
-                f"weights=edge:{collapse_weights.get('edge', 1.0):.4f}, "
-                f"a2b:{collapse_weights.get('a2b', 1.0):.4f}, "
-                f"b2a:{collapse_weights.get('b2a', 1.0):.4f}, "
-                f"nbr2nbr:{collapse_weights.get('nbr2nbr', 1.0):.4f}"
+                f"relation_alpha={collapse_weights.get('relation_alpha', 0.5):.4f}, "
+                f"tau={collapse_weights.get('edge_confidence_tau', 4.0):.4f}, "
+                f"lambda={collapse_weights.get('asymmetric_correction_lambda', 1.0):.4f}"
             )
             log_cross_modal(
-                "q stats: "
+                "edge confidence stats: "
                 f"Q^I(mean={correction_diagnostics.get('image_q_stats', {}).get('mean', 0.0):.4f}, "
                 f"std={correction_diagnostics.get('image_q_stats', {}).get('std', 0.0):.4f}) "
                 f"Q^T(mean={correction_diagnostics.get('text_q_stats', {}).get('mean', 0.0):.4f}, "
                 f"std={correction_diagnostics.get('text_q_stats', {}).get('std', 0.0):.4f})"
             )
+            log_cross_modal(
+                "weak-side alignment weights: "
+                f"T->I(mean={correction_diagnostics.get('weak_side_alignment_weight_t2i_stats', {}).get('mean', 0.0):.4f}, "
+                f"std={correction_diagnostics.get('weak_side_alignment_weight_t2i_stats', {}).get('std', 0.0):.4f}) "
+                f"I->T(mean={correction_diagnostics.get('weak_side_alignment_weight_i2t_stats', {}).get('mean', 0.0):.4f}, "
+                f"std={correction_diagnostics.get('weak_side_alignment_weight_i2t_stats', {}).get('std', 0.0):.4f})"
+            )
             image_q_components = correction_diagnostics.get("image_q_components", {})
             text_q_components = correction_diagnostics.get("text_q_components", {})
             log_cross_modal(
-                "image q components: "
-                f"edge(mean={image_q_components.get('edge', {}).get('normalized_stats', {}).get('mean', 0.0):.4f}) "
-                f"a2b(mean={image_q_components.get('a2b', {}).get('normalized_stats', {}).get('mean', 0.0):.4f}) "
-                f"b2a(mean={image_q_components.get('b2a', {}).get('normalized_stats', {}).get('mean', 0.0):.4f}) "
-                f"nbr2nbr(mean={image_q_components.get('nbr2nbr', {}).get('normalized_stats', {}).get('mean', 0.0):.4f})"
+                "image local degradation components: "
+                f"relation_redundancy(mean={image_q_components.get('relation_redundancy', {}).get('mean', 0.0):.4f}) "
+                f"separability_degradation(mean={image_q_components.get('separability_degradation', {}).get('mean', 0.0):.4f}) "
+                f"local_collapse(mean={image_q_components.get('local_collapse_score', {}).get('mean', 0.0):.4f}) "
+                f"edge_confidence(mean={image_q_components.get('edge_confidence', {}).get('mean', 0.0):.4f})"
             )
             log_cross_modal(
-                "text q components: "
-                f"edge(mean={text_q_components.get('edge', {}).get('normalized_stats', {}).get('mean', 0.0):.4f}) "
-                f"a2b(mean={text_q_components.get('a2b', {}).get('normalized_stats', {}).get('mean', 0.0):.4f}) "
-                f"b2a(mean={text_q_components.get('b2a', {}).get('normalized_stats', {}).get('mean', 0.0):.4f}) "
-                f"nbr2nbr(mean={text_q_components.get('nbr2nbr', {}).get('normalized_stats', {}).get('mean', 0.0):.4f})"
+                "text local degradation components: "
+                f"relation_redundancy(mean={text_q_components.get('relation_redundancy', {}).get('mean', 0.0):.4f}) "
+                f"separability_degradation(mean={text_q_components.get('separability_degradation', {}).get('mean', 0.0):.4f}) "
+                f"local_collapse(mean={text_q_components.get('local_collapse_score', {}).get('mean', 0.0):.4f}) "
+                f"edge_confidence(mean={text_q_components.get('edge_confidence', {}).get('mean', 0.0):.4f})"
             )
         if effective_correction_fusion_mode == "legacy":
             log_cross_modal("legacy correction_fusion_mode detected: bypassing thresholded alpha gate during correction and reusing original confidence-aware fusion")
@@ -2017,17 +2142,30 @@ def run_cross_modal_topology(args):
                     )
                 )
             )
-        (
-            corrected_image_directed,
-            corrected_image_symmetric,
-            corrected_text_directed,
-            corrected_text_symmetric,
-        ) = apply_bidirectional_correction(
-            image_bundle["graph"],
-            text_bundle["graph"],
-            alpha_txt_to_img_used,
-            alpha_img_to_txt_used,
-        )
+        if correction_score_mode == "confidence":
+            (
+                corrected_image_directed,
+                corrected_image_symmetric,
+                corrected_text_directed,
+                corrected_text_symmetric,
+            ) = apply_bidirectional_correction(
+                image_bundle["graph"],
+                text_bundle["graph"],
+                alpha_txt_to_img_used,
+                alpha_img_to_txt_used,
+            )
+        else:
+            (
+                corrected_image_directed,
+                corrected_image_symmetric,
+                corrected_text_directed,
+                corrected_text_symmetric,
+            ) = apply_guided_edge_alignment(
+                image_bundle["graph"],
+                text_bundle["graph"],
+                alpha_txt_to_img_used,
+                alpha_img_to_txt_used,
+            )
     else:
         raise ValueError(f"Unsupported correction mode: {correction_mode}")
 
@@ -2074,6 +2212,7 @@ def run_cross_modal_topology(args):
         wavelet_fusion_weight_b_scales=getattr(args, "wavelet_fusion_weight_b_scales", None),
         modal_graph_collapse_a=corrected_image_collapse_metrics,
         modal_graph_collapse_b=corrected_text_collapse_metrics,
+        wavelet_fusion_entropy_temperature=getattr(args, "wavelet_fusion_entropy_temperature", 1.0),
         wavelet_latent_lambda_sparse=getattr(args, "wavelet_latent_lambda_sparse", 0.01),
         wavelet_latent_lambda_sym=getattr(args, "wavelet_latent_lambda_sym", 1.0),
         wavelet_latent_lambda_nonneg=getattr(args, "wavelet_latent_lambda_nonneg", 1.0),
@@ -2109,22 +2248,13 @@ def run_cross_modal_topology(args):
                     f"W_target(mean={scale_diag.get('target', {}).get('mean', 0.0):.4f}, row_norm={scale_diag.get('target', {}).get('mean_row_norm', 0.0):.4f}), "
                     f"W_star(mean={scale_diag.get('star', {}).get('mean', 0.0):.4f}, row_norm={scale_diag.get('star', {}).get('mean_row_norm', 0.0):.4f})"
                 )
-            if "collapse_aware_graph_stats" in fusion_diagnostics:
-                graph_diag = fusion_diagnostics.get("collapse_aware_graph_stats", {})
-                log_cross_modal(
-                    "wavelet_latent corrected-graph collapse-aware weights: "
-                    f"omega_A={graph_diag.get('omega_A', 0.0):.4f}, omega_B={graph_diag.get('omega_B', 0.0):.4f}, "
-                    f"A(collapse={graph_diag.get('A', {}).get('collapse_score', 0.0):.4f}, entropy={graph_diag.get('A', {}).get('spectral_entropy', 0.0):.4f}), "
-                    f"B(collapse={graph_diag.get('B', {}).get('collapse_score', 0.0):.4f}, entropy={graph_diag.get('B', {}).get('spectral_entropy', 0.0):.4f})"
-                )
-            elif "collapse_aware_scale_stats" in fusion_diagnostics:
-                for scale_key, scale_diag in fusion_diagnostics.get("collapse_aware_scale_stats", {}).items():
-                    if str(scale_key).startswith("_"):
-                        continue
+            if "scale_energy_entropy_stats" in fusion_diagnostics:
+                for scale_key, scale_diag in fusion_diagnostics.get("scale_energy_entropy_stats", {}).items():
                     log_cross_modal(
-                        f"wavelet_latent collapse-aware scale={scale_key}: "
-                        f"A(collapse={scale_diag.get('A', {}).get('collapse_score', 0.0):.4f}, entropy={scale_diag.get('A', {}).get('spectral_entropy', 0.0):.4f}), "
-                        f"B(collapse={scale_diag.get('B', {}).get('collapse_score', 0.0):.4f}, entropy={scale_diag.get('B', {}).get('spectral_entropy', 0.0):.4f})"
+                        f"wavelet_latent scale-energy-entropy scale={scale_key}: "
+                        f"A(collapse={scale_diag.get('A', {}).get('scale_collapse_score', 0.0):.4f}, entropy={scale_diag.get('A', {}).get('normalized_scale_entropy', 0.0):.4f}, total_energy={scale_diag.get('A', {}).get('total_scale_energy', 0.0):.4f}), "
+                        f"B(collapse={scale_diag.get('B', {}).get('scale_collapse_score', 0.0):.4f}, entropy={scale_diag.get('B', {}).get('normalized_scale_entropy', 0.0):.4f}, total_energy={scale_diag.get('B', {}).get('total_scale_energy', 0.0):.4f}), "
+                        f"eta={scale_diag.get('eta', 0.0):.4f}"
                     )
             log_cross_modal(
                 "wavelet_latent graph stats: "
