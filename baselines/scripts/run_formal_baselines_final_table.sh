@@ -17,7 +17,13 @@ BASELINE_SEEDS="${BASELINE_SEEDS:-0}"
 BASELINE_METHODS="${BASELINE_METHODS:-entropy el2n grand gradmatch glister ccs-rand ccs-herd ccs-kcenter ccs-forget dq dfool nms adap_sne}"
 BASELINE_EPOCHS="${BASELINE_EPOCHS:-20}"
 
-# 绝对预算 + 比例预算
+# Recommended eval-time memory-safe defaults for nfnet.
+BASELINE_BATCH_TRAIN="${BASELINE_BATCH_TRAIN:-16}"
+BASELINE_BATCH_TEST="${BASELINE_BATCH_TEST:-32}"
+BASELINE_TEXT_BATCH="${BASELINE_TEXT_BATCH:-256}"
+BASELINE_NUM_WORKERS="${BASELINE_NUM_WORKERS:-2}"
+
+# Absolute budgets + ratio budgets.
 ABS_BUDGETS="${ABS_BUDGETS:-100 200 500}"
 RATIOS="${RATIOS:-0.01 0.02 0.03}"
 
@@ -27,6 +33,7 @@ export MKL_NUM_THREADS="${MKL_NUM_THREADS:-8}"
 export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-8}"
 export VECLIB_MAXIMUM_THREADS="${VECLIB_MAXIMUM_THREADS:-8}"
 export BLIS_NUM_THREADS="${BLIS_NUM_THREADS:-8}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:128}"
 export LORS_CHECKPOINT_ROOT="${LORS_CHECKPOINT_ROOT:-${PROJECT_ROOT}/distill_utils/checkpoints}"
 
 echo "[formal] project_root=${PROJECT_ROOT}"
@@ -36,71 +43,144 @@ echo "[formal] methods=${BASELINE_METHODS}"
 echo "[formal] abs_budgets=${ABS_BUDGETS}"
 echo "[formal] ratios=${RATIOS}"
 echo "[formal] seeds=${BASELINE_SEEDS}"
+echo "[formal] batch_train=${BASELINE_BATCH_TRAIN} batch_test=${BASELINE_BATCH_TEST} text_batch=${BASELINE_TEXT_BATCH}"
 echo "[formal] checkpoints=${LORS_CHECKPOINT_ROOT}"
 
-# 1) 先跑绝对预算（完整闭环）
-python -m baselines.runners.run_main_aligned_baselines \
-  --config "${BASELINE_CONFIG}" \
-  --methods ${BASELINE_METHODS} \
-  --budgets ${ABS_BUDGETS} \
-  --seeds ${BASELINE_SEEDS} \
-  --device "${BASELINE_DEVICE}" \
-  --output_root "${BASELINE_OUTPUT_ROOT}" \
-  --run_full_pipeline
+run_abs_job() {
+  local method="$1"
+  local budget="$2"
+  local seed="$3"
 
-# 2) 再跑比例预算（完整闭环）
-model_tag="${BASELINE_IMAGE_ENCODER}_${BASELINE_TEXT_ENCODER}"
-for ratio in ${RATIOS}; do
-  ratio_tag=$(python - <<PY
-ratio = float("${ratio}")
-print(f"ratio_{int(round(ratio*100)):02d}")
+  local run_dir="${BASELINE_OUTPUT_ROOT}/${BASELINE_DATASET}/${BASELINE_IMAGE_ENCODER}_${BASELINE_TEXT_ENCODER}/${method}/budget_$(printf "%04d" "${budget}")/seed_${seed}"
+  local selected_path="${run_dir}/selected_indices.json"
+  local metrics_path="${run_dir}/downstream_metrics.json"
+
+  if [[ -f "${metrics_path}" ]]; then
+    echo "[skip][abs] done method=${method} budget=${budget} seed=${seed}"
+    return 0
+  fi
+
+  if [[ ! -f "${selected_path}" ]]; then
+    echo "[run][abs][selection] method=${method} budget=${budget} seed=${seed}"
+    python -m baselines.runners.run_baseline_selection \
+      --method "${method}" \
+      --budget "${budget}" \
+      --dataset_name "${BASELINE_DATASET}" \
+      --split train \
+      --image_encoder "${BASELINE_IMAGE_ENCODER}" \
+      --text_encoder "${BASELINE_TEXT_ENCODER}" \
+      --feature_source "${BASELINE_FEATURE_SOURCE}" \
+      --output_dir "${BASELINE_OUTPUT_ROOT}" \
+      --config "${BASELINE_CONFIG}" \
+      --output_layout budget \
+      --seed "${seed}" \
+      --device "${BASELINE_DEVICE}"
+  else
+    echo "[skip][abs][selection] exists method=${method} budget=${budget} seed=${seed}"
+  fi
+
+  echo "[run][abs][eval] method=${method} budget=${budget} seed=${seed}"
+  python -m baselines.runners.evaluate_baseline_subsets \
+    --baseline_result_dir "${run_dir}" \
+    --dataset_name "${BASELINE_DATASET}" \
+    --image_encoder "${BASELINE_IMAGE_ENCODER}" \
+    --text_encoder "${BASELINE_TEXT_ENCODER}" \
+    --feature_source "${BASELINE_FEATURE_SOURCE}" \
+    --image_root "${BASELINE_IMAGE_ROOT}" \
+    --ann_root "${BASELINE_ANN_ROOT}" \
+    --device "${BASELINE_DEVICE}" \
+    --epochs "${BASELINE_EPOCHS}" \
+    --batch_size_train "${BASELINE_BATCH_TRAIN}" \
+    --batch_size_test "${BASELINE_BATCH_TEST}" \
+    --text_batch_size "${BASELINE_TEXT_BATCH}" \
+    --num_workers "${BASELINE_NUM_WORKERS}" \
+    --eval_interval 1 \
+    --no_aug
+}
+
+run_ratio_job() {
+  local method="$1"
+  local ratio="$2"
+  local seed="$3"
+
+  local ratio_tag
+  ratio_tag="$(python - <<PY
+r = float("${ratio}")
+print(f"ratio_{int(round(r*100)):02d}")
 PY
-)
-  for seed in ${BASELINE_SEEDS}; do
-    for method in ${BASELINE_METHODS}; do
-      echo "[formal][ratio] method=${method} ratio=${ratio} seed=${seed}"
-      python -m baselines.runners.run_baseline_selection \
-        --method "${method}" \
-        --ratio "${ratio}" \
-        --dataset_name "${BASELINE_DATASET}" \
-        --split train \
-        --image_encoder "${BASELINE_IMAGE_ENCODER}" \
-        --text_encoder "${BASELINE_TEXT_ENCODER}" \
-        --feature_source "${BASELINE_FEATURE_SOURCE}" \
-        --output_dir "${BASELINE_OUTPUT_ROOT}" \
-        --config "${BASELINE_CONFIG}" \
-        --output_layout ratio \
-        --candidate_pool_mode head \
-        --seed "${seed}" \
-        --device "${BASELINE_DEVICE}"
+)"
+  local model_tag="${BASELINE_IMAGE_ENCODER}_${BASELINE_TEXT_ENCODER}"
+  local run_dir="${BASELINE_OUTPUT_ROOT}/${BASELINE_DATASET}/train/${model_tag}/${ratio_tag}/${method}/seed_${seed}"
+  local selected_path="${run_dir}/selected_indices.json"
+  local metrics_path="${run_dir}/downstream_metrics.json"
 
-      run_dir="${BASELINE_OUTPUT_ROOT}/${BASELINE_DATASET}/train/${model_tag}/${ratio_tag}/${method}/seed_${seed}"
-      python -m baselines.runners.evaluate_baseline_subsets \
-        --baseline_result_dir "${run_dir}" \
-        --dataset_name "${BASELINE_DATASET}" \
-        --image_encoder "${BASELINE_IMAGE_ENCODER}" \
-        --text_encoder "${BASELINE_TEXT_ENCODER}" \
-        --feature_source "${BASELINE_FEATURE_SOURCE}" \
-        --image_root "${BASELINE_IMAGE_ROOT}" \
-        --ann_root "${BASELINE_ANN_ROOT}" \
-        --device "${BASELINE_DEVICE}" \
-        --epochs "${BASELINE_EPOCHS}" \
-        --batch_size_train 64 \
-        --batch_size_test 128 \
-        --text_batch_size 1024 \
-        --num_workers 4 \
-        --eval_interval 1 \
-        --no_aug
+  if [[ -f "${metrics_path}" ]]; then
+    echo "[skip][ratio] done method=${method} ratio=${ratio} seed=${seed}"
+    return 0
+  fi
+
+  if [[ ! -f "${selected_path}" ]]; then
+    echo "[run][ratio][selection] method=${method} ratio=${ratio} seed=${seed}"
+    python -m baselines.runners.run_baseline_selection \
+      --method "${method}" \
+      --ratio "${ratio}" \
+      --dataset_name "${BASELINE_DATASET}" \
+      --split train \
+      --image_encoder "${BASELINE_IMAGE_ENCODER}" \
+      --text_encoder "${BASELINE_TEXT_ENCODER}" \
+      --feature_source "${BASELINE_FEATURE_SOURCE}" \
+      --output_dir "${BASELINE_OUTPUT_ROOT}" \
+      --config "${BASELINE_CONFIG}" \
+      --output_layout ratio \
+      --seed "${seed}" \
+      --device "${BASELINE_DEVICE}"
+  else
+    echo "[skip][ratio][selection] exists method=${method} ratio=${ratio} seed=${seed}"
+  fi
+
+  echo "[run][ratio][eval] method=${method} ratio=${ratio} seed=${seed}"
+  python -m baselines.runners.evaluate_baseline_subsets \
+    --baseline_result_dir "${run_dir}" \
+    --dataset_name "${BASELINE_DATASET}" \
+    --image_encoder "${BASELINE_IMAGE_ENCODER}" \
+    --text_encoder "${BASELINE_TEXT_ENCODER}" \
+    --feature_source "${BASELINE_FEATURE_SOURCE}" \
+    --image_root "${BASELINE_IMAGE_ROOT}" \
+    --ann_root "${BASELINE_ANN_ROOT}" \
+    --device "${BASELINE_DEVICE}" \
+    --epochs "${BASELINE_EPOCHS}" \
+    --batch_size_train "${BASELINE_BATCH_TRAIN}" \
+    --batch_size_test "${BASELINE_BATCH_TEST}" \
+    --text_batch_size "${BASELINE_TEXT_BATCH}" \
+    --num_workers "${BASELINE_NUM_WORKERS}" \
+    --eval_interval 1 \
+    --no_aug
+}
+
+# 1) Absolute budgets
+for seed in ${BASELINE_SEEDS}; do
+  for budget in ${ABS_BUDGETS}; do
+    for method in ${BASELINE_METHODS}; do
+      run_abs_job "${method}" "${budget}" "${seed}"
     done
   done
 done
 
-# 3) 导出统一表
+# 2) Ratio budgets
+for seed in ${BASELINE_SEEDS}; do
+  for ratio in ${RATIOS}; do
+    for method in ${BASELINE_METHODS}; do
+      run_ratio_job "${method}" "${ratio}" "${seed}"
+    done
+  done
+done
+
+# 3) Export merged tables
 python -m baselines.runners.export_baseline_tables \
   --root "${BASELINE_OUTPUT_ROOT}" \
   --output_dir "${BASELINE_OUTPUT_ROOT}"
 
-# 4) 只保留你要的“一个总表”
+# 4) Keep only one final compact table
 python - <<PY
 import csv
 import os
@@ -117,11 +197,9 @@ keep_cols = [
 ]
 
 with open(src, "r", encoding="utf-8") as f:
-    reader = csv.DictReader(f)
-    rows = list(reader)
+    rows = list(csv.DictReader(f))
 
 for r in rows:
-    # 兼容不同键名
     if not r.get("dataset") and r.get("dataset_name"):
         r["dataset"] = r["dataset_name"]
 
