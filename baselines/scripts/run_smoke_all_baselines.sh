@@ -24,7 +24,7 @@ BASELINE_BATCH_TEST="${BASELINE_BATCH_TEST:-64}"
 BASELINE_TEXT_BATCH="${BASELINE_TEXT_BATCH:-256}"
 BASELINE_NUM_WORKERS="${BASELINE_NUM_WORKERS:-2}"
 
-BASELINE_METHODS="${BASELINE_METHODS:-entropy el2n grand gradmatch glister ccs-rand ccs-herd ccs-kcenter ccs-forget dq dfool nms adap_sne}"
+BASELINE_METHODS="${BASELINE_METHODS:-entropy el2n grand gradmatch glister ccs-rand ccs-herd ccs-kcenter ccs-forget dq dfool nms adap_sne presel visa dataprophet dynamic_pruning}"
 
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-8}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"

@@ -1,0 +1,7 @@
+method: dynamic_pruning
+dynamic_pruning_epochs: 6
+dynamic_pruning_batch_size: 256
+dynamic_pruning_proj_dim: 128
+dynamic_pruning_lr: 0.01
+dynamic_pruning_temperature: 0.07
+

@@ -274,6 +274,31 @@ def build_method_status_records(
 ) -> List[Dict[str, Any]]:
     mapping = parse_method_mapping_table(mapping_doc_path)
     out: List[Dict[str, Any]] = []
+    category_map = {
+        "entropy": "uncertainty-based",
+        "el2n": "training-dynamics-based",
+        "grand": "gradient-based",
+        "gradmatch": "gradient-based",
+        "glister": "bilevel/validation-based",
+        "rand": "geometry/coverage-based",
+        "ccs-rand": "geometry/coverage-based",
+        "herd": "geometry/coverage-based",
+        "ccs-herd": "geometry/coverage-based",
+        "kcenter": "geometry/coverage-based",
+        "ccs-kcenter": "geometry/coverage-based",
+        "forget": "training-dynamics-based",
+        "ccs-forget": "training-dynamics-based",
+        "dq": "geometry/coverage-based",
+        "dfool": "uncertainty-based",
+        "nms": "geometry/coverage-based",
+        "adap_sne": "geometry/coverage-based",
+        "adapsne": "geometry/coverage-based",
+        "presel": "geometry/coverage-based",
+        "visa": "geometry/coverage-based",
+        "dataprophet": "scoring-based",
+        "dynamic_pruning": "training-dynamics-based",
+        "infobatch": "training-dynamics-based",
+    }
 
     eval_connected_methods = set()
     for run in scan_baseline_runs(baselines_root):
@@ -297,7 +322,7 @@ def build_method_status_records(
                 "method": method,
                 "full_name": meta.get("full_name"),
                 "paper_or_source": meta.get("paper_or_source"),
-                "method_category": None,
+                "method_category": category_map.get(method),
                 "reproduction_status": meta.get("reproduction_status"),
                 "multimodal_adaptation": meta.get("multimodal_adaptation"),
                 "implementation_file": impl_file if os.path.exists(impl_file) else None,

@@ -37,15 +37,11 @@ python -m baselines.runners.run_baseline_selection \
 ### 3.2 Sweep multiple baselines
 ```bash
 python -m baselines.runners.benchmark_baselines \
-  --dataset_name flickr \
-  --image_encoder nfnet \
-  --text_encoder bert \
-  --feature_source artifacts/feature_cache \
-  --output_dir artifacts/baselines \
-  --methods entropy,el2n,grand,ccs-rand,ccs-herd,ccs-kcenter,ccs-forget,gradmatch,glister,dq,dfool,nms,adap_sne \
-  --ratios 0.05,0.1,0.2 \
-  --seed 0 \
-  --device cpu
+  --config baselines/configs/main_aligned_flickr_nfnet_bert.yaml \
+  --methods entropy el2n grand gradmatch glister ccs-rand ccs-herd ccs-kcenter ccs-forget dq dfool nms adap_sne presel visa dataprophet dynamic_pruning \
+  --budgets 100 200 500 \
+  --seeds 0 \
+  --device cuda:0
 ```
 
 ## 4) Output format (uniform)
@@ -64,6 +60,9 @@ Saved files:
 - `surrogate`: `dfool`
 - `assumed_version`: `dq`, `nms`, `adap_sne`
 - `project_specific_variant`: `ccs-rand`, `ccs-herd`, `ccs-kcenter`, `ccs-forget`
+- `adapted_counterexample`: `presel`, `visa`
+- `surrogate_sample_level`: `dataprophet`
+- `adapted_dynamic_baseline`: `dynamic_pruning` / `infobatch`
 
 ## 6) Ambiguity clarifications
 - `DQ` is interpreted as Dataset Quantization adaptation (not generic data quality).
@@ -71,6 +70,9 @@ Saved files:
 - `NMS` means Near-Memory Sampling on Manifolds (not non-maximum suppression); hardware-specific parts omitted.
 - `AdapSNE` is treated as an NMS successor and implemented as a practical surrogate inspired by entropy-guided adaptive manifold sampling.
 - `CCS-*` names are project-specific coverage-wrapper variants, not claimed as official canonical sub-method names from one paper.
+- `PreSel` and `ViSA` are image-first counterexample baselines in this project (not symmetric multimodal selectors).
+- `DataProphet` here is a practical sample-level surrogate (original method is dataset/source-level transfer ranking).
+- `dynamic_pruning` is an InfoBatch-style dynamic training-time pruning adaptation; static `selected_indices` export is compatibility-oriented.
 
 ## 7) Main experiment aligned baseline protocol
 
@@ -108,7 +110,7 @@ Override methods/budgets/seeds:
 ```bash
 python -m baselines.runners.run_main_aligned_baselines \
   --config baselines/configs/main_aligned_flickr_nfnet_bert.yaml \
-  --methods entropy el2n grand gradmatch glister ccs-rand ccs-herd ccs-kcenter ccs-forget dq dfool nms adap_sne \
+  --methods entropy el2n grand gradmatch glister ccs-rand ccs-herd ccs-kcenter ccs-forget dq dfool nms adap_sne presel visa dataprophet dynamic_pruning \
   --budgets 100 200 500 \
   --seeds 0
 ```

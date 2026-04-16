@@ -1,0 +1,7 @@
+method: visa
+visa_k: 32
+visa_temperature: 0.07
+visa_w_visual: 0.8
+visa_w_relevance: 0.2
+visa_n_jobs: 1
+

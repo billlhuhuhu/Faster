@@ -1,0 +1,8 @@
+method: dataprophet
+dataprophet_k: 32
+dataprophet_temperature: 0.07
+dataprophet_w_perplexity: 0.45
+dataprophet_w_relevance: 0.30
+dataprophet_w_diversity: 0.25
+dataprophet_n_jobs: 1
+

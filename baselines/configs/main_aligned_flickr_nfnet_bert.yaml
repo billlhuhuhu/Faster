@@ -18,7 +18,7 @@ cache_root: artifacts/baselines/cache
 eval_output_root: artifacts/baselines/downstream_eval
 
 budgets: [100, 200, 500]
-methods: [entropy, el2n, grand, gradmatch, glister, ccs-rand, ccs-herd, ccs-kcenter, ccs-forget, dq, dfool, nms, adap_sne]
+methods: [entropy, el2n, grand, gradmatch, glister, ccs-rand, ccs-herd, ccs-kcenter, ccs-forget, dq, dfool, nms, adap_sne, presel, visa, dataprophet, dynamic_pruning]
 default_seed: 0
 default_seeds: [0]
 default_device: cpu

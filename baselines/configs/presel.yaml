@@ -1,0 +1,7 @@
+method: presel
+presel_k: 32
+presel_temperature: 0.07
+presel_w_entropy: 0.7
+presel_w_diversity: 0.3
+presel_n_jobs: 1
+

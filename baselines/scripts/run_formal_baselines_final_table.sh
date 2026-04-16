@@ -14,7 +14,7 @@ BASELINE_TEXT_ENCODER="${BASELINE_TEXT_ENCODER:-bert}"
 BASELINE_IMAGE_ROOT="${BASELINE_IMAGE_ROOT:-data/flickr30k}"
 BASELINE_ANN_ROOT="${BASELINE_ANN_ROOT:-data/Flickr30k_ann}"
 BASELINE_SEEDS="${BASELINE_SEEDS:-0}"
-BASELINE_METHODS="${BASELINE_METHODS:-entropy el2n grand gradmatch glister ccs-rand ccs-herd ccs-kcenter ccs-forget dq dfool nms adap_sne}"
+BASELINE_METHODS="${BASELINE_METHODS:-entropy el2n grand gradmatch glister ccs-rand ccs-herd ccs-kcenter ccs-forget dq dfool nms adap_sne presel visa dataprophet dynamic_pruning}"
 BASELINE_EPOCHS="${BASELINE_EPOCHS:-20}"
 
 # Recommended eval-time memory-safe defaults for nfnet.
@@ -215,4 +215,3 @@ PY
 echo ""
 echo "[formal] done."
 echo "[formal] final table: ${BASELINE_OUTPUT_ROOT}/final_results_table.csv"
-
