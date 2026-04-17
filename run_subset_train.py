@@ -22,6 +22,13 @@ def build_parser():
     budget_group.add_argument("--subset_ratio", type=float, default=None)
     budget_group.add_argument("--subset_size", type=int, default=None)
     parser.add_argument("--subset_tag", type=str, default=None)
+    parser.add_argument("--diagnostic_experiment_id", type=int, default=None)
+    parser.add_argument("--enable_stage2_correction", dest="enable_stage2_correction", action="store_true", default=True)
+    parser.add_argument("--disable_stage2_correction", dest="enable_stage2_correction", action="store_false")
+    parser.add_argument("--enable_stage3_fusion", dest="enable_stage3_fusion", action="store_true", default=True)
+    parser.add_argument("--disable_stage3_fusion", dest="enable_stage3_fusion", action="store_false")
+    parser.add_argument("--enable_stage4_lsrc", dest="enable_stage4_lsrc", action="store_true", default=True)
+    parser.add_argument("--disable_stage4_lsrc", dest="enable_stage4_lsrc", action="store_false")
 
     parser.add_argument("--image_encoder", type=str, required=True, choices=["nfnet", "resnet50", "resnet-50", "vit_b16", "vit-b16", "vit-b/16"])
     parser.add_argument("--text_encoder", type=str, default="bert", choices=["bert"])
@@ -55,6 +62,11 @@ def build_parser():
 
 def main():
     args = build_parser().parse_args()
+    exp_label = args.diagnostic_experiment_id if args.diagnostic_experiment_id is not None else "custom"
+    print(f"[Experiment] Exp {exp_label}")
+    print(f"  Stage2 Correction: {'ON' if args.enable_stage2_correction else 'OFF'}")
+    print(f"  Stage3 Fusion: {'ON' if args.enable_stage3_fusion else 'OFF'}")
+    print(f"  Stage4 LSRC: {'ON' if args.enable_stage4_lsrc else 'OFF'}")
     outputs = train_and_evaluate_subset(args)
     print("Subset training finished:")
     print(f"  output_dir: {outputs['output_dir']}")

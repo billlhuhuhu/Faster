@@ -1348,6 +1348,21 @@ def build_graph_domain_unified_graph(
     raise ValueError(f"Unsupported fusion mode: {mode}")
 
 
+def build_simple_average_unified_graph(image_graph, text_graph):
+    image_graph = image_graph.tocsr().astype(np.float32)
+    text_graph = text_graph.tocsr().astype(np.float32)
+    averaged = ((image_graph + text_graph) * 0.5).tocsr()
+    averaged = ((averaged + averaged.transpose()) * 0.5).tocsr()
+    averaged = clip_sparse_matrix_values(averaged, min_value=0.0, max_value=1.0)
+    averaged.eliminate_zeros()
+    diagnostics = {
+        "fusion_domain_mode": "graph_average_baseline",
+        "fusion_note": "Stage-three fusion disabled: using the plain dual-modality average B_fused = 0.5 * B_A + 0.5 * B_B.",
+        "final_graph_stats": summarize_sparse_matrix_values(averaged),
+    }
+    return averaged, diagnostics
+
+
 def build_wavelet_latent_fusion(
     image_graph,
     text_graph,
@@ -1790,6 +1805,10 @@ def build_summary(
         "k": int(args.k),
         "alpha": float(args.alpha),
         "correction_mode": getattr(args, "correction_mode", "bidirectional"),
+        "diagnostic_experiment_id": None if getattr(args, "diagnostic_experiment_id", None) is None else int(getattr(args, "diagnostic_experiment_id")),
+        "enable_stage2_correction": bool(getattr(args, "enable_stage2_correction", True)),
+        "enable_stage3_fusion": bool(getattr(args, "enable_stage3_fusion", True)),
+        "enable_stage4_lsrc": bool(getattr(args, "enable_stage4_lsrc", True)),
         "correction_score_mode": str(getattr(args, "correction_score_mode", "collapse_score")),
         "collapse_score_mode": str(getattr(args, "collapse_score_mode", "edge_plus_neighborhood")),
         "collapse_neighbor_topk": int(getattr(args, "collapse_neighbor_topk", 10)),
@@ -1963,9 +1982,37 @@ def run_cross_modal_topology(args):
     correction_diagnostics = {}
     fusion_diagnostics = {}
     effective_correction_fusion_mode = str(getattr(args, "correction_fusion_mode", "thresholded_autonomy"))
+    stage2_enabled = bool(getattr(args, "enable_stage2_correction", True))
+    stage3_enabled = bool(getattr(args, "enable_stage3_fusion", True))
+    stage4_enabled = bool(getattr(args, "enable_stage4_lsrc", True))
+    exp_label = getattr(args, "diagnostic_experiment_id", None)
+    log_cross_modal(
+        "[Experiment] "
+        f"Exp {exp_label if exp_label is not None else 'custom'} | "
+        f"Stage2 Correction: {'ON' if stage2_enabled else 'OFF'} | "
+        f"Stage3 Fusion: {'ON' if stage3_enabled else 'OFF'} | "
+        f"Stage4 LSRC: {'ON' if stage4_enabled else 'OFF'}"
+    )
 
     correction_mode = getattr(args, "correction_mode", "bidirectional")
-    if correction_mode == "directional":
+    if not stage2_enabled:
+        log_cross_modal("stage two disabled: bypassing asymmetric cross-modal correction and reusing stage-one modality graphs")
+        corrected_image_directed = image_bundle["graph"].tocsr().copy()
+        corrected_image_symmetric = image_bundle["graph"].tocsr().copy()
+        corrected_text_directed = text_bundle["graph"].tocsr().copy()
+        corrected_text_symmetric = text_bundle["graph"].tocsr().copy()
+        alpha_txt_to_img = sparse.csr_matrix(image_bundle["graph"].shape, dtype=np.float32)
+        alpha_img_to_txt = sparse.csr_matrix(image_bundle["graph"].shape, dtype=np.float32)
+        alpha_txt_to_img_used = alpha_txt_to_img
+        alpha_img_to_txt_used = alpha_img_to_txt
+        alpha_txt_to_img_eff = alpha_txt_to_img
+        alpha_img_to_txt_eff = alpha_img_to_txt
+        correction_diagnostics = {
+            "stage2_enabled": False,
+            "correction_mode": "disabled",
+            "correction_note": "Stage-two asymmetric correction disabled for diagnostic ablation. Corrected graphs are identical to the stage-one modality graphs.",
+        }
+    elif correction_mode == "directional":
         if effective_correction_fusion_mode != "legacy":
             log_cross_modal("directional correction does not support thresholded_autonomy fusion; falling back to legacy fusion path")
             effective_correction_fusion_mode = "legacy"
@@ -2190,36 +2237,43 @@ def run_cross_modal_topology(args):
 
     fusion_domain_mode = str(getattr(args, "fusion_domain_mode", "wavelet_latent"))
     log_cross_modal(f"building unified topology B*: fusion_domain_mode={fusion_domain_mode}, graph_fusion_mode={args.fusion_mode}")
-    unified_graph, fusion_diagnostics = unify_topology(
-        corrected_image_symmetric,
-        corrected_text_symmetric,
-        fusion_domain_mode=fusion_domain_mode,
-        mode=args.fusion_mode,
-        correction_fusion_mode=effective_correction_fusion_mode,
-        rho_img=rho_img,
-        rho_txt=rho_txt,
-        lambda_f=getattr(args, "lambda_f", 1.0),
-        mu_f=getattr(args, "mu_f", 1.0),
-        eps=getattr(args, "fusion_eps", 1e-8),
-        alpha_txt_to_img_eff=alpha_txt_to_img_eff if correction_mode == "bidirectional" else None,
-        alpha_img_to_txt_eff=alpha_img_to_txt_eff if correction_mode == "bidirectional" else None,
-        wavelet_fusion_scales=getattr(args, "wavelet_fusion_scales", "1,2,4"),
-        wavelet_fusion_impl=getattr(args, "wavelet_fusion_impl", "diffusion_difference"),
-        wavelet_fusion_probe_mode=getattr(args, "wavelet_fusion_probe_mode", "random"),
-        wavelet_fusion_probe_dim=getattr(args, "wavelet_fusion_probe_dim", 32),
-        wavelet_fusion_weight_mode=getattr(args, "wavelet_fusion_weight_mode", "fixed_per_scale"),
-        wavelet_fusion_weight_a_scales=getattr(args, "wavelet_fusion_weight_a_scales", None),
-        wavelet_fusion_weight_b_scales=getattr(args, "wavelet_fusion_weight_b_scales", None),
-        modal_graph_collapse_a=corrected_image_collapse_metrics,
-        modal_graph_collapse_b=corrected_text_collapse_metrics,
-        wavelet_fusion_entropy_temperature=getattr(args, "wavelet_fusion_entropy_temperature", 1.0),
-        wavelet_latent_lambda_sparse=getattr(args, "wavelet_latent_lambda_sparse", 0.01),
-        wavelet_latent_lambda_sym=getattr(args, "wavelet_latent_lambda_sym", 1.0),
-        wavelet_latent_lambda_nonneg=getattr(args, "wavelet_latent_lambda_nonneg", 1.0),
-        wavelet_latent_reconstruction_mode=getattr(args, "wavelet_latent_reconstruction_mode", "candidate_response_similarity"),
-        wavelet_latent_postprocess_topk=getattr(args, "wavelet_latent_postprocess_topk", 64),
-        wavelet_latent_postprocess_threshold=getattr(args, "wavelet_latent_postprocess_threshold", 0.0),
-    )
+    if not stage3_enabled:
+        log_cross_modal("stage three disabled: using simple average fusion B_fused = 0.5 * B_A + 0.5 * B_B")
+        unified_graph, fusion_diagnostics = build_simple_average_unified_graph(
+            corrected_image_symmetric,
+            corrected_text_symmetric,
+        )
+    else:
+        unified_graph, fusion_diagnostics = unify_topology(
+            corrected_image_symmetric,
+            corrected_text_symmetric,
+            fusion_domain_mode=fusion_domain_mode,
+            mode=args.fusion_mode,
+            correction_fusion_mode=effective_correction_fusion_mode,
+            rho_img=rho_img,
+            rho_txt=rho_txt,
+            lambda_f=getattr(args, "lambda_f", 1.0),
+            mu_f=getattr(args, "mu_f", 1.0),
+            eps=getattr(args, "fusion_eps", 1e-8),
+            alpha_txt_to_img_eff=alpha_txt_to_img_eff if correction_mode == "bidirectional" else None,
+            alpha_img_to_txt_eff=alpha_img_to_txt_eff if correction_mode == "bidirectional" else None,
+            wavelet_fusion_scales=getattr(args, "wavelet_fusion_scales", "1,2,4"),
+            wavelet_fusion_impl=getattr(args, "wavelet_fusion_impl", "diffusion_difference"),
+            wavelet_fusion_probe_mode=getattr(args, "wavelet_fusion_probe_mode", "random"),
+            wavelet_fusion_probe_dim=getattr(args, "wavelet_fusion_probe_dim", 32),
+            wavelet_fusion_weight_mode=getattr(args, "wavelet_fusion_weight_mode", "fixed_per_scale"),
+            wavelet_fusion_weight_a_scales=getattr(args, "wavelet_fusion_weight_a_scales", None),
+            wavelet_fusion_weight_b_scales=getattr(args, "wavelet_fusion_weight_b_scales", None),
+            modal_graph_collapse_a=corrected_image_collapse_metrics,
+            modal_graph_collapse_b=corrected_text_collapse_metrics,
+            wavelet_fusion_entropy_temperature=getattr(args, "wavelet_fusion_entropy_temperature", 1.0),
+            wavelet_latent_lambda_sparse=getattr(args, "wavelet_latent_lambda_sparse", 0.01),
+            wavelet_latent_lambda_sym=getattr(args, "wavelet_latent_lambda_sym", 1.0),
+            wavelet_latent_lambda_nonneg=getattr(args, "wavelet_latent_lambda_nonneg", 1.0),
+            wavelet_latent_reconstruction_mode=getattr(args, "wavelet_latent_reconstruction_mode", "candidate_response_similarity"),
+            wavelet_latent_postprocess_topk=getattr(args, "wavelet_latent_postprocess_topk", 64),
+            wavelet_latent_postprocess_threshold=getattr(args, "wavelet_latent_postprocess_threshold", 0.0),
+        )
     if fusion_diagnostics:
         if fusion_domain_mode == "graph":
             log_cross_modal(

@@ -11,10 +11,35 @@ os.environ.setdefault("BLIS_NUM_THREADS", "1")
 from src.subset_match import run_subset_selection
 
 
+def apply_diagnostic_stage_preset(args):
+    preset_id = getattr(args, "diagnostic_experiment_id", None)
+    if preset_id is None:
+        return args
+    presets = {
+        0: {"enable_stage2_correction": False, "enable_stage3_fusion": False, "enable_stage4_lsrc": False},
+        1: {"enable_stage2_correction": True, "enable_stage3_fusion": False, "enable_stage4_lsrc": False},
+        2: {"enable_stage2_correction": False, "enable_stage3_fusion": True, "enable_stage4_lsrc": False},
+        3: {"enable_stage2_correction": False, "enable_stage3_fusion": False, "enable_stage4_lsrc": True},
+        4: {"enable_stage2_correction": True, "enable_stage3_fusion": True, "enable_stage4_lsrc": True},
+    }
+    preset = presets[int(preset_id)]
+    args.enable_stage2_correction = bool(preset["enable_stage2_correction"])
+    args.enable_stage3_fusion = bool(preset["enable_stage3_fusion"])
+    args.enable_stage4_lsrc = bool(preset["enable_stage4_lsrc"])
+    return args
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="Select a real subset from unified representation/topology.")
     parser.add_argument("--dataset", type=str, required=True, choices=["flickr", "coco"])
     parser.add_argument("--split", type=str, default="train", choices=["train"])
+    parser.add_argument("--diagnostic_experiment_id", type=int, default=None, choices=[0, 1, 2, 3, 4])
+    parser.add_argument("--enable_stage2_correction", dest="enable_stage2_correction", action="store_true", default=True)
+    parser.add_argument("--disable_stage2_correction", dest="enable_stage2_correction", action="store_false")
+    parser.add_argument("--enable_stage3_fusion", dest="enable_stage3_fusion", action="store_true", default=True)
+    parser.add_argument("--disable_stage3_fusion", dest="enable_stage3_fusion", action="store_false")
+    parser.add_argument("--enable_stage4_lsrc", dest="enable_stage4_lsrc", action="store_true", default=True)
+    parser.add_argument("--disable_stage4_lsrc", dest="enable_stage4_lsrc", action="store_false")
     parser.add_argument("--image_encoder", type=str, required=True)
     parser.add_argument("--text_encoder", type=str, default="bert")
     parser.add_argument("--feature_cache_root", type=str, default="artifacts/feature_cache")
@@ -126,7 +151,12 @@ def build_parser():
 
 
 def main():
-    args = build_parser().parse_args()
+    args = apply_diagnostic_stage_preset(build_parser().parse_args())
+    exp_label = args.diagnostic_experiment_id if args.diagnostic_experiment_id is not None else "custom"
+    print(f"[Experiment] Exp {exp_label}")
+    print(f"  Stage2 Correction: {'ON' if args.enable_stage2_correction else 'OFF'}")
+    print(f"  Stage3 Fusion: {'ON' if args.enable_stage3_fusion else 'OFF'}")
+    print(f"  Stage4 LSRC: {'ON' if args.enable_stage4_lsrc else 'OFF'}")
     if args.use_pdcfd:
         args.proxy_loss_type = "pdcfd"
         args.proxy_objective_mode = "pd_cfd"

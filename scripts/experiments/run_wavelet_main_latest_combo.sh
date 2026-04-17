@@ -8,6 +8,10 @@ DATASET="${WAVELET_MAIN_LATEST_DATASET:-flickr}"
 BACKBONE="${WAVELET_MAIN_LATEST_BACKBONE:-nfnet}"
 TEXT_ENCODER="${WAVELET_MAIN_LATEST_TEXT_ENCODER:-bert}"
 VARIANT="${WAVELET_MAIN_LATEST_VARIANT:-wavelet_main_latest_collapse_aware}"
+DIAGNOSTIC_EXPERIMENT_ID="${WAVELET_MAIN_LATEST_DIAGNOSTIC_EXPERIMENT_ID:-}"
+STAGE2_SWITCH="${WAVELET_MAIN_LATEST_STAGE2_SWITCH:-}"
+STAGE3_SWITCH="${WAVELET_MAIN_LATEST_STAGE3_SWITCH:-}"
+STAGE4_SWITCH="${WAVELET_MAIN_LATEST_STAGE4_SWITCH:-}"
 SEEDS_STR="${WAVELET_MAIN_LATEST_SEEDS:-0}"
 read -r -a SEEDS <<< "${SEEDS_STR}"
 BUDGETS_STR="${WAVELET_MAIN_LATEST_BUDGETS:-100 200 500}"
@@ -100,11 +104,72 @@ PY
 }
 
 selection_method_tag() {
-  if [[ "${KEEP_LSRC}" == "1" || "${ENABLE_LSRC}" == "1" ]]; then
+  local exp_id="${DIAGNOSTIC_EXPERIMENT_ID:-}"
+  local stage4_state
+  stage4_state="$(resolve_stage_switch "${STAGE4_SWITCH}" "${exp_id}" 4)"
+  if [[ "${exp_id}" == "0" || "${exp_id}" == "1" ]]; then
+    echo "baseline"
+    return 0
+  fi
+  if [[ "${stage4_state}" == "1" && ( "${KEEP_LSRC}" == "1" || "${ENABLE_LSRC}" == "1" ) ]]; then
     echo "proxy_opt_lsrc"
   else
     echo "proxy_opt"
   fi
+}
+
+selection_method_value() {
+  local exp_id="${DIAGNOSTIC_EXPERIMENT_ID:-}"
+  if [[ "${exp_id}" == "0" || "${exp_id}" == "1" ]]; then
+    echo "baseline"
+  else
+    echo "proxy_opt"
+  fi
+}
+
+resolve_stage_switch() {
+  local explicit_value="$1"
+  local exp_id="$2"
+  local stage_index="$3"
+  if [[ -n "${explicit_value}" ]]; then
+    echo "${explicit_value}"
+    return 0
+  fi
+  case "${exp_id}" in
+    0)
+      case "${stage_index}" in
+        2|3|4) echo "0" ;;
+        *) echo "1" ;;
+      esac
+      ;;
+    1)
+      case "${stage_index}" in
+        2) echo "1" ;;
+        3|4) echo "0" ;;
+        *) echo "1" ;;
+      esac
+      ;;
+    2)
+      case "${stage_index}" in
+        2|3) echo "1" ;;
+        4) echo "0" ;;
+        *) echo "1" ;;
+      esac
+      ;;
+    3)
+      case "${stage_index}" in
+        2|3) echo "0" ;;
+        4) echo "1" ;;
+        *) echo "1" ;;
+      esac
+      ;;
+    4)
+      echo "1"
+      ;;
+    *)
+      echo "1"
+      ;;
+  esac
 }
 
 run_precompute_if_needed() {
@@ -129,6 +194,24 @@ run_precompute_if_needed() {
   fi
   if [[ -n "${WAVELET_FUSION_WEIGHT_B_SCALES}" ]]; then
     cross_extra_args+=(--wavelet_fusion_weight_b_scales "${WAVELET_FUSION_WEIGHT_B_SCALES}")
+  fi
+  if [[ -n "${DIAGNOSTIC_EXPERIMENT_ID}" ]]; then
+    cross_extra_args+=(--diagnostic_experiment_id "${DIAGNOSTIC_EXPERIMENT_ID}")
+  fi
+  if [[ "${STAGE2_SWITCH}" == "0" ]]; then
+    cross_extra_args+=(--disable_stage2_correction)
+  elif [[ "${STAGE2_SWITCH}" == "1" ]]; then
+    cross_extra_args+=(--enable_stage2_correction)
+  fi
+  if [[ "${STAGE3_SWITCH}" == "0" ]]; then
+    cross_extra_args+=(--disable_stage3_fusion)
+  elif [[ "${STAGE3_SWITCH}" == "1" ]]; then
+    cross_extra_args+=(--enable_stage3_fusion)
+  fi
+  if [[ "${STAGE4_SWITCH}" == "0" ]]; then
+    cross_extra_args+=(--disable_stage4_lsrc)
+  elif [[ "${STAGE4_SWITCH}" == "1" ]]; then
+    cross_extra_args+=(--enable_stage4_lsrc)
   fi
 
   if [[ ! -f "${FEATURE_CACHE_DIR}/img_features_selection.pt" || ! -f "${FEATURE_CACHE_DIR}/txt_features_selection.pt" || ! -f "${FEATURE_CACHE_DIR}/sample_meta.json" ]]; then
@@ -263,6 +346,7 @@ run_selection_abs() {
   local seed="$2"
   local budget_tag
   local method_tag
+  local selection_method
   local selected_indices_path
   local select_log
   local train_log
@@ -272,6 +356,7 @@ run_selection_abs() {
 
   budget_tag="$(format_budget_tag "${budget}")"
   method_tag="$(selection_method_tag)"
+  selection_method="$(selection_method_value)"
   selected_indices_path="${SELECTION_OUTPUT_ROOT}/${DATASET}/train/${MODEL_TAG}/${budget_tag}/${method_tag}/seed_${seed}/selected_indices.json"
   metrics_path="${TRAIN_OUTPUT_ROOT}/${DATASET}/${MODEL_TAG}/${budget_tag}/${VARIANT}/seed_${seed}/metrics.json"
   select_log="${RUN_LOG_DIR}/${budget_tag}_seed${seed}_select.log"
@@ -294,6 +379,31 @@ run_selection_abs() {
   if [[ -n "${WAVELET_MAIN_SCALE_WEIGHTS}" ]]; then
     selection_extra_args+=(--wavelet_main_scale_weights "${WAVELET_MAIN_SCALE_WEIGHTS}")
   fi
+  if [[ -n "${DIAGNOSTIC_EXPERIMENT_ID}" ]]; then
+    selection_extra_args+=(--diagnostic_experiment_id "${DIAGNOSTIC_EXPERIMENT_ID}")
+    train_extra_args+=(--diagnostic_experiment_id "${DIAGNOSTIC_EXPERIMENT_ID}")
+  fi
+  if [[ "${STAGE2_SWITCH}" == "0" ]]; then
+    selection_extra_args+=(--disable_stage2_correction)
+    train_extra_args+=(--disable_stage2_correction)
+  elif [[ "${STAGE2_SWITCH}" == "1" ]]; then
+    selection_extra_args+=(--enable_stage2_correction)
+    train_extra_args+=(--enable_stage2_correction)
+  fi
+  if [[ "${STAGE3_SWITCH}" == "0" ]]; then
+    selection_extra_args+=(--disable_stage3_fusion)
+    train_extra_args+=(--disable_stage3_fusion)
+  elif [[ "${STAGE3_SWITCH}" == "1" ]]; then
+    selection_extra_args+=(--enable_stage3_fusion)
+    train_extra_args+=(--enable_stage3_fusion)
+  fi
+  if [[ "${STAGE4_SWITCH}" == "0" ]]; then
+    selection_extra_args+=(--disable_stage4_lsrc)
+    train_extra_args+=(--disable_stage4_lsrc)
+  elif [[ "${STAGE4_SWITCH}" == "1" ]]; then
+    selection_extra_args+=(--enable_stage4_lsrc)
+    train_extra_args+=(--enable_stage4_lsrc)
+  fi
 
   if [[ ! -f "${selected_indices_path}" ]]; then
     stage_log "Selection start: budget=${budget} seed=${seed}"
@@ -309,7 +419,7 @@ run_selection_abs() {
       --k "${K_NEIGHBORS}" \
       --alpha "${ALPHA}" \
       --budget_size "${budget}" \
-      --selection_method proxy_opt \
+      --selection_method "${selection_method}" \
       --reference_embedding_mode "${SUBSET_REFERENCE_EMBEDDING_MODE}" \
       --spectral_weight "${SUBSET_SPECTRAL_WEIGHT}" \
       --random_state "${seed}" \
@@ -397,6 +507,7 @@ run_selection_ratio() {
   local seed="$2"
   local ratio_tag
   local method_tag
+  local selection_method
   local selected_indices_path
   local select_log
   local train_log
@@ -406,6 +517,7 @@ run_selection_ratio() {
 
   ratio_tag="$(format_ratio_tag_local "${ratio}")"
   method_tag="$(selection_method_tag)"
+  selection_method="$(selection_method_value)"
   selected_indices_path="${SELECTION_OUTPUT_ROOT}/${DATASET}/train/${MODEL_TAG}/${ratio_tag}/${method_tag}/seed_${seed}/selected_indices.json"
   metrics_path="${TRAIN_OUTPUT_ROOT}/${DATASET}/${MODEL_TAG}/${ratio_tag}/${VARIANT}/seed_${seed}/metrics.json"
   select_log="${RUN_LOG_DIR}/${ratio_tag}_seed${seed}_select.log"
@@ -428,6 +540,31 @@ run_selection_ratio() {
   if [[ -n "${WAVELET_MAIN_SCALE_WEIGHTS}" ]]; then
     selection_extra_args+=(--wavelet_main_scale_weights "${WAVELET_MAIN_SCALE_WEIGHTS}")
   fi
+  if [[ -n "${DIAGNOSTIC_EXPERIMENT_ID}" ]]; then
+    selection_extra_args+=(--diagnostic_experiment_id "${DIAGNOSTIC_EXPERIMENT_ID}")
+    train_extra_args+=(--diagnostic_experiment_id "${DIAGNOSTIC_EXPERIMENT_ID}")
+  fi
+  if [[ "${STAGE2_SWITCH}" == "0" ]]; then
+    selection_extra_args+=(--disable_stage2_correction)
+    train_extra_args+=(--disable_stage2_correction)
+  elif [[ "${STAGE2_SWITCH}" == "1" ]]; then
+    selection_extra_args+=(--enable_stage2_correction)
+    train_extra_args+=(--enable_stage2_correction)
+  fi
+  if [[ "${STAGE3_SWITCH}" == "0" ]]; then
+    selection_extra_args+=(--disable_stage3_fusion)
+    train_extra_args+=(--disable_stage3_fusion)
+  elif [[ "${STAGE3_SWITCH}" == "1" ]]; then
+    selection_extra_args+=(--enable_stage3_fusion)
+    train_extra_args+=(--enable_stage3_fusion)
+  fi
+  if [[ "${STAGE4_SWITCH}" == "0" ]]; then
+    selection_extra_args+=(--disable_stage4_lsrc)
+    train_extra_args+=(--disable_stage4_lsrc)
+  elif [[ "${STAGE4_SWITCH}" == "1" ]]; then
+    selection_extra_args+=(--enable_stage4_lsrc)
+    train_extra_args+=(--enable_stage4_lsrc)
+  fi
 
   if [[ ! -f "${selected_indices_path}" ]]; then
     stage_log "Selection start: ratio=${ratio} seed=${seed}"
@@ -443,7 +580,7 @@ run_selection_ratio() {
       --k "${K_NEIGHBORS}" \
       --alpha "${ALPHA}" \
       --budget_ratio "${ratio}" \
-      --selection_method proxy_opt \
+      --selection_method "${selection_method}" \
       --reference_embedding_mode "${SUBSET_REFERENCE_EMBEDDING_MODE}" \
       --spectral_weight "${SUBSET_SPECTRAL_WEIGHT}" \
       --random_state "${seed}" \
@@ -529,7 +666,7 @@ run_selection_ratio() {
 cd "${PROJECT_ROOT}"
 run_precompute_if_needed
 
-stage_log "Wavelet-main latest combo start: dataset=${DATASET} budgets=${BUDGETS[*]} ratios=${RATIOS[*]} seeds=${SEEDS[*]} fusion_weight_mode=${WAVELET_FUSION_WEIGHT_MODE}"
+stage_log "Wavelet-main latest combo start: dataset=${DATASET} budgets=${BUDGETS[*]} ratios=${RATIOS[*]} seeds=${SEEDS[*]} fusion_weight_mode=${WAVELET_FUSION_WEIGHT_MODE} exp_id=${DIAGNOSTIC_EXPERIMENT_ID:-none} stage2=${STAGE2_SWITCH:-preset} stage3=${STAGE3_SWITCH:-preset} stage4=${STAGE4_SWITCH:-preset}"
 
 for budget in "${BUDGETS[@]}"; do
   for seed in "${SEEDS[@]}"; do

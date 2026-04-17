@@ -35,6 +35,8 @@ def build_output_dir(args):
     method_tag = sanitize_name(getattr(args, "selection_method", "baseline"))
     if bool(getattr(args, "keep_lsrc", True)) or bool(getattr(args, "enable_lsrc", False)):
         method_tag = f"{method_tag}_lsrc"
+    if getattr(args, "diagnostic_experiment_id", None) is not None:
+        method_tag = f"{method_tag}_exp{int(args.diagnostic_experiment_id)}"
     seed_tag = f"seed_{int(getattr(args, 'random_state', 0))}"
     return Path(args.output_root) / args.dataset / args.split / model_tag / budget_tag / method_tag / seed_tag
 
@@ -807,6 +809,10 @@ def compute_selection_summary(
         "split": args.split,
         "image_encoder": args.image_encoder,
         "text_encoder": args.text_encoder,
+        "diagnostic_experiment_id": None if getattr(args, "diagnostic_experiment_id", None) is None else int(getattr(args, "diagnostic_experiment_id")),
+        "enable_stage2_correction": bool(getattr(args, "enable_stage2_correction", True)),
+        "enable_stage3_fusion": bool(getattr(args, "enable_stage3_fusion", True)),
+        "enable_stage4_lsrc": bool(getattr(args, "enable_stage4_lsrc", True)),
         "budget_ratio": float(args.budget_ratio) if getattr(args, "budget_ratio", None) is not None else None,
         "budget_size": int(subset_size),
         "requested_budget_size": int(getattr(args, "budget_size", subset_size) or subset_size),
@@ -972,6 +978,7 @@ def run_proxy_optimized_selection(args, representation, unified_graph):
         getattr(args, "proxy_loss_type", None),
         objective_mode=getattr(args, "proxy_objective_mode", None),
     )
+    stage4_enabled = bool(getattr(args, "enable_stage4_lsrc", True))
     reference_embedding = build_reference_embedding(
         representation,
         spectral_embedding=getattr(args, "_spectral_embedding", None),
@@ -1025,8 +1032,8 @@ def run_proxy_optimized_selection(args, representation, unified_graph):
         phase_weight_mode=getattr(args, "phase_weight_mode", "uniform"),
         match_reference=optimization_embedding,
         graph_reference=graph_reference,
-        enable_lsrc=bool(getattr(args, "enable_lsrc", False)),
-        keep_lsrc=bool(getattr(args, "keep_lsrc", True)),
+        enable_lsrc=bool(stage4_enabled and getattr(args, "enable_lsrc", False)),
+        keep_lsrc=bool(stage4_enabled and getattr(args, "keep_lsrc", True)),
         lsrc_image_graph=getattr(args, "_lsrc_image_graph", None),
         lsrc_text_graph=getattr(args, "_lsrc_text_graph", None),
         lsrc_k=getattr(args, "lsrc_k", 32),
@@ -1084,6 +1091,11 @@ def run_proxy_optimized_selection(args, representation, unified_graph):
     cost_beta_wavelet = float(getattr(args, "matching_wavelet_weight", getattr(args, "cost_beta_wavelet", 1.0)))
     cost_gamma_topo = float(getattr(args, "cost_gamma_topo", 0.1))
     cost_eta_lsrc = float(getattr(args, "cost_eta_lsrc", 0.1))
+    if not stage4_enabled:
+        lsrc_confidence_q = None
+        cost_beta_wavelet = 0.0
+        cost_gamma_topo = 0.0
+        cost_eta_lsrc = 0.0
     matching_bundle = run_proxy_matching(
         proxy_bundle["proxy_points"],
         projected_representation,
@@ -1144,7 +1156,7 @@ def run_proxy_optimized_selection(args, representation, unified_graph):
             "proxy_objective_mode": getattr(args, "proxy_objective_mode", "pd_cfd"),
             "reference_embedding_mode": getattr(args, "reference_embedding_mode", "hybrid"),
             "enable_lsrc": bool(getattr(args, "enable_lsrc", False)),
-            "keep_lsrc": bool(getattr(args, "keep_lsrc", True)),
+            "keep_lsrc": bool(stage4_enabled and getattr(args, "keep_lsrc", True)),
             "lsrc_k": int(getattr(args, "lsrc_k", 32)),
             "lambda_lsrc_cov": float(getattr(args, "lambda_lsrc_cov", 0.0)),
             "lambda_lsrc_rel": float(getattr(args, "lambda_lsrc_rel", 0.0)),
@@ -1163,6 +1175,11 @@ def run_proxy_optimized_selection(args, representation, unified_graph):
             "local_hungarian_calls": int(matching_bundle["matching_debug"]["local_hungarian_calls"]),
             "assignment_mode": matching_bundle["matching_debug"]["assignment_mode"],
             "matching_cost_mode": getattr(args, "matching_cost_mode", "candidate_topk"),
+            "diagnostic_experiment_id": None if getattr(args, "diagnostic_experiment_id", None) is None else int(getattr(args, "diagnostic_experiment_id")),
+            "enable_stage2_correction": bool(getattr(args, "enable_stage2_correction", True)),
+            "enable_stage3_fusion": bool(getattr(args, "enable_stage3_fusion", True)),
+            "enable_stage4_lsrc": bool(stage4_enabled),
+            "stage4_matching_geometry_only": bool(not stage4_enabled),
             "match_loss": float(matching_bundle["matching_debug"]["match_loss"]),
             "graph_loss": float(matching_bundle["matching_debug"]["graph_loss"]),
             "proxy_initial_loss": proxy_bundle["summary"]["initial_loss"],
@@ -1175,7 +1192,6 @@ def run_proxy_optimized_selection(args, representation, unified_graph):
 def run_subset_selection(args):
     feature_dir = build_feature_dir(args)
     cross_modal_dir = build_cross_modal_dir(args)
-    output_dir = build_output_dir(args)
 
     img_features, txt_features, sample_meta = load_feature_cache(feature_dir)
     unified_graph, spectral_embedding, cross_modal_summary, lsrc_image_graph, lsrc_text_graph = load_unified_artifacts(cross_modal_dir)
@@ -1195,6 +1211,13 @@ def run_subset_selection(args):
     args._lsrc_rho_img = float(cross_modal_summary.get("rho_img", 0.5))
     args._lsrc_rho_txt = float(cross_modal_summary.get("rho_txt", 0.5))
     selection_method = getattr(args, "selection_method", "baseline")
+    if getattr(args, "diagnostic_experiment_id", None) in {0, 1} and selection_method == "proxy_opt":
+        selection_method = "baseline"
+        args.selection_method = "baseline"
+    if not bool(getattr(args, "enable_stage4_lsrc", True)):
+        args.enable_lsrc = False
+        args.keep_lsrc = False
+    output_dir = build_output_dir(args)
 
     if selection_method == "proxy_opt":
         outputs = run_proxy_optimized_selection(args, representation, unified_graph)
