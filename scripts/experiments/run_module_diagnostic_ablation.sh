@@ -11,7 +11,7 @@ SEEDS_STR="${MODULE_DIAG_SEEDS:-0}"
 read -r -a SEEDS <<< "${SEEDS_STR}"
 BUDGETS_STR="${MODULE_DIAG_BUDGETS:-100 200 500}"
 read -r -a BUDGETS <<< "${BUDGETS_STR}"
-RATIOS_STR="${MODULE_DIAG_RATIOS:-0.01 0.02 0.03}"
+RATIOS_STR="${MODULE_DIAG_RATIOS:-}"
 read -r -a RATIOS <<< "${RATIOS_STR}"
 
 BASE_CROSS_ROOT="${MODULE_DIAG_CROSS_ROOT:-artifacts/cross_modal_topology_module_diagnostic}"
