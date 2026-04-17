@@ -11,7 +11,15 @@ RATIOS="${RATIOS:-0.01 0.02 0.03}"
 BASELINE_SEEDS="${BASELINE_SEEDS:-0}"
 BASELINE_DEVICE="${BASELINE_DEVICE:-cuda:0}"
 BASELINE_CONFIG="${BASELINE_CONFIG:-baselines/configs/main_aligned_flickr_nfnet_bert.yaml}"
-BASELINE_OUTPUT_ROOT="${BASELINE_OUTPUT_ROOT:-artifacts/baselines}"
+# Prefer the dedicated new4 root when env is not explicitly provided.
+BASELINE_OUTPUT_ROOT="${BASELINE_OUTPUT_ROOT:-}"
+if [[ -z "${BASELINE_OUTPUT_ROOT}" ]]; then
+  if [[ -d "artifacts/baselines_new4" ]]; then
+    BASELINE_OUTPUT_ROOT="artifacts/baselines_new4"
+  else
+    BASELINE_OUTPUT_ROOT="artifacts/baselines"
+  fi
+fi
 BASELINE_DATASET="${BASELINE_DATASET:-flickr}"
 BASELINE_IMAGE_ENCODER="${BASELINE_IMAGE_ENCODER:-nfnet}"
 BASELINE_TEXT_ENCODER="${BASELINE_TEXT_ENCODER:-bert}"
@@ -50,13 +58,35 @@ if [[ "${NEW4_CLEAR_OLD_METRICS}" == "1" ]]; then
 fi
 
 # 1) Absolute budget eval-only (no reselection).
-BASELINE_BUDGETS="${ABS_BUDGETS}" \
-BASELINE_METHODS="${BASELINE_METHODS}" \
-BASELINE_SEEDS="${BASELINE_SEEDS}" \
-BASELINE_DEVICE="${BASELINE_DEVICE}" \
-BASELINE_ROOT="${BASELINE_OUTPUT_ROOT}" \
-BASELINE_CONFIG="${BASELINE_CONFIG}" \
-bash baselines/scripts/run_main_aligned_eval.sh
+for seed in ${BASELINE_SEEDS}; do
+  for budget in ${ABS_BUDGETS}; do
+    for method in ${BASELINE_METHODS}; do
+      run_dir="${BASELINE_OUTPUT_ROOT}/${BASELINE_DATASET}/${BASELINE_IMAGE_ENCODER}_${BASELINE_TEXT_ENCODER}/${method}/budget_$(printf "%04d" "${budget}")/seed_${seed}"
+      selected_path="${run_dir}/selected_indices.json"
+      if [[ ! -f "${selected_path}" ]]; then
+        echo "[new4-eval-only][skip] selection missing: ${selected_path}"
+        continue
+      fi
+      echo "[new4-eval-only][abs-eval] method=${method} budget=${budget} seed=${seed}"
+      python -m baselines.runners.evaluate_baseline_subsets \
+        --baseline_result_dir "${run_dir}" \
+        --dataset_name "${BASELINE_DATASET}" \
+        --image_encoder "${BASELINE_IMAGE_ENCODER}" \
+        --text_encoder "${BASELINE_TEXT_ENCODER}" \
+        --feature_source "${BASELINE_FEATURE_SOURCE}" \
+        --image_root "${BASELINE_IMAGE_ROOT}" \
+        --ann_root "${BASELINE_ANN_ROOT}" \
+        --device "${BASELINE_DEVICE}" \
+        --epochs "${BASELINE_EPOCHS}" \
+        --batch_size_train "${BASELINE_BATCH_TRAIN}" \
+        --batch_size_test "${BASELINE_BATCH_TEST}" \
+        --text_batch_size "${BASELINE_TEXT_BATCH}" \
+        --num_workers "${BASELINE_NUM_WORKERS}" \
+        --eval_interval 1 \
+        --no_aug
+    done
+  done
+done
 
 # 2) Ratio eval-only (no reselection).
 for seed in ${BASELINE_SEEDS}; do
