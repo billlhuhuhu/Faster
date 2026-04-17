@@ -230,6 +230,11 @@ run_precompute_if_needed() {
       --selection_raw_pca_dim "${SELECTION_RAW_PCA_DIM}" \
       --selection_image_batch_size "${SELECTION_IMAGE_BATCH_SIZE}" \
       --selection_text_batch_size "${SELECTION_TEXT_BATCH_SIZE}" \
+      --tfidf_ngram_max "${TFIDF_NGRAM_MAX}" \
+      --tfidf_stop_words "${TFIDF_STOP_WORDS}" \
+      --tfidf_max_features "${TFIDF_MAX_FEATURES}" \
+      --tfidf_min_df "${TFIDF_MIN_DF}" \
+      --tfidf_svd_dim "${TFIDF_SVD_DIM}" \
       --hog_orientations "${HOG_ORIENTATIONS}" \
       --hog_pixels_per_cell "${HOG_PIXELS_PER_CELL}" \
       --hog_cells_per_block "${HOG_CELLS_PER_BLOCK}" \

@@ -121,6 +121,12 @@ def build_selection_feature_cache(dataset, args):
         text_repr_method=args.selection_text_repr_method,
         batch_size=args.selection_text_batch_size,
         device=args.device,
+        tfidf_ngram_max=args.tfidf_ngram_max,
+        tfidf_stop_words=args.tfidf_stop_words,
+        tfidf_max_features=args.tfidf_max_features,
+        tfidf_min_df=args.tfidf_min_df,
+        tfidf_svd_dim=args.tfidf_svd_dim,
+        tfidf_random_state=args.selection_random_state,
     )
 
     img_features_selection = torch.tensor(img_features_selection, dtype=torch.float32)
@@ -295,6 +301,16 @@ def save_feature_cache(cache, cache_dir, args):
                 "selection_text_batch_size": int(args.selection_text_batch_size),
             }
         )
+        if args.selection_text_repr_method == "tfidf":
+            info.update(
+                {
+                    "tfidf_ngram_max": int(args.tfidf_ngram_max),
+                    "tfidf_stop_words": args.tfidf_stop_words,
+                    "tfidf_max_features": int(args.tfidf_max_features),
+                    "tfidf_min_df": int(args.tfidf_min_df),
+                    "tfidf_svd_dim": int(args.tfidf_svd_dim),
+                }
+            )
         if "image_info" in cache:
             info["selection_image_repr_info"] = cache["image_info"]
     else:
