@@ -15,13 +15,12 @@ BASELINE_IMAGE_ROOT="${BASELINE_IMAGE_ROOT:-data/flickr30k}"
 BASELINE_ANN_ROOT="${BASELINE_ANN_ROOT:-data/Flickr30k_ann}"
 BASELINE_SEEDS="${BASELINE_SEEDS:-0}"
 BASELINE_METHODS="${BASELINE_METHODS:-entropy el2n grand gradmatch glister ccs-rand ccs-herd ccs-kcenter ccs-forget dq dfool nms adap_sne presel visa dataprophet dynamic_pruning}"
-BASELINE_EPOCHS="${BASELINE_EPOCHS:-20}"
-
-# Recommended eval-time memory-safe defaults for nfnet.
-BASELINE_BATCH_TRAIN="${BASELINE_BATCH_TRAIN:-16}"
-BASELINE_BATCH_TEST="${BASELINE_BATCH_TEST:-32}"
-BASELINE_TEXT_BATCH="${BASELINE_TEXT_BATCH:-256}"
-BASELINE_NUM_WORKERS="${BASELINE_NUM_WORKERS:-2}"
+# Align with main experiment defaults in scripts/experiments/common.sh.
+BASELINE_EPOCHS="${BASELINE_EPOCHS:-200}"
+BASELINE_BATCH_TRAIN="${BASELINE_BATCH_TRAIN:-64}"
+BASELINE_BATCH_TEST="${BASELINE_BATCH_TEST:-128}"
+BASELINE_TEXT_BATCH="${BASELINE_TEXT_BATCH:-1024}"
+BASELINE_NUM_WORKERS="${BASELINE_NUM_WORKERS:-4}"
 
 # Absolute budgets + ratio budgets.
 ABS_BUDGETS="${ABS_BUDGETS:-100 200 500}"
