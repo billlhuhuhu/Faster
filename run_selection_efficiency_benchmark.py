@@ -36,7 +36,7 @@ def build_parser():
     parser.add_argument("--collapse_score_weight_a2b", type=float, default=1.0)
     parser.add_argument("--collapse_score_weight_b2a", type=float, default=1.0)
     parser.add_argument("--collapse_score_weight_nbr2nbr", type=float, default=1.0)
-    parser.add_argument("--collapse_neighbor_topk", type=int, default=10)
+    parser.add_argument("--collapse_neighbor_topk", type=int, default=15)
     parser.add_argument("--tau_g", type=float, default=0.5)
     parser.add_argument("--correction_eps", type=float, default=1e-8)
     parser.add_argument("--enable_local_node_confidence", action="store_true")

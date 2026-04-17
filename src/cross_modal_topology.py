@@ -354,6 +354,184 @@ def summarize_vector(values):
     }
 
 
+def zero_diagonal_graph(graph):
+    graph = graph.tocsr(copy=True).astype(np.float32)
+    graph.setdiag(0.0)
+    graph.eliminate_zeros()
+    return graph
+
+
+def safe_corrcoef(x, y, eps=1e-8):
+    x = np.asarray(x, dtype=np.float32).reshape(-1)
+    y = np.asarray(y, dtype=np.float32).reshape(-1)
+    if x.size == 0 or y.size == 0 or x.size != y.size:
+        return 0.0
+    if x.size == 1:
+        return float(1.0 if abs(float(x[0]) - float(y[0])) <= float(eps) else 0.0)
+    std_x = float(np.std(x))
+    std_y = float(np.std(y))
+    if std_x <= float(eps) or std_y <= float(eps):
+        return 0.0
+    corr = float(np.corrcoef(x.astype(np.float64), y.astype(np.float64))[0, 1])
+    if not np.isfinite(corr):
+        return 0.0
+    return float(np.clip(corr, -1.0, 1.0))
+
+
+def summarize_distribution_shift(before, after):
+    before = np.asarray(before, dtype=np.float32).reshape(-1)
+    after = np.asarray(after, dtype=np.float32).reshape(-1)
+    if before.size == 0 or after.size == 0:
+        return {
+            "before": summarize_vector(np.zeros(0, dtype=np.float32)),
+            "after": summarize_vector(np.zeros(0, dtype=np.float32)),
+            "mean_abs_delta": 0.0,
+            "mean_signed_delta": 0.0,
+        }
+    delta = after - before
+    return {
+        "before": summarize_vector(before),
+        "after": summarize_vector(after),
+        "mean_abs_delta": float(np.mean(np.abs(delta))),
+        "mean_signed_delta": float(np.mean(delta)),
+    }
+
+
+def compute_row_entropy_distribution(graph, eps=1e-8):
+    graph = zero_diagonal_graph(graph)
+    graph = graph.tocsr().astype(np.float32)
+    num_nodes = int(graph.shape[0])
+    entropy = np.zeros(num_nodes, dtype=np.float32)
+    indptr = graph.indptr
+    data = graph.data
+    eps = float(eps)
+    for node_idx in range(num_nodes):
+        start = int(indptr[node_idx])
+        end = int(indptr[node_idx + 1])
+        count = int(end - start)
+        if count <= 1:
+            continue
+        weights = np.clip(data[start:end].astype(np.float64), eps, None)
+        total = float(np.sum(weights))
+        if total <= eps:
+            continue
+        prob = weights / total
+        norm = max(np.log(float(count) + eps), eps)
+        row_entropy = -float(np.sum(prob * np.log(prob + eps))) / norm
+        entropy[node_idx] = np.float32(np.clip(row_entropy, 0.0, 1.0))
+    return entropy.astype(np.float32)
+
+
+def compute_graph_pair_similarity(graph_a, graph_b, topk=15, eps=1e-8):
+    graph_a = graph_a.tocsr().astype(np.float32)
+    graph_b = graph_b.tocsr().astype(np.float32)
+    union_keys, _, _ = build_union_keys(graph_a, graph_b)
+    data_a = gather_sparse_data_on_keys(graph_a, union_keys)
+    data_b = gather_sparse_data_on_keys(graph_b, union_keys)
+    support_a = data_a > float(eps)
+    support_b = data_b > float(eps)
+    shared_support = support_a & support_b
+    union_support = support_a | support_b
+    support_intersection = int(np.count_nonzero(shared_support))
+    support_union = int(np.count_nonzero(union_support))
+    support_jaccard = float(support_intersection / max(support_union, 1))
+    weight_corr = safe_corrcoef(data_a[shared_support], data_b[shared_support], eps=eps)
+
+    neighbors_a = extract_row_topk_neighbors(graph_a, topk=max(1, int(topk)))
+    neighbors_b = extract_row_topk_neighbors(graph_b, topk=max(1, int(topk)))
+    overlap = np.zeros(int(graph_a.shape[0]), dtype=np.float32)
+    for idx, (row_a, row_b) in enumerate(zip(neighbors_a, neighbors_b)):
+        set_a = set(int(x) for x in row_a.tolist())
+        set_b = set(int(x) for x in row_b.tolist())
+        union = len(set_a | set_b)
+        if union <= 0:
+            overlap[idx] = 1.0
+            continue
+        overlap[idx] = np.float32(len(set_a & set_b) / float(union))
+
+    return {
+        "edge_weight_correlation": float(weight_corr),
+        "topk_neighbor_overlap_mean": float(np.mean(overlap)) if overlap.size else 0.0,
+        "topk_neighbor_overlap_stats": summarize_vector(overlap),
+        "support_jaccard": float(support_jaccard),
+        "support_intersection": int(support_intersection),
+        "support_union": int(support_union),
+        "topk": int(max(1, int(topk))),
+    }
+
+
+def compute_edge_adjustment_stats(reference_union_keys, original_graph, corrected_graph, eps=1e-8):
+    original_graph = original_graph.tocsr().astype(np.float32)
+    corrected_graph = corrected_graph.tocsr().astype(np.float32)
+    original_data = gather_sparse_data_on_keys(original_graph, reference_union_keys)
+    corrected_data = gather_sparse_data_on_keys(corrected_graph, reference_union_keys)
+    delta = corrected_data - original_data
+    threshold = float(eps)
+    changed = np.abs(delta) > threshold
+    up = delta > threshold
+    down = delta < -threshold
+    total = int(reference_union_keys.shape[0])
+    changed_count = int(np.count_nonzero(changed))
+    up_count = int(np.count_nonzero(up))
+    down_count = int(np.count_nonzero(down))
+    return {
+        "total_candidate_edges": int(total),
+        "changed_edge_count": int(changed_count),
+        "changed_edge_ratio": float(changed_count / max(total, 1)),
+        "up_adjusted_count": int(up_count),
+        "up_adjusted_ratio": float(up_count / max(total, 1)),
+        "down_adjusted_count": int(down_count),
+        "down_adjusted_ratio": float(down_count / max(total, 1)),
+        "mean_abs_delta": float(np.mean(np.abs(delta))) if delta.size else 0.0,
+        "mean_signed_delta": float(np.mean(delta)) if delta.size else 0.0,
+        "changed_delta_stats": summarize_vector(delta[changed]) if np.any(changed) else summarize_vector(np.zeros(0, dtype=np.float32)),
+        "all_delta_stats": summarize_vector(delta),
+    }
+
+
+def compute_stage2_module_diagnostics(
+    image_graph,
+    text_graph,
+    corrected_image_graph,
+    corrected_text_graph,
+    neighbor_topk=10,
+    eps=1e-8,
+):
+    union_keys, _, _ = build_union_keys(image_graph, text_graph)
+    image_adjustment = compute_edge_adjustment_stats(union_keys, image_graph, corrected_image_graph, eps=eps)
+    text_adjustment = compute_edge_adjustment_stats(union_keys, text_graph, corrected_text_graph, eps=eps)
+
+    degree_image_before = np.asarray(image_graph.sum(axis=1)).reshape(-1).astype(np.float32)
+    degree_image_after = np.asarray(corrected_image_graph.sum(axis=1)).reshape(-1).astype(np.float32)
+    degree_text_before = np.asarray(text_graph.sum(axis=1)).reshape(-1).astype(np.float32)
+    degree_text_after = np.asarray(corrected_text_graph.sum(axis=1)).reshape(-1).astype(np.float32)
+    entropy_image_before = compute_row_entropy_distribution(image_graph, eps=eps)
+    entropy_image_after = compute_row_entropy_distribution(corrected_image_graph, eps=eps)
+    entropy_text_before = compute_row_entropy_distribution(text_graph, eps=eps)
+    entropy_text_after = compute_row_entropy_distribution(corrected_text_graph, eps=eps)
+
+    similarity_before = compute_graph_pair_similarity(image_graph, text_graph, topk=neighbor_topk, eps=eps)
+    similarity_after = compute_graph_pair_similarity(corrected_image_graph, corrected_text_graph, topk=neighbor_topk, eps=eps)
+    similarity_shift = {
+        "edge_weight_correlation_delta": float(similarity_after["edge_weight_correlation"] - similarity_before["edge_weight_correlation"]),
+        "topk_neighbor_overlap_mean_delta": float(similarity_after["topk_neighbor_overlap_mean"] - similarity_before["topk_neighbor_overlap_mean"]),
+        "support_jaccard_delta": float(similarity_after["support_jaccard"] - similarity_before["support_jaccard"]),
+    }
+
+    return {
+        "graph_similarity_before": similarity_before,
+        "graph_similarity_after": similarity_after,
+        "graph_similarity_shift": similarity_shift,
+        "image_edge_adjustment": image_adjustment,
+        "text_edge_adjustment": text_adjustment,
+        "image_degree_shift": summarize_distribution_shift(degree_image_before, degree_image_after),
+        "text_degree_shift": summarize_distribution_shift(degree_text_before, degree_text_after),
+        "image_entropy_shift": summarize_distribution_shift(entropy_image_before, entropy_image_after),
+        "text_entropy_shift": summarize_distribution_shift(entropy_text_before, entropy_text_after),
+        "diagnostic_note": "Stage-two diagnostics track whether correction over-aligns the two modalities, how many candidate edges are altered, and whether degree/entropy structure drifts from local repair toward whole-graph reshaping.",
+    }
+
+
 def sanitize_real_spectrum(eigenvalues, eigenvectors, label):
     eigenvalues = np.asarray(eigenvalues)
     max_value_imag = float(np.max(np.abs(np.imag(eigenvalues)))) if eigenvalues.size > 0 else 0.0
@@ -569,7 +747,7 @@ def compute_local_separability_degradation(graph, neighborhoods, eps=1e-8):
 
 def compute_local_discriminative_degradation(
     graph,
-    local_window_topk=10,
+    local_window_topk=15,
     relation_alpha=0.5,
     eps=1e-8,
 ):
@@ -610,6 +788,90 @@ def build_edge_confidence_from_local_collapse(local_collapse, union_keys, shape,
         "edge_confidence_stats": summarize_vector(edge_confidence),
     }
     return edge_confidence.astype(np.float32), diagnostics
+
+
+def limit_added_edges_per_node(base_graph, corrected_graph, added_topk=5):
+    base_graph = base_graph.tocsr().astype(np.float32)
+    corrected_graph = corrected_graph.tocsr().astype(np.float32)
+    added_topk = max(int(added_topk), 0)
+    num_nodes = int(corrected_graph.shape[0])
+
+    out_indptr = [0]
+    out_indices = []
+    out_data = []
+    added_before = 0
+    added_after = 0
+
+    for row_idx in range(num_nodes):
+        base_start = int(base_graph.indptr[row_idx])
+        base_end = int(base_graph.indptr[row_idx + 1])
+        corrected_start = int(corrected_graph.indptr[row_idx])
+        corrected_end = int(corrected_graph.indptr[row_idx + 1])
+
+        row_cols = corrected_graph.indices[corrected_start:corrected_end].astype(np.int64, copy=False)
+        row_vals = corrected_graph.data[corrected_start:corrected_end].astype(np.float32, copy=False)
+        if row_cols.size == 0:
+            out_indptr.append(len(out_indices))
+            continue
+
+        base_cols = base_graph.indices[base_start:base_end].astype(np.int64, copy=False)
+        if base_cols.size == 0:
+            original_mask = np.zeros(row_cols.shape[0], dtype=bool)
+        else:
+            positions = np.searchsorted(base_cols, row_cols)
+            valid = positions < base_cols.size
+            original_mask = np.zeros(row_cols.shape[0], dtype=bool)
+            if np.any(valid):
+                original_mask[valid] = base_cols[positions[valid]] == row_cols[valid]
+
+        added_mask = ~original_mask
+        added_positions = np.where(added_mask)[0]
+        added_before += int(added_positions.size)
+
+        if added_positions.size > 0 and added_topk > 0 and added_positions.size > added_topk:
+            chosen = np.argpartition(-row_vals[added_positions], added_topk - 1)[:added_topk]
+            kept_added_positions = np.sort(added_positions[chosen])
+        elif added_positions.size > 0 and added_topk > 0:
+            kept_added_positions = added_positions
+        else:
+            kept_added_positions = np.empty(0, dtype=np.int64)
+        added_after += int(kept_added_positions.size)
+
+        kept_positions = np.sort(
+            np.concatenate(
+                [
+                    np.where(original_mask)[0].astype(np.int64),
+                    kept_added_positions.astype(np.int64),
+                ],
+                axis=0,
+            )
+        )
+        if kept_positions.size > 0:
+            out_indices.extend(row_cols[kept_positions].tolist())
+            out_data.extend(row_vals[kept_positions].tolist())
+        out_indptr.append(len(out_indices))
+
+    limited_graph = sparse.csr_matrix(
+        (
+            np.asarray(out_data, dtype=np.float32),
+            np.asarray(out_indices, dtype=np.int32),
+            np.asarray(out_indptr, dtype=np.int32),
+        ),
+        shape=corrected_graph.shape,
+        dtype=np.float32,
+    )
+    limited_graph.eliminate_zeros()
+    diagnostics = {
+        "original_image_num_edges": int(base_graph.nnz),
+        "corrected_image_num_edges_before_added_edge_limit": int(corrected_graph.nnz),
+        "corrected_image_num_edges_after_added_edge_limit": int(limited_graph.nnz),
+        "num_added_edges_before_limit": int(added_before),
+        "num_added_edges_after_limit": int(added_after),
+        "mean_added_edges_per_node_before_limit": float(added_before / max(num_nodes, 1)),
+        "mean_added_edges_per_node_after_limit": float(added_after / max(num_nodes, 1)),
+        "corrected_image_added_topk": int(added_topk),
+    }
+    return limited_graph, diagnostics
 
 
 def build_confidence_based_bidirectional_correction_weights(
@@ -762,14 +1024,15 @@ def build_collapse_score_bidirectional_correction_weights(
     text_graph,
     eps=1e-8,
     collapse_score_mode="edge_plus_neighborhood",
-    collapse_neighbor_topk=10,
+    collapse_neighbor_topk=15,
     collapse_score_weight_edge=1.0,
     collapse_score_weight_a2b=1.0,
     collapse_score_weight_b2a=1.0,
     collapse_score_weight_nbr2nbr=1.0,
     local_relation_alpha=0.5,
     edge_confidence_tau=4.0,
-    asymmetric_correction_lambda=1.0,
+    asymmetric_correction_lambda=0.3,
+    correction_confidence_gap_delta=0.1,
 ):
     image_graph = image_graph.tocsr().astype(np.float32)
     text_graph = text_graph.tocsr().astype(np.float32)
@@ -804,14 +1067,18 @@ def build_collapse_score_bidirectional_correction_weights(
     )
 
     lambda_corr = float(np.clip(asymmetric_correction_lambda, 0.0, 1.0))
+    confidence_gap_delta = max(float(correction_confidence_gap_delta), 0.0)
+    txt_stronger_mask = ((q_txt - q_img) > confidence_gap_delta).astype(np.float32)
+    img_stronger_mask = ((q_img - q_txt) > confidence_gap_delta).astype(np.float32)
     weak_img_alignment_weight = (
-        lambda_corr * np.maximum(1.0 - (q_img / (q_txt + float(eps))), 0.0) * (q_txt >= q_img).astype(np.float32)
+        lambda_corr * np.maximum(1.0 - (q_img / (q_txt + float(eps))), 0.0) * txt_stronger_mask
     ).astype(np.float32)
     weak_txt_alignment_weight = (
-        lambda_corr * np.maximum(1.0 - (q_txt / (q_img + float(eps))), 0.0) * (q_img > q_txt).astype(np.float32)
+        lambda_corr * np.maximum(1.0 - (q_txt / (q_img + float(eps))), 0.0) * img_stronger_mask
     ).astype(np.float32)
     weak_img_alignment_weight = np.clip(weak_img_alignment_weight, 0.0, 1.0).astype(np.float32)
     weak_txt_alignment_weight = np.clip(weak_txt_alignment_weight, 0.0, 1.0).astype(np.float32)
+    gated_mask = (txt_stronger_mask > 0) | (img_stronger_mask > 0)
 
     alpha_txt_to_img = sparse_matrix_from_union_keys(union_keys, weak_img_alignment_weight, image_graph.shape)
     alpha_img_to_txt = sparse_matrix_from_union_keys(union_keys, weak_txt_alignment_weight, image_graph.shape)
@@ -824,7 +1091,11 @@ def build_collapse_score_bidirectional_correction_weights(
             "relation_alpha": float(local_relation_alpha),
             "edge_confidence_tau": float(edge_confidence_tau),
             "asymmetric_correction_lambda": float(lambda_corr),
+            "correction_confidence_gap_delta": float(confidence_gap_delta),
         },
+        "total_candidate_edges": int(union_keys.shape[0]),
+        "gated_correction_edges": int(np.count_nonzero(gated_mask)),
+        "correction_activation_ratio": float(np.count_nonzero(gated_mask) / max(int(union_keys.shape[0]), 1)),
         "image_q_stats": image_q_diag["edge_confidence_stats"],
         "text_q_stats": text_q_diag["edge_confidence_stats"],
         "image_q_components": {
@@ -847,8 +1118,8 @@ def build_collapse_score_bidirectional_correction_weights(
         "alpha_i2t_stats_after_gate": summarize_vector(weak_txt_alignment_weight),
         "weak_side_alignment_weight_t2i_stats": summarize_vector(weak_img_alignment_weight),
         "weak_side_alignment_weight_i2t_stats": summarize_vector(weak_txt_alignment_weight),
-        "gate_activation_ratio_t2i": 1.0,
-        "gate_activation_ratio_i2t": 1.0,
+        "gate_activation_ratio_t2i": float(np.mean(txt_stronger_mask)) if txt_stronger_mask.size else 0.0,
+        "gate_activation_ratio_i2t": float(np.mean(img_stronger_mask)) if img_stronger_mask.size else 0.0,
         "edge_collapse_note": "Collapse is modeled as local loss of discriminability: relation redundancy plus separability degradation, converted into edge confidence and used for asymmetric guided cross-modal alignment. The stronger side stays unchanged while the weaker side interpolates toward the stronger topology expression.",
         "requested_local_node_confidence_mode": "none",
         "effective_local_node_confidence_mode": "none",
@@ -916,7 +1187,7 @@ def build_bidirectional_correction_weights(
     local_conf_diffusion_type="p_vs_p2_cosine",
     correction_score_mode="collapse_score",
     collapse_score_mode="edge_plus_neighborhood",
-    collapse_neighbor_topk=10,
+    collapse_neighbor_topk=15,
     collapse_score_weight_edge=1.0,
     collapse_score_weight_a2b=1.0,
     collapse_score_weight_b2a=1.0,
@@ -925,7 +1196,8 @@ def build_bidirectional_correction_weights(
     text_graph=None,
     local_relation_alpha=0.5,
     edge_confidence_tau=4.0,
-    asymmetric_correction_lambda=1.0,
+    asymmetric_correction_lambda=0.3,
+    correction_confidence_gap_delta=0.1,
     enable_directional_correction_gate=True,
     correction_gate_tau_high=0.6,
     correction_gate_tau_low=0.3,
@@ -972,6 +1244,7 @@ def build_bidirectional_correction_weights(
             local_relation_alpha=local_relation_alpha,
             edge_confidence_tau=edge_confidence_tau,
             asymmetric_correction_lambda=asymmetric_correction_lambda,
+            correction_confidence_gap_delta=correction_confidence_gap_delta,
         )
     raise ValueError(f"Unsupported correction score mode: {correction_score_mode}")
 
@@ -1029,7 +1302,7 @@ def apply_bidirectional_correction(image_graph, text_graph, alpha_txt_to_img, al
     )
 
 
-def apply_guided_edge_alignment(image_graph, text_graph, alpha_txt_to_img, alpha_img_to_txt):
+def apply_guided_edge_alignment(image_graph, text_graph, alpha_txt_to_img, alpha_img_to_txt, corrected_image_added_topk=5):
     image_graph = image_graph.tocsr().astype(np.float32)
     text_graph = text_graph.tocsr().astype(np.float32)
     union_keys, rows, cols = build_union_keys(image_graph, text_graph)
@@ -1047,10 +1320,16 @@ def apply_guided_edge_alignment(image_graph, text_graph, alpha_txt_to_img, alpha
     corrected_image_data = np.clip(corrected_image_data, 0.0, None).astype(np.float32)
     corrected_text_data = np.clip(corrected_text_data, 0.0, None).astype(np.float32)
 
-    corrected_image_directed = sparse.csr_matrix((corrected_image_data, (rows, cols)), shape=image_graph.shape, dtype=np.float32)
+    corrected_image_directed_pre = sparse.csr_matrix((corrected_image_data, (rows, cols)), shape=image_graph.shape, dtype=np.float32)
     corrected_text_directed = sparse.csr_matrix((corrected_text_data, (rows, cols)), shape=text_graph.shape, dtype=np.float32)
-    corrected_image_directed.eliminate_zeros()
+    corrected_image_directed_pre.eliminate_zeros()
     corrected_text_directed.eliminate_zeros()
+
+    corrected_image_directed, image_addition_diagnostics = limit_added_edges_per_node(
+        image_graph,
+        corrected_image_directed_pre,
+        added_topk=corrected_image_added_topk,
+    )
 
     corrected_image_symmetric = fuzzy_union_symmetrize(corrected_image_directed)
     corrected_text_symmetric = fuzzy_union_symmetrize(corrected_text_directed)
@@ -1061,6 +1340,7 @@ def apply_guided_edge_alignment(image_graph, text_graph, alpha_txt_to_img, alpha
         corrected_image_symmetric,
         corrected_text_directed,
         corrected_text_symmetric,
+        image_addition_diagnostics,
     )
 
 
@@ -1791,6 +2071,7 @@ def build_summary(
     unified_summary,
     unified_spectral_artifacts,
     correction_diagnostics,
+    stage2_module_diagnostics,
     fusion_diagnostics,
     effective_correction_fusion_mode,
 ):
@@ -1811,15 +2092,17 @@ def build_summary(
         "enable_stage4_lsrc": bool(getattr(args, "enable_stage4_lsrc", True)),
         "correction_score_mode": str(getattr(args, "correction_score_mode", "collapse_score")),
         "collapse_score_mode": str(getattr(args, "collapse_score_mode", "edge_plus_neighborhood")),
-        "collapse_neighbor_topk": int(getattr(args, "collapse_neighbor_topk", 10)),
+          "collapse_neighbor_topk": int(getattr(args, "collapse_neighbor_topk", 15)),
         "collapse_score_weight_edge": float(getattr(args, "collapse_score_weight_edge", 1.0)),
         "collapse_score_weight_a2b": float(getattr(args, "collapse_score_weight_a2b", 1.0)),
         "collapse_score_weight_b2a": float(getattr(args, "collapse_score_weight_b2a", 1.0)),
-        "collapse_score_weight_nbr2nbr": float(getattr(args, "collapse_score_weight_nbr2nbr", 1.0)),
-        "local_relation_alpha": float(getattr(args, "local_relation_alpha", 0.5)),
-        "edge_confidence_tau": float(getattr(args, "edge_confidence_tau", 4.0)),
-        "asymmetric_correction_lambda": float(getattr(args, "asymmetric_correction_lambda", 1.0)),
-        "tau_g": float(getattr(args, "tau_g", 0.5)),
+          "collapse_score_weight_nbr2nbr": float(getattr(args, "collapse_score_weight_nbr2nbr", 1.0)),
+          "local_relation_alpha": float(getattr(args, "local_relation_alpha", 0.5)),
+          "edge_confidence_tau": float(getattr(args, "edge_confidence_tau", 4.0)),
+          "asymmetric_correction_lambda": float(getattr(args, "asymmetric_correction_lambda", 0.3)),
+          "correction_confidence_gap_delta": float(getattr(args, "correction_confidence_gap_delta", 0.1)),
+          "corrected_image_added_topk": int(getattr(args, "corrected_image_added_topk", 5)),
+          "tau_g": float(getattr(args, "tau_g", 0.5)),
         "correction_eps": float(getattr(args, "correction_eps", 1e-8)),
         "enable_local_node_confidence": bool(getattr(args, "enable_local_node_confidence", False)),
         "local_node_confidence_mode": str(getattr(args, "local_node_confidence_mode", "multi_view")),
@@ -1875,6 +2158,7 @@ def build_summary(
         "corrected_summary": corrected_summary,
         "unified_summary": unified_summary,
         "correction_diagnostics": correction_diagnostics,
+        "stage2_module_diagnostics": stage2_module_diagnostics,
         "fusion_diagnostics": fusion_diagnostics,
         "unified_first_eigenvalues": [
             float(x) for x in unified_spectral_artifacts["eigvals"][: min(10, len(unified_spectral_artifacts["eigvals"]))]
@@ -1982,6 +2266,16 @@ def run_cross_modal_topology(args):
     correction_diagnostics = {}
     fusion_diagnostics = {}
     effective_correction_fusion_mode = str(getattr(args, "correction_fusion_mode", "thresholded_autonomy"))
+    image_added_edge_limit_diagnostics = {
+        "original_image_num_edges": int(image_bundle["graph"].nnz),
+        "corrected_image_num_edges_before_added_edge_limit": int(image_bundle["graph"].nnz),
+        "corrected_image_num_edges_after_added_edge_limit": int(image_bundle["graph"].nnz),
+        "num_added_edges_before_limit": 0,
+        "num_added_edges_after_limit": 0,
+        "mean_added_edges_per_node_before_limit": 0.0,
+        "mean_added_edges_per_node_after_limit": 0.0,
+        "corrected_image_added_topk": int(getattr(args, "corrected_image_added_topk", 5)),
+    }
     stage2_enabled = bool(getattr(args, "enable_stage2_correction", True))
     stage3_enabled = bool(getattr(args, "enable_stage3_fusion", True))
     stage4_enabled = bool(getattr(args, "enable_stage4_lsrc", True))
@@ -2011,6 +2305,9 @@ def run_cross_modal_topology(args):
             "stage2_enabled": False,
             "correction_mode": "disabled",
             "correction_note": "Stage-two asymmetric correction disabled for diagnostic ablation. Corrected graphs are identical to the stage-one modality graphs.",
+            "total_candidate_edges": int(build_union_keys(image_bundle["graph"], text_bundle["graph"])[0].shape[0]),
+            "gated_correction_edges": 0,
+            "correction_activation_ratio": 0.0,
         }
     elif correction_mode == "directional":
         if effective_correction_fusion_mode != "legacy":
@@ -2062,17 +2359,18 @@ def run_cross_modal_topology(args):
             collapse_score_weight_edge=getattr(args, "collapse_score_weight_edge", 1.0),
             collapse_score_weight_a2b=getattr(args, "collapse_score_weight_a2b", 1.0),
             collapse_score_weight_b2a=getattr(args, "collapse_score_weight_b2a", 1.0),
-            collapse_score_weight_nbr2nbr=getattr(args, "collapse_score_weight_nbr2nbr", 1.0),
-            image_graph=image_bundle["graph"],
-            text_graph=text_bundle["graph"],
-            local_relation_alpha=getattr(args, "local_relation_alpha", 0.5),
-            edge_confidence_tau=getattr(args, "edge_confidence_tau", 4.0),
-            asymmetric_correction_lambda=getattr(args, "asymmetric_correction_lambda", 1.0),
-            enable_directional_correction_gate=bool(getattr(args, "enable_directional_correction_gate", True)),
-            correction_gate_tau_high=getattr(args, "correction_gate_tau_high", 0.6),
-            correction_gate_tau_low=getattr(args, "correction_gate_tau_low", 0.3),
-            correction_gate_tau_gap=getattr(args, "correction_gate_tau_gap", 0.15),
-        )
+             collapse_score_weight_nbr2nbr=getattr(args, "collapse_score_weight_nbr2nbr", 1.0),
+             image_graph=image_bundle["graph"],
+             text_graph=text_bundle["graph"],
+             local_relation_alpha=getattr(args, "local_relation_alpha", 0.5),
+             edge_confidence_tau=getattr(args, "edge_confidence_tau", 4.0),
+             asymmetric_correction_lambda=getattr(args, "asymmetric_correction_lambda", 1.0),
+             correction_confidence_gap_delta=getattr(args, "correction_confidence_gap_delta", 0.1),
+             enable_directional_correction_gate=bool(getattr(args, "enable_directional_correction_gate", True)),
+             correction_gate_tau_high=getattr(args, "correction_gate_tau_high", 0.6),
+             correction_gate_tau_low=getattr(args, "correction_gate_tau_low", 0.3),
+             correction_gate_tau_gap=getattr(args, "correction_gate_tau_gap", 0.15),
+         )
         correction_score_mode = str(correction_diagnostics.get("correction_score_mode", getattr(args, "correction_score_mode", "collapse_score")))
         log_cross_modal(
             f"correction_score_mode={correction_score_mode}, "
@@ -2131,7 +2429,8 @@ def run_cross_modal_topology(args):
                 f"topk={correction_diagnostics.get('collapse_neighbor_topk', 10)}, "
                 f"relation_alpha={collapse_weights.get('relation_alpha', 0.5):.4f}, "
                 f"tau={collapse_weights.get('edge_confidence_tau', 4.0):.4f}, "
-                f"lambda={collapse_weights.get('asymmetric_correction_lambda', 1.0):.4f}"
+                f"lambda={collapse_weights.get('asymmetric_correction_lambda', 1.0):.4f}, "
+                f"gap_delta={collapse_weights.get('correction_confidence_gap_delta', 0.1):.4f}"
             )
             log_cross_modal(
                 "edge confidence stats: "
@@ -2207,12 +2506,23 @@ def run_cross_modal_topology(args):
                 corrected_image_symmetric,
                 corrected_text_directed,
                 corrected_text_symmetric,
+                image_added_edge_limit_diagnostics,
             ) = apply_guided_edge_alignment(
                 image_bundle["graph"],
                 text_bundle["graph"],
                 alpha_txt_to_img_used,
                 alpha_img_to_txt_used,
+                corrected_image_added_topk=getattr(args, "corrected_image_added_topk", 5),
             )
+        correction_diagnostics["image_added_edge_limit"] = image_added_edge_limit_diagnostics
+        log_cross_modal(
+            "corrected image added-edge limit: "
+            f"before_added={image_added_edge_limit_diagnostics['num_added_edges_before_limit']} "
+            f"after_added={image_added_edge_limit_diagnostics['num_added_edges_after_limit']} "
+            f"before_nnz={image_added_edge_limit_diagnostics['corrected_image_num_edges_before_added_edge_limit']} "
+            f"after_nnz={image_added_edge_limit_diagnostics['corrected_image_num_edges_after_added_edge_limit']} "
+            f"topk={image_added_edge_limit_diagnostics['corrected_image_added_topk']}"
+        )
     else:
         raise ValueError(f"Unsupported correction mode: {correction_mode}")
 
@@ -2227,12 +2537,42 @@ def run_cross_modal_topology(args):
         num_eigs=getattr(args, "num_eigs", 64),
         spectrum_solver_mode=getattr(args, "spectrum_solver_mode", "normalized_adjacency_largest"),
     )
+    stage2_module_diagnostics = compute_stage2_module_diagnostics(
+        image_bundle["graph"],
+        text_bundle["graph"],
+        corrected_image_symmetric,
+        corrected_text_symmetric,
+        neighbor_topk=getattr(args, "collapse_neighbor_topk", 10),
+        eps=getattr(args, "correction_eps", 1e-8),
+    )
+    stage2_module_diagnostics["image_added_edge_limit"] = image_added_edge_limit_diagnostics
     log_cross_modal(
         "corrected graph collapse: "
         f"A(collapse={corrected_image_collapse_metrics.get('collapse_score', 1.0):.4f}, "
         f"entropy={corrected_image_collapse_metrics.get('spectral_entropy', 0.0):.4f}) "
         f"B(collapse={corrected_text_collapse_metrics.get('collapse_score', 1.0):.4f}, "
         f"entropy={corrected_text_collapse_metrics.get('spectral_entropy', 0.0):.4f})"
+    )
+    similarity_before = stage2_module_diagnostics["graph_similarity_before"]
+    similarity_after = stage2_module_diagnostics["graph_similarity_after"]
+    similarity_shift = stage2_module_diagnostics["graph_similarity_shift"]
+    image_adjustment = stage2_module_diagnostics["image_edge_adjustment"]
+    text_adjustment = stage2_module_diagnostics["text_edge_adjustment"]
+    log_cross_modal(
+        "stage-two graph similarity: "
+        f"before(corr={similarity_before['edge_weight_correlation']:.4f}, topk_overlap={similarity_before['topk_neighbor_overlap_mean']:.4f}, support_jaccard={similarity_before['support_jaccard']:.4f}) "
+        f"after(corr={similarity_after['edge_weight_correlation']:.4f}, topk_overlap={similarity_after['topk_neighbor_overlap_mean']:.4f}, support_jaccard={similarity_after['support_jaccard']:.4f}) "
+        f"delta(corr={similarity_shift['edge_weight_correlation_delta']:.4f}, topk_overlap={similarity_shift['topk_neighbor_overlap_mean_delta']:.4f}, support_jaccard={similarity_shift['support_jaccard_delta']:.4f})"
+    )
+    log_cross_modal(
+        "stage-two edge adjustment coverage: "
+        f"A(changed={image_adjustment['changed_edge_ratio']:.4f}, up={image_adjustment['up_adjusted_ratio']:.4f}, down={image_adjustment['down_adjusted_ratio']:.4f}, mean_abs_delta={image_adjustment['mean_abs_delta']:.4f}) "
+        f"B(changed={text_adjustment['changed_edge_ratio']:.4f}, up={text_adjustment['up_adjusted_ratio']:.4f}, down={text_adjustment['down_adjusted_ratio']:.4f}, mean_abs_delta={text_adjustment['mean_abs_delta']:.4f})"
+    )
+    log_cross_modal(
+        "stage-two degree/entropy drift: "
+        f"A(degree_abs={stage2_module_diagnostics['image_degree_shift']['mean_abs_delta']:.4f}, entropy_abs={stage2_module_diagnostics['image_entropy_shift']['mean_abs_delta']:.4f}) "
+        f"B(degree_abs={stage2_module_diagnostics['text_degree_shift']['mean_abs_delta']:.4f}, entropy_abs={stage2_module_diagnostics['text_entropy_shift']['mean_abs_delta']:.4f})"
     )
 
     fusion_domain_mode = str(getattr(args, "fusion_domain_mode", "wavelet_latent"))
@@ -2349,6 +2689,7 @@ def run_cross_modal_topology(args):
         unified_summary,
         unified_spectral_artifacts,
         correction_diagnostics,
+        stage2_module_diagnostics,
         fusion_diagnostics,
         effective_correction_fusion_mode,
     )

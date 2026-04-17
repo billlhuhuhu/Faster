@@ -320,6 +320,9 @@ run_precompute_if_needed() {
     --collapse_score_weight_b2a "${COLLAPSE_SCORE_WEIGHT_B2A}" \
     --collapse_score_weight_nbr2nbr "${COLLAPSE_SCORE_WEIGHT_NBR2NBR}" \
     --collapse_neighbor_topk "${COLLAPSE_NEIGHBOR_TOPK}" \
+    --asymmetric_correction_lambda "${ASYMMETRIC_CORRECTION_LAMBDA}" \
+    --correction_confidence_gap_delta "${CORRECTION_CONFIDENCE_GAP_DELTA}" \
+    --corrected_image_added_topk "${CORRECTED_IMAGE_ADDED_TOPK}" \
     --fusion_domain_mode "${FUSION_DOMAIN_MODE}" \
     --fusion_mode "${FUSION_MODE}" \
     --wavelet_fusion_scales "${WAVELET_FUSION_SCALES}" \
