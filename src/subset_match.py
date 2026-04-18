@@ -53,10 +53,15 @@ def load_feature_cache(feature_dir):
     txt_features = torch.load(txt_path, map_location="cpu")
     with open(feature_dir / "sample_meta.json", "r", encoding="utf-8") as handle:
         sample_meta = json.load(handle)
+    feature_info = {}
+    feature_info_path = feature_dir / "feature_info.json"
+    if feature_info_path.exists():
+        with open(feature_info_path, "r", encoding="utf-8") as handle:
+            feature_info = json.load(handle)
 
     img_features = img_features.float().cpu().numpy()
     txt_features = txt_features.float().cpu().numpy()
-    return img_features, txt_features, sample_meta
+    return img_features, txt_features, sample_meta, feature_info
 
 
 def load_unified_artifacts(cross_modal_dir):
@@ -820,6 +825,8 @@ def compute_selection_summary(
         "num_samples": int(num_samples),
         "representation_mode": args.representation_mode,
         "selection_method": getattr(args, "selection_method", "baseline"),
+        "image_feature_mode": getattr(args, "_image_feature_mode", None),
+        "text_feature_mode": getattr(args, "_text_feature_mode", None),
         "selection_seed": int(getattr(args, "random_state", 0)),
         "cluster_method": getattr(args, "cluster_method", None),
         "degree_weight": float(args.degree_weight),
@@ -1193,7 +1200,7 @@ def run_subset_selection(args):
     feature_dir = build_feature_dir(args)
     cross_modal_dir = build_cross_modal_dir(args)
 
-    img_features, txt_features, sample_meta = load_feature_cache(feature_dir)
+    img_features, txt_features, sample_meta, feature_info = load_feature_cache(feature_dir)
     unified_graph, spectral_embedding, cross_modal_summary, lsrc_image_graph, lsrc_text_graph = load_unified_artifacts(cross_modal_dir)
 
     if img_features.shape[0] != txt_features.shape[0] or img_features.shape[0] != len(sample_meta):
@@ -1204,6 +1211,8 @@ def run_subset_selection(args):
         raise ValueError("Unified spectral embedding node count does not match sample_meta length.")
 
     representation = build_unified_representation(img_features, txt_features, mode=args.representation_mode)
+    args._image_feature_mode = feature_info.get("selection_image_repr_method")
+    args._text_feature_mode = feature_info.get("selection_text_repr_method")
     args._spectral_embedding = spectral_embedding
     args._embedding_type = str(cross_modal_summary.get("embedding_type", "laplacian"))
     args._lsrc_image_graph = lsrc_image_graph

@@ -113,6 +113,15 @@ def build_selection_feature_cache(dataset, args):
         color_hist_bins=args.color_hist_bins,
         raw_resize_size=args.selection_raw_resize_size,
         raw_pca_dim=args.selection_raw_pca_dim,
+        raw_pixel_resize=args.raw_pixel_resize,
+        raw_pixel_color_mode=args.raw_pixel_color_mode,
+        raw_pixel_flatten=args.raw_pixel_flatten,
+        raw_pixel_pca_dim=args.raw_pixel_pca_dim,
+        bovw_codebook_size=args.bovw_codebook_size,
+        dense_sift_step=args.dense_sift_step,
+        dense_sift_patch=args.dense_sift_patch,
+        bovw_max_fit_descriptors=args.bovw_max_fit_descriptors,
+        bovw_descriptors_per_image=args.bovw_descriptors_per_image,
         batch_size=args.selection_image_batch_size,
         random_state=args.selection_random_state,
     )
@@ -301,6 +310,25 @@ def save_feature_cache(cache, cache_dir, args):
                 "selection_text_batch_size": int(args.selection_text_batch_size),
             }
         )
+        if args.selection_image_repr_method == "raw_pixels_pca":
+            info.update(
+                {
+                    "raw_pixel_resize": int(args.raw_pixel_resize),
+                    "raw_pixel_color_mode": args.raw_pixel_color_mode,
+                    "raw_pixel_flatten": bool(args.raw_pixel_flatten),
+                    "raw_pixel_pca_dim": int(args.raw_pixel_pca_dim),
+                }
+            )
+        if args.selection_image_repr_method == "dense_sift_bovw":
+            info.update(
+                {
+                    "bovw_codebook_size": int(args.bovw_codebook_size),
+                    "dense_sift_step": int(args.dense_sift_step),
+                    "dense_sift_patch": int(args.dense_sift_patch),
+                    "bovw_max_fit_descriptors": int(args.bovw_max_fit_descriptors),
+                    "bovw_descriptors_per_image": int(args.bovw_descriptors_per_image),
+                }
+            )
         if args.selection_text_repr_method == "tfidf":
             info.update(
                 {

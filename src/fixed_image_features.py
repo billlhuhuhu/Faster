@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 from sklearn.decomposition import IncrementalPCA
+from sklearn.cluster import MiniBatchKMeans
 from tqdm import tqdm
 
 
@@ -194,6 +195,150 @@ def _extract_raw_pixel_vector(image_path, raw_resize_size=32):
     return vector
 
 
+def _open_image_gray_uint8(image_path, image_size):
+    image = Image.open(image_path).convert("L")
+    image = image.resize((int(image_size), int(image_size)), Image.BICUBIC)
+    return np.asarray(image, dtype=np.uint8)
+
+
+def _extract_raw_pixel_vector_v2(image_path, raw_pixel_resize=64, raw_pixel_color_mode="rgb", raw_pixel_flatten=True):
+    raw_pixel_color_mode = str(raw_pixel_color_mode).lower()
+    if raw_pixel_color_mode == "rgb":
+        image = _open_image_rgb(image_path, image_size=raw_pixel_resize)
+    elif raw_pixel_color_mode in {"gray", "grayscale", "l"}:
+        gray = _open_image_gray_uint8(image_path, image_size=raw_pixel_resize).astype(np.float32) / 255.0
+        image = gray[..., None]
+    else:
+        raise ValueError(f"Unsupported raw pixel color mode: {raw_pixel_color_mode}")
+
+    if raw_pixel_flatten:
+        return image.reshape(-1).astype(np.float32)
+    return image.astype(np.float32)
+
+
+def _sample_dense_sift_keypoints(image_shape, step=8, patch=16):
+    height, width = int(image_shape[0]), int(image_shape[1])
+    step = max(1, int(step))
+    patch = max(4, int(patch))
+    radius = max(1, patch // 2)
+    xs = list(range(radius, max(width - radius, radius + 1), step))
+    ys = list(range(radius, max(height - radius, radius + 1), step))
+    if not xs:
+        xs = [max(width // 2, 1)]
+    if not ys:
+        ys = [max(height // 2, 1)]
+    try:
+        import cv2
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError("opencv-python is required for dense_sift_bovw image features.") from exc
+    keypoints = [cv2.KeyPoint(float(x), float(y), float(patch)) for y in ys for x in xs]
+    return keypoints
+
+
+def extract_dense_sift_descriptors(image_path, image_size=128, step=8, patch=16):
+    try:
+        import cv2
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError("opencv-python is required for dense_sift_bovw image features.") from exc
+
+    if not hasattr(cv2, "SIFT_create"):
+        raise RuntimeError("Current OpenCV build does not provide SIFT_create required by dense_sift_bovw.")
+
+    image_gray = _open_image_gray_uint8(image_path, image_size=image_size)
+    sift = cv2.SIFT_create()
+    keypoints = _sample_dense_sift_keypoints(image_gray.shape, step=step, patch=patch)
+    _, descriptors = sift.compute(image_gray, keypoints)
+    if descriptors is None or descriptors.size == 0:
+        return np.zeros((0, 128), dtype=np.float32)
+    return descriptors.astype(np.float32, copy=False)
+
+
+def _sample_descriptors(descriptors, max_count, random_state):
+    if descriptors.shape[0] <= max_count:
+        return descriptors.astype(np.float32, copy=False)
+    rng = np.random.default_rng(int(random_state))
+    selected = rng.choice(descriptors.shape[0], size=int(max_count), replace=False)
+    return descriptors[selected].astype(np.float32, copy=False)
+
+
+def extract_dense_sift_bovw_features(
+    image_paths,
+    image_size=128,
+    bovw_codebook_size=512,
+    dense_sift_step=8,
+    dense_sift_patch=16,
+    random_state=0,
+    bovw_max_fit_descriptors=200000,
+    bovw_descriptors_per_image=200,
+):
+    image_paths = [str(item) for item in image_paths]
+    descriptor_samples = []
+    codebook_size = max(8, int(bovw_codebook_size))
+    max_fit_descriptors = max(codebook_size, int(bovw_max_fit_descriptors))
+
+    for image_path in tqdm(image_paths, desc="Sampling dense SIFT descriptors for BoVW"):
+        descriptors = extract_dense_sift_descriptors(
+            image_path,
+            image_size=image_size,
+            step=dense_sift_step,
+            patch=dense_sift_patch,
+        )
+        if descriptors.shape[0] == 0:
+            continue
+        sampled = _sample_descriptors(
+            descriptors,
+            max_count=max(1, int(bovw_descriptors_per_image)),
+            random_state=random_state + len(descriptor_samples),
+        )
+        descriptor_samples.append(sampled)
+
+    if not descriptor_samples:
+        raise RuntimeError("No dense SIFT descriptors were extracted; cannot build BoVW codebook.")
+
+    fit_matrix = np.concatenate(descriptor_samples, axis=0).astype(np.float32, copy=False)
+    if fit_matrix.shape[0] > max_fit_descriptors:
+        fit_matrix = _sample_descriptors(fit_matrix, max_fit_descriptors, random_state=random_state)
+
+    effective_codebook = min(codebook_size, fit_matrix.shape[0])
+    if effective_codebook <= 1:
+        raise RuntimeError("Not enough sampled dense SIFT descriptors to build a BoVW codebook.")
+
+    kmeans = MiniBatchKMeans(
+        n_clusters=effective_codebook,
+        random_state=int(random_state),
+        batch_size=min(4096, max(256, effective_codebook * 8)),
+        n_init=3,
+    )
+    kmeans.fit(fit_matrix)
+
+    histograms = []
+    for image_path in tqdm(image_paths, desc="Encoding dense SIFT BoVW histograms"):
+        descriptors = extract_dense_sift_descriptors(
+            image_path,
+            image_size=image_size,
+            step=dense_sift_step,
+            patch=dense_sift_patch,
+        )
+        hist = np.zeros(effective_codebook, dtype=np.float32)
+        if descriptors.shape[0] > 0:
+            words = kmeans.predict(descriptors)
+            counts = np.bincount(words, minlength=effective_codebook).astype(np.float32)
+            hist = counts / max(float(counts.sum()), 1e-12)
+        histograms.append(_l2_normalize(hist))
+
+    features = np.stack(histograms, axis=0).astype(np.float32)
+    info = {
+        "image_size": int(image_size),
+        "bovw_codebook_size": int(effective_codebook),
+        "dense_sift_step": int(dense_sift_step),
+        "dense_sift_patch": int(dense_sift_patch),
+        "bovw_max_fit_descriptors": int(max_fit_descriptors),
+        "bovw_descriptors_per_image": int(bovw_descriptors_per_image),
+        "random_state": int(random_state),
+    }
+    return features, info
+
+
 def extract_raw_pca_features(
     image_paths,
     raw_resize_size=32,
@@ -238,6 +383,76 @@ def extract_raw_pca_features(
     return features, info
 
 
+def extract_raw_pixels_pca_features(
+    image_paths,
+    raw_pixel_resize=64,
+    raw_pixel_color_mode="rgb",
+    raw_pixel_flatten=True,
+    raw_pixel_pca_dim=256,
+    random_state=0,
+    batch_size=512,
+):
+    image_paths = [str(item) for item in image_paths]
+    sample_vector = _extract_raw_pixel_vector_v2(
+        image_paths[0],
+        raw_pixel_resize=raw_pixel_resize,
+        raw_pixel_color_mode=raw_pixel_color_mode,
+        raw_pixel_flatten=raw_pixel_flatten,
+    )
+    raw_dim = int(sample_vector.size)
+    target_dim = min(int(raw_pixel_pca_dim), raw_dim, len(image_paths))
+    if target_dim <= 0:
+        raise ValueError("raw_pixel_pca_dim must be positive for raw_pixels_pca features.")
+
+    ipca = IncrementalPCA(n_components=target_dim, batch_size=int(batch_size))
+    for start in tqdm(range(0, len(image_paths), int(batch_size)), desc="Fitting raw-pixels PCA"):
+        batch_paths = image_paths[start : start + int(batch_size)]
+        batch = np.stack(
+            [
+                _extract_raw_pixel_vector_v2(
+                    path,
+                    raw_pixel_resize=raw_pixel_resize,
+                    raw_pixel_color_mode=raw_pixel_color_mode,
+                    raw_pixel_flatten=raw_pixel_flatten,
+                )
+                for path in batch_paths
+            ],
+            axis=0,
+        )
+        ipca.partial_fit(batch)
+
+    transformed_chunks = []
+    for start in tqdm(range(0, len(image_paths), int(batch_size)), desc="Transforming raw-pixels PCA"):
+        batch_paths = image_paths[start : start + int(batch_size)]
+        batch = np.stack(
+            [
+                _extract_raw_pixel_vector_v2(
+                    path,
+                    raw_pixel_resize=raw_pixel_resize,
+                    raw_pixel_color_mode=raw_pixel_color_mode,
+                    raw_pixel_flatten=raw_pixel_flatten,
+                )
+                for path in batch_paths
+            ],
+            axis=0,
+        )
+        transformed = ipca.transform(batch).astype(np.float32, copy=False)
+        norms = np.linalg.norm(transformed, axis=1, keepdims=True)
+        norms = np.maximum(norms, 1e-12)
+        transformed_chunks.append((transformed / norms).astype(np.float32, copy=False))
+
+    features = np.concatenate(transformed_chunks, axis=0).astype(np.float32, copy=False)
+    info = {
+        "raw_pixel_resize": int(raw_pixel_resize),
+        "raw_pixel_color_mode": str(raw_pixel_color_mode),
+        "raw_pixel_flatten": bool(raw_pixel_flatten),
+        "raw_pixel_pca_dim": int(features.shape[1]),
+        "pca_explained_variance": float(np.sum(getattr(ipca, "explained_variance_ratio_", np.array([0.0], dtype=np.float32)))),
+        "random_state": int(random_state),
+    }
+    return features, info
+
+
 def extract_fixed_image_features(
     image_paths,
     method="hog_color",
@@ -249,6 +464,15 @@ def extract_fixed_image_features(
     color_hist_bins=16,
     raw_resize_size=32,
     raw_pca_dim=256,
+    raw_pixel_resize=64,
+    raw_pixel_color_mode="rgb",
+    raw_pixel_flatten=True,
+    raw_pixel_pca_dim=256,
+    bovw_codebook_size=512,
+    dense_sift_step=8,
+    dense_sift_patch=16,
+    bovw_max_fit_descriptors=200000,
+    bovw_descriptors_per_image=200,
     batch_size=None,
     random_state=0,
 ):
@@ -285,6 +509,33 @@ def extract_fixed_image_features(
             pca_dim=raw_pca_dim,
             random_state=random_state,
             batch_size=batch_size or 512,
+        )
+        info["selection_image_repr_method"] = method
+        return features, info
+
+    if method == "raw_pixels_pca":
+        features, info = extract_raw_pixels_pca_features(
+            image_paths,
+            raw_pixel_resize=raw_pixel_resize,
+            raw_pixel_color_mode=raw_pixel_color_mode,
+            raw_pixel_flatten=raw_pixel_flatten,
+            raw_pixel_pca_dim=raw_pixel_pca_dim,
+            random_state=random_state,
+            batch_size=batch_size or 512,
+        )
+        info["selection_image_repr_method"] = method
+        return features, info
+
+    if method == "dense_sift_bovw":
+        features, info = extract_dense_sift_bovw_features(
+            image_paths,
+            image_size=image_size,
+            bovw_codebook_size=bovw_codebook_size,
+            dense_sift_step=dense_sift_step,
+            dense_sift_patch=dense_sift_patch,
+            random_state=random_state,
+            bovw_max_fit_descriptors=bovw_max_fit_descriptors,
+            bovw_descriptors_per_image=bovw_descriptors_per_image,
         )
         info["selection_image_repr_method"] = method
         return features, info

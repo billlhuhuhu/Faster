@@ -84,6 +84,14 @@ def load_sample_meta(feature_dir):
         return json.load(handle)
 
 
+def load_feature_info(feature_dir):
+    info_path = Path(feature_dir) / "feature_info.json"
+    if not info_path.exists():
+        return {}
+    with open(info_path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
 def maybe_truncate(features, sample_meta, max_samples=None):
     if max_samples is None:
         return features, sample_meta
@@ -647,6 +655,8 @@ def summarize_results(args, features, knn_indices, sym_graph, eigenvalues, colla
         "modality": args.modality,
         "image_encoder": args.image_encoder,
         "text_encoder": args.text_encoder,
+        "selection_image_repr_method": getattr(args, "selection_image_repr_method", None),
+        "selection_text_repr_method": getattr(args, "selection_text_repr_method", None),
         "metric": args.metric,
         "knn_backend": getattr(args, "resolved_knn_backend", getattr(args, "knn_backend", "sklearn")),
         "k": int(args.k),
@@ -730,6 +740,9 @@ def run_topology_graph(args):
     print(f"[topology] loading features from {feature_dir} for modality={args.modality}")
     features = load_feature_tensor(feature_dir, args.modality)
     sample_meta = load_sample_meta(feature_dir)
+    feature_info = load_feature_info(feature_dir)
+    args.selection_image_repr_method = feature_info.get("selection_image_repr_method")
+    args.selection_text_repr_method = feature_info.get("selection_text_repr_method")
     features, sample_meta = maybe_truncate(features, sample_meta, args.max_samples)
     args.original_feature_dim = int(features.shape[1])
     print(f"[topology] feature shape: {features.shape}")

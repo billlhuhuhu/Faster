@@ -1067,9 +1067,8 @@ def build_collapse_score_bidirectional_correction_weights(
     )
 
     lambda_corr = float(np.clip(asymmetric_correction_lambda, 0.0, 1.0))
-    confidence_gap_delta = max(float(correction_confidence_gap_delta), 0.0)
-    txt_stronger_mask = ((q_txt - q_img) > confidence_gap_delta).astype(np.float32)
-    img_stronger_mask = ((q_img - q_txt) > confidence_gap_delta).astype(np.float32)
+    txt_stronger_mask = (q_txt >= q_img).astype(np.float32)
+    img_stronger_mask = (q_img > q_txt).astype(np.float32)
     weak_img_alignment_weight = (
         lambda_corr * np.maximum(1.0 - (q_img / (q_txt + float(eps))), 0.0) * txt_stronger_mask
     ).astype(np.float32)
@@ -1078,7 +1077,6 @@ def build_collapse_score_bidirectional_correction_weights(
     ).astype(np.float32)
     weak_img_alignment_weight = np.clip(weak_img_alignment_weight, 0.0, 1.0).astype(np.float32)
     weak_txt_alignment_weight = np.clip(weak_txt_alignment_weight, 0.0, 1.0).astype(np.float32)
-    gated_mask = (txt_stronger_mask > 0) | (img_stronger_mask > 0)
 
     alpha_txt_to_img = sparse_matrix_from_union_keys(union_keys, weak_img_alignment_weight, image_graph.shape)
     alpha_img_to_txt = sparse_matrix_from_union_keys(union_keys, weak_txt_alignment_weight, image_graph.shape)
@@ -1091,11 +1089,12 @@ def build_collapse_score_bidirectional_correction_weights(
             "relation_alpha": float(local_relation_alpha),
             "edge_confidence_tau": float(edge_confidence_tau),
             "asymmetric_correction_lambda": float(lambda_corr),
-            "correction_confidence_gap_delta": float(confidence_gap_delta),
+            "correction_confidence_gap_delta": 0.0,
         },
         "total_candidate_edges": int(union_keys.shape[0]),
-        "gated_correction_edges": int(np.count_nonzero(gated_mask)),
-        "correction_activation_ratio": float(np.count_nonzero(gated_mask) / max(int(union_keys.shape[0]), 1)),
+        "gated_correction_edges": int(union_keys.shape[0]),
+        "correction_activation_ratio": 1.0 if int(union_keys.shape[0]) > 0 else 0.0,
+        "correction_gate_enabled": False,
         "image_q_stats": image_q_diag["edge_confidence_stats"],
         "text_q_stats": text_q_diag["edge_confidence_stats"],
         "image_q_components": {
@@ -1118,8 +1117,8 @@ def build_collapse_score_bidirectional_correction_weights(
         "alpha_i2t_stats_after_gate": summarize_vector(weak_txt_alignment_weight),
         "weak_side_alignment_weight_t2i_stats": summarize_vector(weak_img_alignment_weight),
         "weak_side_alignment_weight_i2t_stats": summarize_vector(weak_txt_alignment_weight),
-        "gate_activation_ratio_t2i": float(np.mean(txt_stronger_mask)) if txt_stronger_mask.size else 0.0,
-        "gate_activation_ratio_i2t": float(np.mean(img_stronger_mask)) if img_stronger_mask.size else 0.0,
+        "gate_activation_ratio_t2i": 1.0 if txt_stronger_mask.size else 0.0,
+        "gate_activation_ratio_i2t": 1.0 if img_stronger_mask.size else 0.0,
         "edge_collapse_note": "Collapse is modeled as local loss of discriminability: relation redundancy plus separability degradation, converted into edge confidence and used for asymmetric guided cross-modal alignment. The stronger side stays unchanged while the weaker side interpolates toward the stronger topology expression.",
         "requested_local_node_confidence_mode": "none",
         "effective_local_node_confidence_mode": "none",
@@ -2080,6 +2079,8 @@ def build_summary(
         "split": args.split,
         "image_encoder": args.image_encoder,
         "text_encoder": args.text_encoder,
+        "image_feature_mode": image_bundle.get("summary", {}).get("selection_image_repr_method"),
+        "text_feature_mode": text_bundle.get("summary", {}).get("selection_text_repr_method"),
         "metric": args.metric,
         "image_metric": get_modality_metric(args, "image"),
         "text_metric": get_modality_metric(args, "text"),
@@ -2100,7 +2101,7 @@ def build_summary(
           "local_relation_alpha": float(getattr(args, "local_relation_alpha", 0.5)),
           "edge_confidence_tau": float(getattr(args, "edge_confidence_tau", 4.0)),
           "asymmetric_correction_lambda": float(getattr(args, "asymmetric_correction_lambda", 0.3)),
-          "correction_confidence_gap_delta": float(getattr(args, "correction_confidence_gap_delta", 0.1)),
+          "correction_confidence_gap_delta": 0.0,
           "corrected_image_added_topk": int(getattr(args, "corrected_image_added_topk", 5)),
           "tau_g": float(getattr(args, "tau_g", 0.5)),
         "correction_eps": float(getattr(args, "correction_eps", 1e-8)),
@@ -2430,7 +2431,7 @@ def run_cross_modal_topology(args):
                 f"relation_alpha={collapse_weights.get('relation_alpha', 0.5):.4f}, "
                 f"tau={collapse_weights.get('edge_confidence_tau', 4.0):.4f}, "
                 f"lambda={collapse_weights.get('asymmetric_correction_lambda', 1.0):.4f}, "
-                f"gap_delta={collapse_weights.get('correction_confidence_gap_delta', 0.1):.4f}"
+                "confidence_gap_gate=disabled"
             )
             log_cross_modal(
                 "edge confidence stats: "
