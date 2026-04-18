@@ -235,22 +235,114 @@ def _sample_dense_sift_keypoints(image_shape, step=8, patch=16):
     return keypoints
 
 
+def _compute_gradients(gray_image):
+    gray_image = np.asarray(gray_image, dtype=np.float32)
+    gx = np.zeros_like(gray_image, dtype=np.float32)
+    gy = np.zeros_like(gray_image, dtype=np.float32)
+    gx[:, 1:-1] = gray_image[:, 2:] - gray_image[:, :-2]
+    gx[:, 0] = gray_image[:, 1] - gray_image[:, 0]
+    gx[:, -1] = gray_image[:, -1] - gray_image[:, -2]
+    gy[1:-1, :] = gray_image[2:, :] - gray_image[:-2, :]
+    gy[0, :] = gray_image[1, :] - gray_image[0, :]
+    gy[-1, :] = gray_image[-1, :] - gray_image[-2, :]
+    magnitude = np.sqrt(gx ** 2 + gy ** 2).astype(np.float32)
+    orientation = (np.degrees(np.arctan2(gy, gx)) % 360.0).astype(np.float32)
+    return magnitude, orientation
+
+
+def _dense_grid_centers(image_shape, step=8, patch=16):
+    height, width = int(image_shape[0]), int(image_shape[1])
+    step = max(1, int(step))
+    patch = max(4, int(patch))
+    radius = max(1, patch // 2)
+    xs = list(range(radius, max(width - radius, radius + 1), step))
+    ys = list(range(radius, max(height - radius, radius + 1), step))
+    if not xs:
+        xs = [max(width // 2, 1)]
+    if not ys:
+        ys = [max(height // 2, 1)]
+    return [(int(y), int(x)) for y in ys for x in xs]
+
+
+def _compute_dense_sift_like_descriptors(gray_image, step=8, patch=16, spatial_bins=4, orientation_bins=8):
+    patch = max(4, int(patch))
+    spatial_bins = max(1, int(spatial_bins))
+    orientation_bins = max(1, int(orientation_bins))
+    patch = int(math.ceil(patch / spatial_bins) * spatial_bins)
+    radius = patch // 2
+
+    gray_image = np.asarray(gray_image, dtype=np.float32)
+    magnitude, orientation = _compute_gradients(gray_image)
+    centers = _dense_grid_centers(gray_image.shape, step=step, patch=patch)
+    bin_width = 360.0 / float(orientation_bins)
+    descriptors = []
+
+    padded_mag = np.pad(magnitude, radius, mode="reflect")
+    padded_ori = np.pad(orientation, radius, mode="reflect")
+
+    for center_y, center_x in centers:
+        cy = center_y + radius
+        cx = center_x + radius
+        mag_patch = padded_mag[cy - radius:cy + radius, cx - radius:cx + radius]
+        ori_patch = padded_ori[cy - radius:cy + radius, cx - radius:cx + radius]
+        if mag_patch.shape != (patch, patch) or ori_patch.shape != (patch, patch):
+            continue
+
+        descriptor_parts = []
+        cell_size = patch // spatial_bins
+        for sy in range(spatial_bins):
+            for sx in range(spatial_bins):
+                y0 = sy * cell_size
+                y1 = y0 + cell_size
+                x0 = sx * cell_size
+                x1 = x0 + cell_size
+                cell_mag = mag_patch[y0:y1, x0:x1].reshape(-1)
+                cell_ori = ori_patch[y0:y1, x0:x1].reshape(-1)
+                cell_hist = np.zeros(orientation_bins, dtype=np.float32)
+                bin_indices = np.floor(cell_ori / bin_width).astype(np.int64)
+                bin_indices = np.clip(bin_indices, 0, orientation_bins - 1)
+                for bin_idx in range(orientation_bins):
+                    mask = bin_indices == bin_idx
+                    if np.any(mask):
+                        cell_hist[bin_idx] = float(cell_mag[mask].sum())
+                descriptor_parts.append(cell_hist)
+
+        descriptor = np.concatenate(descriptor_parts, axis=0).astype(np.float32, copy=False)
+        norm = float(np.linalg.norm(descriptor))
+        if norm > 1e-12:
+            descriptor = descriptor / norm
+            descriptor = np.clip(descriptor, 0.0, 0.2)
+            descriptor = descriptor / max(float(np.linalg.norm(descriptor)), 1e-12)
+        descriptors.append(descriptor.astype(np.float32, copy=False))
+
+    if not descriptors:
+        return np.zeros((0, spatial_bins * spatial_bins * orientation_bins), dtype=np.float32)
+    return np.stack(descriptors, axis=0).astype(np.float32, copy=False)
+
+
 def extract_dense_sift_descriptors(image_path, image_size=128, step=8, patch=16):
+    image_gray = _open_image_gray_uint8(image_path, image_size=image_size)
     try:
         import cv2
-    except ImportError as exc:  # pragma: no cover
-        raise ImportError("opencv-python is required for dense_sift_bovw image features.") from exc
+        if hasattr(cv2, "SIFT_create"):
+            sift = cv2.SIFT_create()
+            keypoints = _sample_dense_sift_keypoints(image_gray.shape, step=step, patch=patch)
+            _, descriptors = sift.compute(image_gray, keypoints)
+            if descriptors is None or descriptors.size == 0:
+                return np.zeros((0, 128), dtype=np.float32)
+            return descriptors.astype(np.float32, copy=False)
+    except Exception:
+        pass
 
-    if not hasattr(cv2, "SIFT_create"):
-        raise RuntimeError("Current OpenCV build does not provide SIFT_create required by dense_sift_bovw.")
-
-    image_gray = _open_image_gray_uint8(image_path, image_size=image_size)
-    sift = cv2.SIFT_create()
-    keypoints = _sample_dense_sift_keypoints(image_gray.shape, step=step, patch=patch)
-    _, descriptors = sift.compute(image_gray, keypoints)
-    if descriptors is None or descriptors.size == 0:
-        return np.zeros((0, 128), dtype=np.float32)
-    return descriptors.astype(np.float32, copy=False)
+    # Fallback for headless servers without libGL/OpenCV runtime support:
+    # keep the same dense local-gradient + BoVW structure using a NumPy SIFT-like descriptor.
+    return _compute_dense_sift_like_descriptors(
+        image_gray.astype(np.float32) / 255.0,
+        step=step,
+        patch=patch,
+        spatial_bins=4,
+        orientation_bins=8,
+    )
 
 
 def _sample_descriptors(descriptors, max_count, random_state):
