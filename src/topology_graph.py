@@ -114,6 +114,11 @@ def preprocess_features_for_knn(features, method="none", target_dim=None, random
     if method == "pca":
         transformer = PCA(n_components=target_dim, svd_solver="randomized", random_state=int(random_state))
         reduced = transformer.fit_transform(features).astype(np.float32)
+    elif method == "zca":
+        reduced = apply_zca_whitening(
+            features,
+            n_components=target_dim,
+        ).astype(np.float32)
     elif method == "random_projection":
         transformer = GaussianRandomProjection(n_components=target_dim, random_state=int(random_state))
         reduced = transformer.fit_transform(features).astype(np.float32)
@@ -134,6 +139,19 @@ def reduce_graph_features(features, method="pca", target_dim=256, random_state=0
         target_dim=target_dim,
         random_state=random_state,
     )
+
+
+def apply_zca_whitening(features, n_components=256, eps=1e-5):
+    """
+    ZCA 白化：先 PCA 降维，再做方差归一化，均等化各主成分贡献。
+    eps 为正则化项，防止小特征值导致数值爆炸。
+    """
+    features = np.asarray(features, dtype=np.float32)
+    pca = PCA(n_components=int(n_components))
+    x_pca = pca.fit_transform(features).astype(np.float32, copy=False)
+    std = np.sqrt(np.asarray(pca.explained_variance_, dtype=np.float32)) + float(eps)
+    x_zca = x_pca / std
+    return x_zca.astype(np.float32, copy=False)
 
 
 def normalize_for_cosine(features, eps=1e-12):
@@ -748,6 +766,8 @@ def run_topology_graph(args):
     print(f"[topology] feature shape: {features.shape}")
 
     graph_reduce_method = getattr(args, "graph_reduce_method", getattr(args, "pre_knn_method", "none"))
+    if str(getattr(args, "modality", "")).lower() == "image" and graph_reduce_method == "pca":
+        graph_reduce_method = "zca"
     graph_feature_dim = getattr(args, "graph_feature_dim", getattr(args, "pre_knn_dim", None))
     reduced_features, reduction_info = reduce_graph_features(
         features,

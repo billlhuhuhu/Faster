@@ -122,6 +122,9 @@ def build_selection_feature_cache(dataset, args):
         dense_sift_patch=args.dense_sift_patch,
         bovw_max_fit_descriptors=args.bovw_max_fit_descriptors,
         bovw_descriptors_per_image=args.bovw_descriptors_per_image,
+        histogram_whitening_pca_dim=args.histogram_whitening_pca_dim,
+        pca_whitening_eps=args.pca_whitening_eps,
+        chi2_sample_steps=args.chi2_sample_steps,
         batch_size=args.selection_image_batch_size,
         random_state=args.selection_random_state,
     )
@@ -327,6 +330,14 @@ def save_feature_cache(cache, cache_dir, args):
                     "dense_sift_patch": int(args.dense_sift_patch),
                     "bovw_max_fit_descriptors": int(args.bovw_max_fit_descriptors),
                     "bovw_descriptors_per_image": int(args.bovw_descriptors_per_image),
+                }
+            )
+        if args.selection_image_repr_method in {"hog_color_hellinger_pca_whitening", "hog_color_chi2_pca_whitening"}:
+            info.update(
+                {
+                    "histogram_whitening_pca_dim": int(args.histogram_whitening_pca_dim),
+                    "pca_whitening_eps": float(args.pca_whitening_eps),
+                    "chi2_sample_steps": int(args.chi2_sample_steps),
                 }
             )
         if args.selection_text_repr_method == "tfidf":

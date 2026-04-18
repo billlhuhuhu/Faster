@@ -243,6 +243,9 @@ run_precompute_if_needed() {
       --dense_sift_patch "${DENSE_SIFT_PATCH}" \
       --bovw_max_fit_descriptors "${BOVW_MAX_FIT_DESCRIPTORS}" \
       --bovw_descriptors_per_image "${BOVW_DESCRIPTORS_PER_IMAGE}" \
+      --histogram_whitening_pca_dim "${HISTOGRAM_WHITENING_PCA_DIM}" \
+      --pca_whitening_eps "${PCA_WHITENING_EPS}" \
+      --chi2_sample_steps "${CHI2_SAMPLE_STEPS}" \
       --hog_orientations "${HOG_ORIENTATIONS}" \
       --hog_pixels_per_cell "${HOG_PIXELS_PER_CELL}" \
       --hog_cells_per_block "${HOG_CELLS_PER_BLOCK}" \

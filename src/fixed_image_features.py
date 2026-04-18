@@ -186,7 +186,49 @@ def extract_hog_color_features(
         color_space=color_space,
         color_hist_bins=color_hist_bins,
     )
-    return _l2_normalize(np.concatenate([hog_feat, color_feat], axis=0))
+    features = np.concatenate([hog_feat, color_feat], axis=0)
+    # Hellinger 变换：将欧氏距离隐式切换为 Hellinger 距离，修复 HOG/颜色直方图在欧氏空间的局部距离退化问题
+    features = np.sqrt(np.clip(features, 0, None))
+    return _l2_normalize(features)
+
+
+def _extract_hog_color_base_features(
+    image_path,
+    image_size=128,
+    hog_orientations=9,
+    hog_pixels_per_cell=8,
+    hog_cells_per_block=2,
+    color_space="rgb",
+    color_hist_bins=16,
+):
+    image_array = _open_image_rgb(image_path, image_size=image_size)
+    try:
+        from skimage.color import rgb2gray
+        from skimage.feature import hog
+
+        gray = rgb2gray(image_array)
+        hog_feat = hog(
+            gray,
+            orientations=int(hog_orientations),
+            pixels_per_cell=(int(hog_pixels_per_cell), int(hog_pixels_per_cell)),
+            cells_per_block=(int(hog_cells_per_block), int(hog_cells_per_block)),
+            block_norm="L2-Hys",
+            feature_vector=True,
+        ).astype(np.float32)
+    except ImportError:
+        gray = _rgb_to_gray(image_array)
+        hog_feat = _compute_simple_hog(
+            gray,
+            orientations=int(hog_orientations),
+            pixels_per_cell=int(hog_pixels_per_cell),
+            cells_per_block=int(hog_cells_per_block),
+        )
+    color_feat = _compute_color_histogram(
+        image_array,
+        color_space=color_space,
+        color_hist_bins=color_hist_bins,
+    )
+    return np.concatenate([hog_feat, color_feat], axis=0).astype(np.float32, copy=False)
 
 
 def _extract_raw_pixel_vector(image_path, raw_resize_size=32):
@@ -351,6 +393,200 @@ def _sample_descriptors(descriptors, max_count, random_state):
     rng = np.random.default_rng(int(random_state))
     selected = rng.choice(descriptors.shape[0], size=int(max_count), replace=False)
     return descriptors[selected].astype(np.float32, copy=False)
+
+
+def _l1_normalize_rows(matrix, eps=1e-12):
+    matrix = np.asarray(matrix, dtype=np.float32)
+    matrix = np.clip(matrix, 0.0, None)
+    row_sums = np.sum(matrix, axis=1, keepdims=True)
+    row_sums = np.maximum(row_sums, float(eps))
+    return (matrix / row_sums).astype(np.float32, copy=False)
+
+
+def _transform_hog_color_batch(
+    batch_paths,
+    image_size,
+    hog_orientations,
+    hog_pixels_per_cell,
+    hog_cells_per_block,
+    color_space,
+    color_hist_bins,
+    transform_mode,
+    chi2_sample_steps=2,
+):
+    raw_batch = np.stack(
+        [
+            _extract_hog_color_base_features(
+                image_path,
+                image_size=image_size,
+                hog_orientations=hog_orientations,
+                hog_pixels_per_cell=hog_pixels_per_cell,
+                hog_cells_per_block=hog_cells_per_block,
+                color_space=color_space,
+                color_hist_bins=color_hist_bins,
+            )
+            for image_path in batch_paths
+        ],
+        axis=0,
+    ).astype(np.float32, copy=False)
+
+    hist_batch = _l1_normalize_rows(raw_batch)
+    if transform_mode == "hellinger":
+        return np.sqrt(np.clip(hist_batch, 0.0, None)).astype(np.float32, copy=False)
+    if transform_mode == "chi2":
+        sampler = AdditiveChi2Sampler(sample_steps=max(1, int(chi2_sample_steps)))
+        sampler.fit(hist_batch[:1])
+        return sampler.transform(hist_batch).astype(np.float32, copy=False)
+    raise ValueError(f"Unsupported hog_color transform mode: {transform_mode}")
+
+
+def _extract_histogram_whitened_features(
+    image_paths,
+    image_size,
+    hog_orientations,
+    hog_pixels_per_cell,
+    hog_cells_per_block,
+    color_space,
+    color_hist_bins,
+    transform_mode,
+    pca_dim=256,
+    whitening_eps=1e-5,
+    chi2_sample_steps=2,
+    batch_size=512,
+):
+    image_paths = [str(item) for item in image_paths]
+    batch_size = max(1, int(batch_size))
+    first_batch = _transform_hog_color_batch(
+        image_paths[:1],
+        image_size=image_size,
+        hog_orientations=hog_orientations,
+        hog_pixels_per_cell=hog_pixels_per_cell,
+        hog_cells_per_block=hog_cells_per_block,
+        color_space=color_space,
+        color_hist_bins=color_hist_bins,
+        transform_mode=transform_mode,
+        chi2_sample_steps=chi2_sample_steps,
+    )
+    feature_dim = int(first_batch.shape[1])
+    target_dim = min(int(pca_dim), feature_dim, len(image_paths))
+    if target_dim <= 0:
+        raise ValueError(f"pca_dim must be positive for {transform_mode} histogram whitening features.")
+
+    ipca = IncrementalPCA(n_components=target_dim, batch_size=batch_size)
+    for start in tqdm(range(0, len(image_paths), batch_size), desc=f"Fitting {transform_mode} PCA whitening"):
+        batch_paths = image_paths[start : start + batch_size]
+        batch = _transform_hog_color_batch(
+            batch_paths,
+            image_size=image_size,
+            hog_orientations=hog_orientations,
+            hog_pixels_per_cell=hog_pixels_per_cell,
+            hog_cells_per_block=hog_cells_per_block,
+            color_space=color_space,
+            color_hist_bins=color_hist_bins,
+            transform_mode=transform_mode,
+            chi2_sample_steps=chi2_sample_steps,
+        )
+        ipca.partial_fit(batch)
+
+    std = np.sqrt(
+        np.asarray(
+            getattr(ipca, "explained_variance_", np.ones((target_dim,), dtype=np.float32)),
+            dtype=np.float32,
+        )
+    ) + float(whitening_eps)
+
+    transformed_chunks = []
+    for start in tqdm(range(0, len(image_paths), batch_size), desc=f"Transforming {transform_mode} PCA whitening"):
+        batch_paths = image_paths[start : start + batch_size]
+        batch = _transform_hog_color_batch(
+            batch_paths,
+            image_size=image_size,
+            hog_orientations=hog_orientations,
+            hog_pixels_per_cell=hog_pixels_per_cell,
+            hog_cells_per_block=hog_cells_per_block,
+            color_space=color_space,
+            color_hist_bins=color_hist_bins,
+            transform_mode=transform_mode,
+            chi2_sample_steps=chi2_sample_steps,
+        )
+        transformed = ipca.transform(batch).astype(np.float32, copy=False)
+        transformed = (transformed / std).astype(np.float32, copy=False)
+        transformed_chunks.append(transformed)
+
+    features = np.concatenate(transformed_chunks, axis=0).astype(np.float32, copy=False)
+    info = {
+        "image_size": int(image_size),
+        "hog_orientations": int(hog_orientations),
+        "hog_pixels_per_cell": int(hog_pixels_per_cell),
+        "hog_cells_per_block": int(hog_cells_per_block),
+        "color_space": color_space,
+        "color_hist_bins": int(color_hist_bins),
+        "transform_mode": str(transform_mode),
+        "pca_dim": int(features.shape[1]),
+        "whitening_eps": float(whitening_eps),
+        "pca_explained_variance": float(
+            np.sum(getattr(ipca, "explained_variance_ratio_", np.array([0.0], dtype=np.float32)))
+        ),
+    }
+    if transform_mode == "chi2":
+        info["chi2_sample_steps"] = int(chi2_sample_steps)
+    return features, info
+
+
+def extract_hog_color_hellinger_pca_whitening_features(
+    image_paths,
+    image_size=128,
+    hog_orientations=9,
+    hog_pixels_per_cell=8,
+    hog_cells_per_block=2,
+    color_space="rgb",
+    color_hist_bins=16,
+    pca_dim=256,
+    whitening_eps=1e-3,
+    batch_size=512,
+):
+    return _extract_histogram_whitened_features(
+        image_paths,
+        image_size=image_size,
+        hog_orientations=hog_orientations,
+        hog_pixels_per_cell=hog_pixels_per_cell,
+        hog_cells_per_block=hog_cells_per_block,
+        color_space=color_space,
+        color_hist_bins=color_hist_bins,
+        transform_mode="hellinger",
+        pca_dim=pca_dim,
+        whitening_eps=whitening_eps,
+        batch_size=batch_size,
+    )
+
+
+def extract_hog_color_chi2_pca_whitening_features(
+    image_paths,
+    image_size=128,
+    hog_orientations=9,
+    hog_pixels_per_cell=8,
+    hog_cells_per_block=2,
+    color_space="rgb",
+    color_hist_bins=16,
+    pca_dim=256,
+    whitening_eps=1e-3,
+    chi2_sample_steps=2,
+    batch_size=512,
+):
+    return _extract_histogram_whitened_features(
+        image_paths,
+        image_size=image_size,
+        hog_orientations=hog_orientations,
+        hog_pixels_per_cell=hog_pixels_per_cell,
+        hog_cells_per_block=hog_cells_per_block,
+        color_space=color_space,
+        color_hist_bins=color_hist_bins,
+        transform_mode="chi2",
+        pca_dim=pca_dim,
+        whitening_eps=whitening_eps,
+        chi2_sample_steps=chi2_sample_steps,
+        batch_size=batch_size,
+    )
 
 
 def extract_dense_sift_bovw_features(
@@ -565,6 +801,9 @@ def extract_fixed_image_features(
     dense_sift_patch=16,
     bovw_max_fit_descriptors=200000,
     bovw_descriptors_per_image=200,
+    histogram_whitening_pca_dim=256,
+    pca_whitening_eps=1e-3,
+    chi2_sample_steps=2,
     batch_size=None,
     random_state=0,
 ):
@@ -628,6 +867,39 @@ def extract_fixed_image_features(
             random_state=random_state,
             bovw_max_fit_descriptors=bovw_max_fit_descriptors,
             bovw_descriptors_per_image=bovw_descriptors_per_image,
+        )
+        info["selection_image_repr_method"] = method
+        return features, info
+
+    if method == "hog_color_hellinger_pca_whitening":
+        features, info = extract_hog_color_hellinger_pca_whitening_features(
+            image_paths,
+            image_size=image_size,
+            hog_orientations=hog_orientations,
+            hog_pixels_per_cell=hog_pixels_per_cell,
+            hog_cells_per_block=hog_cells_per_block,
+            color_space=color_space,
+            color_hist_bins=color_hist_bins,
+            pca_dim=histogram_whitening_pca_dim,
+            whitening_eps=pca_whitening_eps,
+            batch_size=batch_size or 512,
+        )
+        info["selection_image_repr_method"] = method
+        return features, info
+
+    if method == "hog_color_chi2_pca_whitening":
+        features, info = extract_hog_color_chi2_pca_whitening_features(
+            image_paths,
+            image_size=image_size,
+            hog_orientations=hog_orientations,
+            hog_pixels_per_cell=hog_pixels_per_cell,
+            hog_cells_per_block=hog_cells_per_block,
+            color_space=color_space,
+            color_hist_bins=color_hist_bins,
+            pca_dim=histogram_whitening_pca_dim,
+            whitening_eps=pca_whitening_eps,
+            chi2_sample_steps=chi2_sample_steps,
+            batch_size=batch_size or 512,
         )
         info["selection_image_repr_method"] = method
         return features, info
