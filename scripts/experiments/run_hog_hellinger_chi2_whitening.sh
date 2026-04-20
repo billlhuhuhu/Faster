@@ -7,12 +7,13 @@ source "${SCRIPT_DIR}/common.sh"
 DATASET="${HOG_WHITEN_COMPARE_DATASET:-flickr}"
 BACKBONE="${HOG_WHITEN_COMPARE_BACKBONE:-nfnet}"
 TEXT_ENCODER="${HOG_WHITEN_COMPARE_TEXT_ENCODER:-bert}"
+SELECTION_TEXT_MODE="${HOG_WHITEN_COMPARE_TEXT_REPR_METHOD:-tfidf}"
 SEEDS_STR="${HOG_WHITEN_COMPARE_SEEDS:-0}"
 BUDGETS_STR="${HOG_WHITEN_COMPARE_BUDGETS:-100 200 500}"
 RATIOS_STR="${HOG_WHITEN_COMPARE_RATIOS-0.01 0.02 0.03}"
 
 RUN_TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
-REPORT_NAME="${HOG_WHITEN_COMPARE_REPORT_NAME:-hog_hellinger_chi2_whitening}"
+REPORT_NAME="${HOG_WHITEN_COMPARE_REPORT_NAME:-hog_hellinger_chi2_whitening_tfidf_text}"
 REPORT_DIR="${REPORT_ROOT}/${REPORT_NAME}_${DATASET}_${RUN_TIMESTAMP}"
 mkdir -p "${REPORT_DIR}"
 
@@ -42,34 +43,35 @@ run_one_variant() {
     WAVELET_MAIN_LATEST_TRAIN_OUTPUT_ROOT="${train_root}" \
     WAVELET_MAIN_LATEST_REPORT_NAME="${report_name}" \
     SELECTION_IMAGE_REPR_METHOD="${image_mode}" \
+    SELECTION_TEXT_REPR_METHOD="${SELECTION_TEXT_MODE}" \
     bash "${SCRIPT_DIR}/run_wavelet_main_latest_combo.sh"
 }
 
 run_one_variant \
   "hog_color_hellinger_pca_whitening" \
-  "wavelet_main_hog_hellinger_pca_whitening" \
-  "artifacts/feature_cache_hog_hellinger_pca_whitening" \
-  "artifacts/topology_graph_hog_hellinger_pca_whitening" \
-  "artifacts/cross_modal_topology_hog_hellinger_pca_whitening" \
-  "artifacts/subset_selection_hog_hellinger_pca_whitening" \
-  "artifacts/subset_train_hog_hellinger_pca_whitening" \
-  "hog_hellinger_pca_whitening"
+  "wavelet_main_hog_hellinger_pca_whitening_tfidf_text" \
+  "artifacts/feature_cache_hog_hellinger_pca_whitening_tfidf_text" \
+  "artifacts/topology_graph_hog_hellinger_pca_whitening_tfidf_text" \
+  "artifacts/cross_modal_topology_hog_hellinger_pca_whitening_tfidf_text" \
+  "artifacts/subset_selection_hog_hellinger_pca_whitening_tfidf_text" \
+  "artifacts/subset_train_hog_hellinger_pca_whitening_tfidf_text" \
+  "hog_hellinger_pca_whitening_tfidf_text"
 
 run_one_variant \
   "hog_color_chi2_pca_whitening" \
-  "wavelet_main_hog_chi2_pca_whitening" \
-  "artifacts/feature_cache_hog_chi2_pca_whitening" \
-  "artifacts/topology_graph_hog_chi2_pca_whitening" \
-  "artifacts/cross_modal_topology_hog_chi2_pca_whitening" \
-  "artifacts/subset_selection_hog_chi2_pca_whitening" \
-  "artifacts/subset_train_hog_chi2_pca_whitening" \
-  "hog_chi2_pca_whitening"
+  "wavelet_main_hog_chi2_pca_whitening_tfidf_text" \
+  "artifacts/feature_cache_hog_chi2_pca_whitening_tfidf_text" \
+  "artifacts/topology_graph_hog_chi2_pca_whitening_tfidf_text" \
+  "artifacts/cross_modal_topology_hog_chi2_pca_whitening_tfidf_text" \
+  "artifacts/subset_selection_hog_chi2_pca_whitening_tfidf_text" \
+  "artifacts/subset_train_hog_chi2_pca_whitening_tfidf_text" \
+  "hog_chi2_pca_whitening_tfidf_text"
 
 RAW_CSV_PATH="${REPORT_DIR}/hog_whitening_compare_raw.csv"
 SUMMARY_CSV_PATH="${REPORT_DIR}/hog_whitening_compare_summary.csv"
 MISSING_TXT_PATH="${REPORT_DIR}/missing_metrics.txt"
 
-python - "${RAW_CSV_PATH}" "${SUMMARY_CSV_PATH}" "${MISSING_TXT_PATH}" "${DATASET}" "${BACKBONE}" "${TEXT_ENCODER}" "${BUDGETS_STR}" "${RATIOS_STR}" "${SEEDS_STR}" "${K_NEIGHBORS}" "${TOPOLOGY_METRIC_IMAGE}" <<'PY'
+python - "${RAW_CSV_PATH}" "${SUMMARY_CSV_PATH}" "${MISSING_TXT_PATH}" "${DATASET}" "${BACKBONE}" "${TEXT_ENCODER}" "${BUDGETS_STR}" "${RATIOS_STR}" "${SEEDS_STR}" "${K_NEIGHBORS}" "${TOPOLOGY_METRIC_IMAGE}" "${SELECTION_TEXT_MODE}" <<'PY'
 import csv
 import json
 import statistics
@@ -94,20 +96,23 @@ ratios = [item for item in sys.argv[8].split() if item.strip()]
 seeds = [item for item in sys.argv[9].split() if item.strip()]
 k_neighbors = str(sys.argv[10])
 topology_metric_image = str(sys.argv[11])
+selection_text_mode = str(sys.argv[12])
 model_tag = f"{backbone}_{text_encoder}"
 
 variants = [
     {
         "image_feature_mode": "hog_color_hellinger_pca_whitening",
-        "variant": "wavelet_main_hog_hellinger_pca_whitening",
-        "train_root": Path("artifacts/subset_train_hog_hellinger_pca_whitening"),
-        "topology_root": Path("artifacts/topology_graph_hog_hellinger_pca_whitening"),
+        "text_feature_mode": selection_text_mode,
+        "variant": "wavelet_main_hog_hellinger_pca_whitening_tfidf_text",
+        "train_root": Path("artifacts/subset_train_hog_hellinger_pca_whitening_tfidf_text"),
+        "topology_root": Path("artifacts/topology_graph_hog_hellinger_pca_whitening_tfidf_text"),
     },
     {
         "image_feature_mode": "hog_color_chi2_pca_whitening",
-        "variant": "wavelet_main_hog_chi2_pca_whitening",
-        "train_root": Path("artifacts/subset_train_hog_chi2_pca_whitening"),
-        "topology_root": Path("artifacts/topology_graph_hog_chi2_pca_whitening"),
+        "text_feature_mode": selection_text_mode,
+        "variant": "wavelet_main_hog_chi2_pca_whitening_tfidf_text",
+        "train_root": Path("artifacts/subset_train_hog_chi2_pca_whitening_tfidf_text"),
+        "topology_root": Path("artifacts/topology_graph_hog_chi2_pca_whitening_tfidf_text"),
     },
 ]
 
@@ -151,6 +156,7 @@ for variant_cfg in variants:
                     "dataset": dataset,
                     "model_tag": model_tag,
                     "image_feature_mode": variant_cfg["image_feature_mode"],
+                    "text_feature_mode": variant_cfg["text_feature_mode"],
                     "variant": variant_cfg["variant"],
                     "budget_type": budget_type,
                     "budget_tag": budget_tag,
@@ -187,6 +193,7 @@ raw_fields = [
     "dataset",
     "model_tag",
     "image_feature_mode",
+    "text_feature_mode",
     "variant",
     "budget_type",
     "budget_tag",
@@ -216,6 +223,7 @@ for row in raw_rows:
         row["dataset"],
         row["model_tag"],
         row["image_feature_mode"],
+        row["text_feature_mode"],
         row["variant"],
         row["budget_type"],
         row["budget_tag"],
@@ -225,12 +233,13 @@ for row in raw_rows:
 
 summary_rows = []
 for key in sorted(grouped.keys()):
-    dataset, model_tag, image_feature_mode, variant, budget_type, budget_tag, budget_value = key
+    dataset, model_tag, image_feature_mode, text_feature_mode, variant, budget_type, budget_tag, budget_value = key
     rows = grouped[key]
     summary = {
         "dataset": dataset,
         "model_tag": model_tag,
         "image_feature_mode": image_feature_mode,
+        "text_feature_mode": text_feature_mode,
         "variant": variant,
         "budget_type": budget_type,
         "budget_tag": budget_tag,
@@ -250,6 +259,7 @@ summary_fields = [
     "dataset",
     "model_tag",
     "image_feature_mode",
+    "text_feature_mode",
     "variant",
     "budget_type",
     "budget_tag",

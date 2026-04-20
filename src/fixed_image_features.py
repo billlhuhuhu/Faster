@@ -440,6 +440,20 @@ def _transform_hog_color_batch(
     raise ValueError(f"Unsupported hog_color transform mode: {transform_mode}")
 
 
+def _iter_min_sized_batches(num_items, batch_size, min_batch_size):
+    """Yield batch ranges while merging a too-small tail into the previous batch."""
+    num_items = int(num_items)
+    batch_size = max(1, int(batch_size))
+    min_batch_size = max(1, int(min_batch_size))
+    start = 0
+    while start < num_items:
+        end = min(start + batch_size, num_items)
+        if end < num_items and (num_items - end) < min_batch_size:
+            end = num_items
+        yield start, end
+        start = end
+
+
 def _extract_histogram_whitened_features(
     image_paths,
     image_size,
@@ -473,8 +487,9 @@ def _extract_histogram_whitened_features(
         raise ValueError(f"pca_dim must be positive for {transform_mode} histogram whitening features.")
 
     ipca = IncrementalPCA(n_components=target_dim, batch_size=batch_size)
-    for start in tqdm(range(0, len(image_paths), batch_size), desc=f"Fitting {transform_mode} PCA whitening"):
-        batch_paths = image_paths[start : start + batch_size]
+    fit_ranges = list(_iter_min_sized_batches(len(image_paths), batch_size, target_dim))
+    for start, end in tqdm(fit_ranges, desc=f"Fitting {transform_mode} PCA whitening"):
+        batch_paths = image_paths[start:end]
         batch = _transform_hog_color_batch(
             batch_paths,
             image_size=image_size,
