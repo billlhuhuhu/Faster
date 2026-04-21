@@ -848,6 +848,30 @@ def extract_fixed_image_features(
             "color_hist_bins": int(color_hist_bins),
         }
 
+    if method == "hog_color_raw":
+        features = []
+        for image_path in tqdm(image_paths, desc="Extracting fixed image features (hog_color_raw)"):
+            feature = _extract_hog_color_base_features(
+                image_path,
+                image_size=image_size,
+                hog_orientations=hog_orientations,
+                hog_pixels_per_cell=hog_pixels_per_cell,
+                hog_cells_per_block=hog_cells_per_block,
+                color_space=color_space,
+                color_hist_bins=color_hist_bins,
+            )
+            features.append(_l2_normalize(feature))
+        return np.stack(features, axis=0).astype(np.float32), {
+            "selection_image_repr_method": method,
+            "image_size": int(image_size),
+            "hog_orientations": int(hog_orientations),
+            "hog_pixels_per_cell": int(hog_pixels_per_cell),
+            "hog_cells_per_block": int(hog_cells_per_block),
+            "color_space": color_space,
+            "color_hist_bins": int(color_hist_bins),
+            "hellinger_transform": False,
+        }
+
     if method == "raw_pca":
         features, info = extract_raw_pca_features(
             image_paths,

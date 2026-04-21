@@ -19,7 +19,7 @@ def build_parser():
     parser.add_argument("--split", type=str, default="train", choices=["train"])
     parser.add_argument("--image_encoder", type=str, required=True, choices=["nfnet", "resnet50", "resnet-50", "vit_b16", "vit-b16", "vit-b/16", "vit_base_patch16_224"])
     parser.add_argument("--text_encoder", type=str, default="bert", choices=["bert"])
-    parser.add_argument("--selection_image_repr_method", type=str, default="hog_color", choices=["hog_color", "raw_pca", "raw_pixels_pca", "dense_sift_bovw", "hog_color_hellinger_pca_whitening", "hog_color_chi2_pca_whitening"])
+    parser.add_argument("--selection_image_repr_method", type=str, default="hog_color", choices=["hog_color", "hog_color_raw", "raw_pca", "raw_pixels_pca", "dense_sift_bovw", "hog_color_hellinger_pca_whitening", "hog_color_chi2_pca_whitening"])
     parser.add_argument("--selection_text_repr_method", type=str, default="bert", choices=["bert", "tfidf"])
     parser.add_argument("--selection_image_size", type=int, default=128)
     parser.add_argument("--selection_raw_resize_size", type=int, default=32)
