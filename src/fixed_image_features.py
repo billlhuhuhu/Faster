@@ -443,8 +443,8 @@ def _transform_hog_color_batch(
 def _iter_min_sized_batches(num_items, batch_size, min_batch_size):
     """Yield batch ranges while merging a too-small tail into the previous batch."""
     num_items = int(num_items)
-    batch_size = max(1, int(batch_size))
     min_batch_size = max(1, int(min_batch_size))
+    batch_size = max(min_batch_size, int(batch_size))
     start = 0
     while start < num_items:
         end = min(start + batch_size, num_items)
@@ -695,9 +695,11 @@ def extract_raw_pca_features(
     if pca_dim <= 0:
         raise ValueError("pca_dim must be positive for raw_pca features.")
 
-    ipca = IncrementalPCA(n_components=pca_dim, batch_size=int(batch_size))
-    for start in tqdm(range(0, len(image_paths), int(batch_size)), desc="Fitting raw-pixel PCA"):
-        batch_paths = image_paths[start : start + int(batch_size)]
+    batch_size = max(1, int(batch_size))
+    ipca = IncrementalPCA(n_components=pca_dim, batch_size=batch_size)
+    fit_ranges = list(_iter_min_sized_batches(len(image_paths), batch_size, pca_dim))
+    for start, end in tqdm(fit_ranges, desc="Fitting raw-pixel PCA"):
+        batch_paths = image_paths[start:end]
         batch = np.stack(
             [_extract_raw_pixel_vector(path, raw_resize_size=raw_resize_size) for path in batch_paths],
             axis=0,
@@ -747,9 +749,11 @@ def extract_raw_pixels_pca_features(
     if target_dim <= 0:
         raise ValueError("raw_pixel_pca_dim must be positive for raw_pixels_pca features.")
 
-    ipca = IncrementalPCA(n_components=target_dim, batch_size=int(batch_size))
-    for start in tqdm(range(0, len(image_paths), int(batch_size)), desc="Fitting raw-pixels PCA"):
-        batch_paths = image_paths[start : start + int(batch_size)]
+    batch_size = max(1, int(batch_size))
+    ipca = IncrementalPCA(n_components=target_dim, batch_size=batch_size)
+    fit_ranges = list(_iter_min_sized_batches(len(image_paths), batch_size, target_dim))
+    for start, end in tqdm(fit_ranges, desc="Fitting raw-pixels PCA"):
+        batch_paths = image_paths[start:end]
         batch = np.stack(
             [
                 _extract_raw_pixel_vector_v2(
