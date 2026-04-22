@@ -14,7 +14,7 @@ STAGE3_SWITCH="${WAVELET_MAIN_LATEST_STAGE3_SWITCH:-}"
 STAGE4_SWITCH="${WAVELET_MAIN_LATEST_STAGE4_SWITCH:-}"
 SEEDS_STR="${WAVELET_MAIN_LATEST_SEEDS:-0}"
 read -r -a SEEDS <<< "${SEEDS_STR}"
-BUDGETS_STR="${WAVELET_MAIN_LATEST_BUDGETS:-100 200 500}"
+BUDGETS_STR="${WAVELET_MAIN_LATEST_BUDGETS-100 200 500}"
 read -r -a BUDGETS <<< "${BUDGETS_STR}"
 RATIOS_STR="${WAVELET_MAIN_LATEST_RATIOS-0.01}"
 read -r -a RATIOS <<< "${RATIOS_STR}"
@@ -423,6 +423,12 @@ run_selection_abs() {
     selection_extra_args+=(--enable_stage4_lsrc)
     train_extra_args+=(--enable_stage4_lsrc)
   fi
+  if [[ "${ENABLE_IMAGE_ENCODER_DATA_PARALLEL}" == "1" ]]; then
+    train_extra_args+=(--enable_image_encoder_data_parallel)
+  fi
+  if [[ -n "${IMAGE_ENCODER_DATA_PARALLEL_DEVICE_IDS}" ]]; then
+    train_extra_args+=(--image_encoder_data_parallel_device_ids "${IMAGE_ENCODER_DATA_PARALLEL_DEVICE_IDS}")
+  fi
 
   if [[ ! -f "${selected_indices_path}" ]]; then
     stage_log "Selection start: budget=${budget} seed=${seed}"
@@ -583,6 +589,12 @@ run_selection_ratio() {
   elif [[ "${STAGE4_SWITCH}" == "1" ]]; then
     selection_extra_args+=(--enable_stage4_lsrc)
     train_extra_args+=(--enable_stage4_lsrc)
+  fi
+  if [[ "${ENABLE_IMAGE_ENCODER_DATA_PARALLEL}" == "1" ]]; then
+    train_extra_args+=(--enable_image_encoder_data_parallel)
+  fi
+  if [[ -n "${IMAGE_ENCODER_DATA_PARALLEL_DEVICE_IDS}" ]]; then
+    train_extra_args+=(--image_encoder_data_parallel_device_ids "${IMAGE_ENCODER_DATA_PARALLEL_DEVICE_IDS}")
   fi
 
   if [[ ! -f "${selected_indices_path}" ]]; then

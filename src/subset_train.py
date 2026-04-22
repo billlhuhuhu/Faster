@@ -153,6 +153,52 @@ def append_log(path, message):
         handle.write(message.rstrip() + "\n")
 
 
+def parse_data_parallel_device_ids(device_ids):
+    if device_ids is None or not str(device_ids).strip():
+        return None
+    parsed = []
+    for item in str(device_ids).split(","):
+        item = item.strip()
+        if item:
+            parsed.append(int(item))
+    return parsed or None
+
+
+def maybe_wrap_image_encoder_data_parallel(model, args):
+    if not bool(getattr(args, "enable_image_encoder_data_parallel", False)):
+        args.image_encoder_data_parallel_enabled = False
+        args.image_encoder_data_parallel_num_devices = 1
+        return model
+    if not torch.cuda.is_available() or not str(args.device).startswith("cuda"):
+        print("[MultiGPU] image encoder DataParallel requested but CUDA is unavailable; running single-device.")
+        args.image_encoder_data_parallel_enabled = False
+        args.image_encoder_data_parallel_num_devices = 1
+        return model
+
+    available = torch.cuda.device_count()
+    device_ids = parse_data_parallel_device_ids(
+        getattr(args, "image_encoder_data_parallel_device_ids", "")
+    )
+    if device_ids is None:
+        device_ids = list(range(available))
+    device_ids = [idx for idx in device_ids if 0 <= int(idx) < available]
+    if len(device_ids) <= 1:
+        print(
+            "[MultiGPU] image encoder DataParallel requested but fewer than two valid "
+            f"devices are visible (available={available}, requested={device_ids}); running single-device."
+        )
+        args.image_encoder_data_parallel_enabled = False
+        args.image_encoder_data_parallel_num_devices = 1
+        return model
+
+    model.image_encoder = torch.nn.DataParallel(model.image_encoder, device_ids=device_ids)
+    args.image_encoder_data_parallel_enabled = True
+    args.image_encoder_data_parallel_num_devices = len(device_ids)
+    args.image_encoder_data_parallel_device_ids_resolved = ",".join(str(idx) for idx in device_ids)
+    print(f"[MultiGPU] Enabled image encoder DataParallel on visible CUDA devices: {device_ids}")
+    return model
+
+
 def build_metrics_payload(args, subset_size, best_epoch, best_val_metrics, test_metrics):
     payload = {
         "dataset": args.dataset,
@@ -166,6 +212,15 @@ def build_metrics_payload(args, subset_size, best_epoch, best_val_metrics, test_
         "subset_size": int(subset_size),
         "seed": int(args.seed),
         "best_epoch": int(best_epoch),
+        "image_encoder_data_parallel_enabled": bool(
+            getattr(args, "image_encoder_data_parallel_enabled", False)
+        ),
+        "image_encoder_data_parallel_num_devices": int(
+            getattr(args, "image_encoder_data_parallel_num_devices", 1)
+        ),
+        "image_encoder_data_parallel_device_ids": getattr(
+            args, "image_encoder_data_parallel_device_ids_resolved", ""
+        ),
         "i2t_r1": float(test_metrics["i2t_r1"]),
         "i2t_r5": float(test_metrics["i2t_r5"]),
         "i2t_r10": float(test_metrics["i2t_r10"]),
@@ -189,6 +244,7 @@ def train_and_evaluate_subset(args):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     model = CLIPModel_full(args).to(args.device)
+    model = maybe_wrap_image_encoder_data_parallel(model, args)
     optimizer = create_optimizer(model, args)
     scheduler = create_scheduler(optimizer, args)
 

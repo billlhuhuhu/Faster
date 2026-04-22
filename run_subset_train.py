@@ -47,6 +47,8 @@ def build_parser():
     parser.add_argument("--lr_decay_gamma", type=float, default=0.1)
 
     parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--enable_image_encoder_data_parallel", action="store_true", default=False)
+    parser.add_argument("--image_encoder_data_parallel_device_ids", type=str, default="")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--no_aug", action="store_true", default=False)
 
