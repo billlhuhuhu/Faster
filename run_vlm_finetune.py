@@ -79,9 +79,36 @@ def resolve_image_path(record: Dict[str, Any], image_root: str) -> Path:
     if not image_value:
         raise ValueError("LLaVA record does not contain an image/image_path/file_name field.")
     image_path = Path(str(image_value))
-    if not image_path.is_absolute():
-        image_path = Path(image_root) / image_path
-    return image_path
+    if image_path.is_absolute():
+        return image_path
+
+    root = Path(image_root)
+    direct_path = root / image_path
+    if direct_path.exists():
+        return direct_path
+
+    candidates = []
+    name = image_path.name
+    parent = image_path.parent
+    if name and not name.startswith("COCO_"):
+        candidates.extend(
+            [
+                root / parent / f"COCO_train2014_{name}",
+                root / parent / f"COCO_val2014_{name}",
+                root / "train2014" / f"COCO_train2014_{name}",
+                root / "val2014" / f"COCO_val2014_{name}",
+            ]
+        )
+    candidates.extend(
+        [
+            root / "train2014" / image_path,
+            root / "val2014" / image_path,
+        ]
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return direct_path
 
 
 def build_qwen2vl_messages(image_path: Path, prompt: str, answer: Optional[str] = None) -> List[Dict[str, Any]]:
