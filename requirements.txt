@@ -12,3 +12,6 @@ wandb
 opencv-python
 transformers
 tqdm
+accelerate
+peft
+bitsandbytes
