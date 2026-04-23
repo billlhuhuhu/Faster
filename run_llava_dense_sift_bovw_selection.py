@@ -586,7 +586,7 @@ def main():
     parser.add_argument("--asymmetric_correction_lambda", type=float, default=0.3)
     parser.add_argument("--correction_confidence_gap_delta", type=float, default=0.1)
     parser.add_argument("--corrected_image_added_topk", type=int, default=5)
-    parser.add_argument("--wavelet_fusion_weight_mode", type=str, default="fixed_per_scale", choices=["fixed_per_scale", "collapse_aware"])
+    parser.add_argument("--wavelet_fusion_weight_mode", type=str, default="collapse_aware", choices=["fixed_per_scale", "collapse_aware"])
     parser.add_argument("--wavelet_fusion_entropy_temperature", type=float, default=1.0)
     parser.add_argument("--wavelet_fusion_probe_dim", type=int, default=32)
     parser.add_argument("--wavelet_latent_postprocess_topk", type=int, default=64)
