@@ -399,9 +399,16 @@ def resolve_proxy_loss_type(proxy_loss_type, objective_mode=None):
     return alias_map.get(active_loss_type, active_loss_type)
 
 
-def dpp_diversity_loss(proxy_points, kernel="rbf", sigma=1.0, eps=1e-6):
+def dpp_diversity_loss(proxy_points, kernel="rbf", sigma=1.0, eps=1e-6, max_points=2048):
     if kernel != "rbf":
         raise ValueError(f"Unsupported diversity kernel: {kernel}")
+    # Full DPP logdet scales as O(M^2) memory and O(M^3) compute in the number
+    # of proxy points. Large-ratio runs can have tens of thousands of proxies,
+    # so cap the regularizer to a random proxy subset to keep it diagnostic
+    # without dominating GPU memory.
+    if max_points is not None and int(max_points) > 0 and proxy_points.shape[0] > int(max_points):
+        indices = torch.randperm(proxy_points.shape[0], device=proxy_points.device)[: int(max_points)]
+        proxy_points = proxy_points[indices]
     kernel_matrix = build_rbf_kernel(proxy_points, sigma=sigma)
     eye = torch.eye(kernel_matrix.shape[0], dtype=kernel_matrix.dtype, device=kernel_matrix.device)
     stabilized = kernel_matrix + float(eps) * eye
