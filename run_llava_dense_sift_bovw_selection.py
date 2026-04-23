@@ -50,12 +50,24 @@ def load_or_build_features(args, records):
     meta_path = cache_dir / "sample_meta.json"
     info_path = cache_dir / "feature_info.json"
     if image_path.exists() and text_path.exists() and meta_path.exists() and info_path.exists() and not args.force_recompute_features:
+        print(f"[LLaVA selection] Loading cached features from {cache_dir}", flush=True)
+        print(f"[LLaVA selection]   image cache: {image_path}", flush=True)
+        img_features = torch.load(image_path, map_location="cpu").numpy()
+        print(f"[LLaVA selection]   image features loaded: shape={img_features.shape}", flush=True)
+        print(f"[LLaVA selection]   text cache: {text_path}", flush=True)
+        txt_features = torch.load(text_path, map_location="cpu").numpy()
+        print(f"[LLaVA selection]   text features loaded: shape={txt_features.shape}", flush=True)
         return (
-            torch.load(image_path, map_location="cpu").numpy(),
-            torch.load(text_path, map_location="cpu").numpy(),
+            img_features,
+            txt_features,
             json.loads(meta_path.read_text(encoding="utf-8")),
             json.loads(info_path.read_text(encoding="utf-8")),
         )
+    missing_cache = [str(path) for path in [image_path, text_path, meta_path, info_path] if not path.exists()]
+    if missing_cache:
+        print(f"[LLaVA selection] Feature cache incomplete, rebuilding. Missing: {missing_cache}", flush=True)
+    elif args.force_recompute_features:
+        print("[LLaVA selection] force_recompute_features=True, rebuilding feature cache.", flush=True)
 
     image_paths = [str(resolve_image_path(record, args.image_root)) for record in records]
     missing = [path for path in image_paths if not Path(path).exists()]
@@ -116,9 +128,15 @@ def build_knn_graph(representation, k=15, metric="cosine", desc="Building LLaVA 
     representation = np.asarray(representation, dtype=np.float32)
     n = representation.shape[0]
     k = max(1, min(int(k), n - 1))
+    print(
+        f"[LLaVA selection] {desc}: fitting/querying kNN "
+        f"n={n} dim={representation.shape[1]} k={k} metric={metric}",
+        flush=True,
+    )
     nn = NearestNeighbors(n_neighbors=k + 1, metric=metric)
     nn.fit(representation)
     distances, indices = nn.kneighbors(representation)
+    print(f"[LLaVA selection] {desc}: kNN query done, building sparse graph", flush=True)
     rows = []
     cols = []
     vals = []
@@ -298,7 +316,9 @@ def main():
     args = parser.parse_args()
 
     records = load_json_or_jsonl(args.annotation_path)
+    print(f"[LLaVA selection] Loaded {len(records)} LLaVA records from {args.annotation_path}", flush=True)
     img_features, txt_features, sample_meta, feature_info = load_or_build_features(args, records)
+    print("[LLaVA selection] Normalizing image/text features and building unified representation", flush=True)
     img_repr = l2_normalize(img_features.astype(np.float32))
     txt_repr = l2_normalize(txt_features.astype(np.float32))
     representation = np.concatenate([img_repr, txt_repr], axis=1).astype(np.float32)

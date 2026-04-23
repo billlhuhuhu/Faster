@@ -107,7 +107,7 @@ if [[ "${VLM_RUN_OURS}" == "1" && -z "${VLM_OURS_SELECTED_INDICES_TEMPLATE}" ]];
   export VLM_OURS_SELECTED_INDICES_TEMPLATE="${VLM_DENSE_SIFT_BOVW_SELECTION_ROOT}/{ratio_tag}/proxy_opt_lsrc/seed_${VLM_SEED}/selected_indices.json"
   if [[ "${VLM_RUN_DENSE_SIFT_BOVW_SELECTION}" == "1" ]]; then
     echo "[$(timestamp)] Stage 0/4: sample LLaVA Ours subsets with dense_sift_bovw"
-    python "${PROJECT_ROOT}/run_llava_dense_sift_bovw_selection.py" \
+    python -u "${PROJECT_ROOT}/run_llava_dense_sift_bovw_selection.py" \
       --annotation_path "${LLAVA_ANNOTATION_PATH}" \
       --image_root "${LLAVA_IMAGE_ROOT}" \
       --output_root "${VLM_DENSE_SIFT_BOVW_SELECTION_ROOT}" \
