@@ -9,6 +9,7 @@ BASELINE_METHODS="${BASELINE_METHODS:-entropy el2n grand gradmatch glister ccs-r
 ABS_BUDGETS="${ABS_BUDGETS:-100 200 500}"
 RATIOS="${RATIOS:-0.01 0.02 0.03}"
 BASELINE_SEEDS="${BASELINE_SEEDS:-0}"
+# Device inside each subprocess after CUDA_VISIBLE_DEVICES remap.
 BASELINE_DEVICE="${BASELINE_DEVICE:-cuda:0}"
 BASELINE_OUTPUT_ROOT="${BASELINE_OUTPUT_ROOT:-artifacts/baselines_coco_unimodal}"
 
@@ -35,6 +36,16 @@ export VECLIB_MAXIMUM_THREADS="${VECLIB_MAXIMUM_THREADS:-8}"
 export BLIS_NUM_THREADS="${BLIS_NUM_THREADS:-8}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:128}"
 
+# Multi-GPU scheduling: round-robin jobs across GPU ids.
+GPU_LIST="${GPU_LIST:-${CUDA_VISIBLE_DEVICES:-0}}"
+GPU_LIST="${GPU_LIST//,/ }"
+read -r -a GPU_ARRAY <<< "${GPU_LIST}"
+if [[ "${#GPU_ARRAY[@]}" -eq 0 ]]; then
+  GPU_ARRAY=("0")
+fi
+GPU_COUNT="${#GPU_ARRAY[@]}"
+MAX_PARALLEL="${MAX_PARALLEL:-${GPU_COUNT}}"
+
 echo "[coco-unimodal] dataset=${BASELINE_DATASET}"
 echo "[coco-unimodal] methods=${BASELINE_METHODS}"
 echo "[coco-unimodal] abs_budgets=${ABS_BUDGETS}"
@@ -42,11 +53,30 @@ echo "[coco-unimodal] ratios=${RATIOS}"
 echo "[coco-unimodal] seeds=${BASELINE_SEEDS}"
 echo "[coco-unimodal] output_root=${BASELINE_OUTPUT_ROOT}"
 echo "[coco-unimodal] device=${BASELINE_DEVICE}"
+echo "[coco-unimodal] gpus=${GPU_ARRAY[*]} max_parallel=${MAX_PARALLEL}"
+
+pick_gpu() {
+  local idx="$1"
+  echo "${GPU_ARRAY[$(( idx % GPU_COUNT ))]}"
+}
+
+throttle_jobs() {
+  while [[ "$(jobs -rp | wc -l)" -ge "${MAX_PARALLEL}" ]]; do
+    wait -n
+  done
+}
+
+wait_all_jobs() {
+  while [[ "$(jobs -rp | wc -l)" -gt 0 ]]; do
+    wait -n
+  done
+}
 
 run_abs_job() {
   local method="$1"
   local budget="$2"
   local seed="$3"
+  local gpu_id="$4"
 
   local run_dir="${BASELINE_OUTPUT_ROOT}/${BASELINE_DATASET}/${BASELINE_IMAGE_ENCODER}_${BASELINE_TEXT_ENCODER}/${method}/budget_$(printf "%04d" "${budget}")/seed_${seed}"
   local selected_path="${run_dir}/selected_indices.json"
@@ -58,8 +88,8 @@ run_abs_job() {
   fi
 
   if [[ ! -f "${selected_path}" ]]; then
-    echo "[run][abs][selection] method=${method} budget=${budget} seed=${seed}"
-    python -m baselines.runners.run_baseline_selection \
+    echo "[run][abs][selection] method=${method} budget=${budget} seed=${seed} gpu=${gpu_id}"
+    CUDA_VISIBLE_DEVICES="${gpu_id}" python -m baselines.runners.run_baseline_selection \
       --method "${method}" \
       --budget "${budget}" \
       --dataset_name "${BASELINE_DATASET}" \
@@ -76,8 +106,8 @@ run_abs_job() {
     echo "[skip][abs][selection] exists method=${method} budget=${budget} seed=${seed}"
   fi
 
-  echo "[run][abs][eval] method=${method} budget=${budget} seed=${seed}"
-  python -m baselines.runners.evaluate_baseline_subsets \
+  echo "[run][abs][eval] method=${method} budget=${budget} seed=${seed} gpu=${gpu_id}"
+  CUDA_VISIBLE_DEVICES="${gpu_id}" python -m baselines.runners.evaluate_baseline_subsets \
     --baseline_result_dir "${run_dir}" \
     --dataset_name "${BASELINE_DATASET}" \
     --image_encoder "${BASELINE_IMAGE_ENCODER}" \
@@ -99,6 +129,7 @@ run_ratio_job() {
   local method="$1"
   local ratio="$2"
   local seed="$3"
+  local gpu_id="$4"
 
   local ratio_tag
   ratio_tag="$(python - <<PY
@@ -117,8 +148,8 @@ PY
   fi
 
   if [[ ! -f "${selected_path}" ]]; then
-    echo "[run][ratio][selection] method=${method} ratio=${ratio} seed=${seed}"
-    python -m baselines.runners.run_baseline_selection \
+    echo "[run][ratio][selection] method=${method} ratio=${ratio} seed=${seed} gpu=${gpu_id}"
+    CUDA_VISIBLE_DEVICES="${gpu_id}" python -m baselines.runners.run_baseline_selection \
       --method "${method}" \
       --ratio "${ratio}" \
       --dataset_name "${BASELINE_DATASET}" \
@@ -135,8 +166,8 @@ PY
     echo "[skip][ratio][selection] exists method=${method} ratio=${ratio} seed=${seed}"
   fi
 
-  echo "[run][ratio][eval] method=${method} ratio=${ratio} seed=${seed}"
-  python -m baselines.runners.evaluate_baseline_subsets \
+  echo "[run][ratio][eval] method=${method} ratio=${ratio} seed=${seed} gpu=${gpu_id}"
+  CUDA_VISIBLE_DEVICES="${gpu_id}" python -m baselines.runners.evaluate_baseline_subsets \
     --baseline_result_dir "${run_dir}" \
     --dataset_name "${BASELINE_DATASET}" \
     --image_encoder "${BASELINE_IMAGE_ENCODER}" \
@@ -154,21 +185,30 @@ PY
     --no_aug
 }
 
+job_idx=0
 for seed in ${BASELINE_SEEDS}; do
   for budget in ${ABS_BUDGETS}; do
     for method in ${BASELINE_METHODS}; do
-      run_abs_job "${method}" "${budget}" "${seed}"
+      throttle_jobs
+      gpu_id="$(pick_gpu "${job_idx}")"
+      run_abs_job "${method}" "${budget}" "${seed}" "${gpu_id}" &
+      job_idx=$((job_idx + 1))
     done
   done
 done
+wait_all_jobs
 
 for seed in ${BASELINE_SEEDS}; do
   for ratio in ${RATIOS}; do
     for method in ${BASELINE_METHODS}; do
-      run_ratio_job "${method}" "${ratio}" "${seed}"
+      throttle_jobs
+      gpu_id="$(pick_gpu "${job_idx}")"
+      run_ratio_job "${method}" "${ratio}" "${seed}" "${gpu_id}" &
+      job_idx=$((job_idx + 1))
     done
   done
 done
+wait_all_jobs
 
 python -m baselines.runners.export_baseline_tables \
   --root "${BASELINE_OUTPUT_ROOT}" \
@@ -208,4 +248,3 @@ PY
 echo ""
 echo "[coco-unimodal] done."
 echo "[coco-unimodal] final table: ${BASELINE_OUTPUT_ROOT}/final_results_table.csv"
-
