@@ -29,14 +29,85 @@ export BOVW_DESCRIPTORS_PER_IMAGE="${WAVELET_MAIN_BOVW_LARGE_DESCRIPTORS_PER_IMA
 
 export ENABLE_IMAGE_ENCODER_DATA_PARALLEL="${ENABLE_IMAGE_ENCODER_DATA_PARALLEL:-1}"
 export IMAGE_ENCODER_DATA_PARALLEL_DEVICE_IDS="${IMAGE_ENCODER_DATA_PARALLEL_DEVICE_IDS:-}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 # Conservative defaults for large ratio runs. Override from the command line if
-# your multi-GPU memory budget allows larger batches.
+# your memory budget allows larger batches. Subset selection is still a single
+# GPU proxy-optimization step, so these must be forwarded to the latest-combo
+# variables that run_wavelet_main_latest_combo.sh actually consumes.
 export BATCH_TRAIN="${BATCH_TRAIN:-64}"
 export BATCH_TEST="${BATCH_TEST:-64}"
 export TEXT_BATCH_SIZE="${TEXT_BATCH_SIZE:-512}"
-export PROXY_BATCH_SIZE="${PROXY_BATCH_SIZE:-2048}"
-export PROXY_TARGET_BATCH_SIZE="${PROXY_TARGET_BATCH_SIZE:-2048}"
-export LSRC_BATCH_SIZE="${LSRC_BATCH_SIZE:-2048}"
+export WAVELET_MAIN_LATEST_PROXY_BATCH_SIZE="${WAVELET_MAIN_LATEST_PROXY_BATCH_SIZE:-${PROXY_BATCH_SIZE:-512}}"
+export WAVELET_MAIN_LATEST_PROXY_TARGET_BATCH_SIZE="${WAVELET_MAIN_LATEST_PROXY_TARGET_BATCH_SIZE:-${PROXY_TARGET_BATCH_SIZE:-1024}}"
+export WAVELET_MAIN_LATEST_LSRC_BATCH_SIZE="${WAVELET_MAIN_LATEST_LSRC_BATCH_SIZE:-${LSRC_BATCH_SIZE:-1024}}"
+export WAVELET_MAIN_LATEST_MAIN_SWD_NUM_PROJECTIONS="${WAVELET_MAIN_LATEST_MAIN_SWD_NUM_PROJECTIONS:-32}"
+export WAVELET_MAIN_LATEST_WAVELET_SWD_NUM_PROJECTIONS="${WAVELET_MAIN_LATEST_WAVELET_SWD_NUM_PROJECTIONS:-32}"
+
+# Keep the old variable names populated for any external logging or wrappers.
+export PROXY_BATCH_SIZE="${PROXY_BATCH_SIZE:-${WAVELET_MAIN_LATEST_PROXY_BATCH_SIZE}}"
+export PROXY_TARGET_BATCH_SIZE="${PROXY_TARGET_BATCH_SIZE:-${WAVELET_MAIN_LATEST_PROXY_TARGET_BATCH_SIZE}}"
+export LSRC_BATCH_SIZE="${LSRC_BATCH_SIZE:-${WAVELET_MAIN_LATEST_LSRC_BATCH_SIZE}}"
+
+if [[ "${WAVELET_MAIN_BOVW_LARGE_SELECTION_PARALLEL:-1}" == "1" && -n "${WAVELET_MAIN_LATEST_RATIOS// }" ]]; then
+  original_cuda_visible_devices="${CUDA_VISIBLE_DEVICES:-}"
+  selection_gpus_csv="${WAVELET_MAIN_BOVW_LARGE_SELECTION_GPUS:-${CUDA_VISIBLE_DEVICES:-0}}"
+  IFS=',' read -r -a selection_gpus <<< "${selection_gpus_csv}"
+  read -r -a ratio_jobs <<< "${WAVELET_MAIN_LATEST_RATIOS}"
+  max_parallel="${WAVELET_MAIN_BOVW_LARGE_SELECTION_PARALLEL_JOBS:-${#selection_gpus[@]}}"
+  if [[ "${max_parallel}" -lt 1 ]]; then
+    max_parallel=1
+  fi
+
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Selection GPU-parallel mode: ratios=${WAVELET_MAIN_LATEST_RATIOS} gpus=${selection_gpus_csv} max_parallel=${max_parallel}"
+
+  # Build or verify shared artifacts once before launching parallel selection
+  # jobs, avoiding races in feature/topology/cross-modal precompute.
+  (
+    export WAVELET_MAIN_LATEST_BUDGETS=""
+    export WAVELET_MAIN_LATEST_RATIOS=""
+    export WAVELET_MAIN_LATEST_RUN_SELECTION=0
+    export WAVELET_MAIN_LATEST_RUN_TRAIN=0
+    export WAVELET_MAIN_LATEST_REPORT_NAME="${WAVELET_MAIN_LATEST_REPORT_NAME}_precompute"
+    bash "${SCRIPT_DIR}/run_wavelet_main_latest_combo.sh"
+  )
+
+  pids=()
+  launched=0
+  for ratio in "${ratio_jobs[@]}"; do
+    gpu="${selection_gpus[$((launched % ${#selection_gpus[@]}))]}"
+    ratio_label="${ratio//./p}"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Launch selection: ratio=${ratio} gpu=${gpu}"
+    (
+      export CUDA_VISIBLE_DEVICES="${gpu}"
+      export WAVELET_MAIN_LATEST_BUDGETS=""
+      export WAVELET_MAIN_LATEST_RATIOS="${ratio}"
+      export WAVELET_MAIN_LATEST_RUN_SELECTION=1
+      export WAVELET_MAIN_LATEST_RUN_TRAIN=0
+      export WAVELET_MAIN_LATEST_REPORT_NAME="${WAVELET_MAIN_LATEST_REPORT_NAME}_select_${ratio_label}"
+      bash "${SCRIPT_DIR}/run_wavelet_main_latest_combo.sh"
+    ) &
+    pids+=("$!")
+    launched=$((launched + 1))
+    if [[ "${#pids[@]}" -ge "${max_parallel}" ]]; then
+      for pid in "${pids[@]}"; do
+        wait "${pid}"
+      done
+      pids=()
+    fi
+  done
+  for pid in "${pids[@]}"; do
+    wait "${pid}"
+  done
+
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Selection GPU-parallel jobs completed. Start training/evaluation pass."
+  if [[ -n "${original_cuda_visible_devices}" ]]; then
+    export CUDA_VISIBLE_DEVICES="${original_cuda_visible_devices}"
+  else
+    unset CUDA_VISIBLE_DEVICES
+  fi
+  export WAVELET_MAIN_LATEST_RUN_SELECTION=0
+  export WAVELET_MAIN_LATEST_RUN_TRAIN=1
+fi
 
 exec bash "${SCRIPT_DIR}/run_wavelet_main_latest_combo.sh"

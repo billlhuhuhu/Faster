@@ -23,6 +23,8 @@ CROSS_OUTPUT_ROOT="${WAVELET_MAIN_LATEST_CROSS_OUTPUT_ROOT:-artifacts/cross_moda
 SELECTION_OUTPUT_ROOT="${WAVELET_MAIN_LATEST_SELECTION_OUTPUT_ROOT:-artifacts/subset_selection_wavelet_main_latest_collapse_aware}"
 TRAIN_OUTPUT_ROOT="${WAVELET_MAIN_LATEST_TRAIN_OUTPUT_ROOT:-artifacts/subset_train_wavelet_main_latest_collapse_aware}"
 REPORT_NAME="${WAVELET_MAIN_LATEST_REPORT_NAME:-wavelet_main_latest_combo_collapse_aware}"
+RUN_SELECTION="${WAVELET_MAIN_LATEST_RUN_SELECTION:-1}"
+RUN_TRAIN="${WAVELET_MAIN_LATEST_RUN_TRAIN:-1}"
 
 CORRECTION_MODE="${WAVELET_MAIN_LATEST_CORRECTION_MODE:-bidirectional}"
 FUSION_MODE="${WAVELET_MAIN_LATEST_FUSION_MODE:-confidence_aware}"
@@ -430,7 +432,9 @@ run_selection_abs() {
     train_extra_args+=(--image_encoder_data_parallel_device_ids "${IMAGE_ENCODER_DATA_PARALLEL_DEVICE_IDS}")
   fi
 
-  if [[ ! -f "${selected_indices_path}" ]]; then
+  if [[ "${RUN_SELECTION}" != "1" ]]; then
+    stage_log "Skip selection by config: budget=${budget} seed=${seed}"
+  elif [[ ! -f "${selected_indices_path}" ]]; then
     stage_log "Selection start: budget=${budget} seed=${seed}"
     python "${PROJECT_ROOT}/run_subset_selection.py" \
       --dataset "${DATASET}" \
@@ -496,7 +500,11 @@ run_selection_abs() {
     stage_log "Skip selection: existing selected_indices found at ${selected_indices_path}"
   fi
 
-  if [[ ! -f "${metrics_path}" ]]; then
+  if [[ "${RUN_TRAIN}" != "1" ]]; then
+    stage_log "Skip train by config: budget=${budget} seed=${seed}"
+  elif [[ ! -f "${selected_indices_path}" ]]; then
+    stage_log "Skip train: missing selected_indices at ${selected_indices_path}"
+  elif [[ ! -f "${metrics_path}" ]]; then
     if [[ "${TRAIN_NO_AUG}" == "1" ]]; then
       train_extra_args+=(--no_aug)
     fi
@@ -597,7 +605,9 @@ run_selection_ratio() {
     train_extra_args+=(--image_encoder_data_parallel_device_ids "${IMAGE_ENCODER_DATA_PARALLEL_DEVICE_IDS}")
   fi
 
-  if [[ ! -f "${selected_indices_path}" ]]; then
+  if [[ "${RUN_SELECTION}" != "1" ]]; then
+    stage_log "Skip selection by config: ratio=${ratio} seed=${seed}"
+  elif [[ ! -f "${selected_indices_path}" ]]; then
     stage_log "Selection start: ratio=${ratio} seed=${seed}"
     python "${PROJECT_ROOT}/run_subset_selection.py" \
       --dataset "${DATASET}" \
@@ -663,7 +673,11 @@ run_selection_ratio() {
     stage_log "Skip selection: existing selected_indices found at ${selected_indices_path}"
   fi
 
-  if [[ ! -f "${metrics_path}" ]]; then
+  if [[ "${RUN_TRAIN}" != "1" ]]; then
+    stage_log "Skip train by config: ratio=${ratio} seed=${seed}"
+  elif [[ ! -f "${selected_indices_path}" ]]; then
+    stage_log "Skip train: missing selected_indices at ${selected_indices_path}"
+  elif [[ ! -f "${metrics_path}" ]]; then
     if [[ "${TRAIN_NO_AUG}" == "1" ]]; then
       train_extra_args+=(--no_aug)
     fi
@@ -697,7 +711,7 @@ run_selection_ratio() {
 cd "${PROJECT_ROOT}"
 run_precompute_if_needed
 
-stage_log "Wavelet-main latest combo start: dataset=${DATASET} budgets=${BUDGETS[*]} ratios=${RATIOS[*]} seeds=${SEEDS[*]} fusion_weight_mode=${WAVELET_FUSION_WEIGHT_MODE} exp_id=${DIAGNOSTIC_EXPERIMENT_ID:-none} stage2=${STAGE2_SWITCH:-preset} stage3=${STAGE3_SWITCH:-preset} stage4=${STAGE4_SWITCH:-preset}"
+stage_log "Wavelet-main latest combo start: dataset=${DATASET} budgets=${BUDGETS[*]} ratios=${RATIOS[*]} seeds=${SEEDS[*]} fusion_weight_mode=${WAVELET_FUSION_WEIGHT_MODE} exp_id=${DIAGNOSTIC_EXPERIMENT_ID:-none} stage2=${STAGE2_SWITCH:-preset} stage3=${STAGE3_SWITCH:-preset} stage4=${STAGE4_SWITCH:-preset} run_selection=${RUN_SELECTION} run_train=${RUN_TRAIN}"
 
 for budget in "${BUDGETS[@]}"; do
   for seed in "${SEEDS[@]}"; do
