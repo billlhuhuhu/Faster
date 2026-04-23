@@ -1007,6 +1007,18 @@ def run_proxy_optimized_selection(args, representation, unified_graph):
         optimization_embedding,
         hop_weight=args.topology_hop_weight,
     )
+    lsrc_image_graph_arg = getattr(args, "_lsrc_image_graph", None)
+    lsrc_text_graph_arg = getattr(args, "_lsrc_text_graph", None)
+    if bool(stage4_enabled and (getattr(args, "enable_lsrc", False) or getattr(args, "keep_lsrc", True))):
+        if lsrc_image_graph_arg is None or lsrc_text_graph_arg is None:
+            print(
+                "[LSRC] image/text relation graphs were not provided; "
+                "falling back to the unified graph for both modalities. "
+                "For full multimodal LSRC, pass _lsrc_image_graph and _lsrc_text_graph."
+            )
+            lsrc_image_graph_arg = unified_graph
+            lsrc_text_graph_arg = unified_graph
+
     proxy_bundle = optimize_proxy_points(
         optimization_embedding,
         subset_size=subset_size,
@@ -1041,8 +1053,8 @@ def run_proxy_optimized_selection(args, representation, unified_graph):
         graph_reference=graph_reference,
         enable_lsrc=bool(stage4_enabled and getattr(args, "enable_lsrc", False)),
         keep_lsrc=bool(stage4_enabled and getattr(args, "keep_lsrc", True)),
-        lsrc_image_graph=getattr(args, "_lsrc_image_graph", None),
-        lsrc_text_graph=getattr(args, "_lsrc_text_graph", None),
+        lsrc_image_graph=lsrc_image_graph_arg,
+        lsrc_text_graph=lsrc_text_graph_arg,
         lsrc_k=getattr(args, "lsrc_k", 32),
         lsrc_tau_r=getattr(args, "lsrc_tau_r", 1.0),
         lsrc_tau_c=getattr(args, "lsrc_tau_c", 1.0),

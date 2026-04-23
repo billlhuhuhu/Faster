@@ -112,7 +112,7 @@ def load_or_build_features(args, records):
     return img_features, txt_features, sample_meta, feature_info
 
 
-def build_knn_graph(representation, k=15, metric="cosine"):
+def build_knn_graph(representation, k=15, metric="cosine", desc="Building LLaVA kNN graph"):
     representation = np.asarray(representation, dtype=np.float32)
     n = representation.shape[0]
     k = max(1, min(int(k), n - 1))
@@ -122,7 +122,7 @@ def build_knn_graph(representation, k=15, metric="cosine"):
     rows = []
     cols = []
     vals = []
-    for i in tqdm(range(n), desc="Building LLaVA unified kNN graph"):
+    for i in tqdm(range(n), desc=desc):
         neigh = indices[i, 1:]
         dist = distances[i, 1:]
         if metric == "cosine":
@@ -299,11 +299,27 @@ def main():
 
     records = load_json_or_jsonl(args.annotation_path)
     img_features, txt_features, sample_meta, feature_info = load_or_build_features(args, records)
-    representation = np.concatenate(
-        [l2_normalize(img_features.astype(np.float32)), l2_normalize(txt_features.astype(np.float32))],
-        axis=1,
-    ).astype(np.float32)
-    unified_graph = build_knn_graph(representation, k=args.knn_k, metric=args.metric)
+    img_repr = l2_normalize(img_features.astype(np.float32))
+    txt_repr = l2_normalize(txt_features.astype(np.float32))
+    representation = np.concatenate([img_repr, txt_repr], axis=1).astype(np.float32)
+    unified_graph = build_knn_graph(
+        representation,
+        k=args.knn_k,
+        metric=args.metric,
+        desc="Building LLaVA unified kNN graph",
+    )
+    image_graph = build_knn_graph(
+        img_repr,
+        k=args.knn_k,
+        metric=args.metric,
+        desc="Building LLaVA image kNN graph for LSRC",
+    )
+    text_graph = build_knn_graph(
+        txt_repr,
+        k=args.knn_k,
+        metric=args.metric,
+        desc="Building LLaVA text kNN graph for LSRC",
+    )
 
     output_root = Path(args.output_root)
     for ratio in parse_ratios(args.ratios):
@@ -315,6 +331,13 @@ def main():
             continue
         output_dir.mkdir(parents=True, exist_ok=True)
         selection_args = make_selection_args(args, ratio)
+        # LSRC needs modality-specific relation graphs. The LLaVA shortcut entry
+        # builds them from the same fixed image/text features used for the
+        # unified representation, mirroring the main retrieval pipeline.
+        selection_args._lsrc_image_graph = image_graph
+        selection_args._lsrc_text_graph = text_graph
+        selection_args._lsrc_rho_img = 0.5
+        selection_args._lsrc_rho_txt = 0.5
         selection_outputs = run_proxy_optimized_selection(selection_args, representation, unified_graph)
         selected_indices = sort_selected_indices(selection_outputs["selected_indices"])
         selected_meta = [sample_meta[int(idx)] for idx in selected_indices]
@@ -333,6 +356,8 @@ def main():
                 "seed": int(args.seed),
                 "feature_info": feature_info,
                 "graph_num_edges": int(unified_graph.nnz),
+                "image_graph_num_edges": int(image_graph.nnz),
+                "text_graph_num_edges": int(text_graph.nnz),
                 "proxy_summary": selection_outputs.get("extra_summary", {}),
             },
         )
