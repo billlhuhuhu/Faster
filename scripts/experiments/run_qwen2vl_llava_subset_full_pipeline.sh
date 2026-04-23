@@ -29,9 +29,16 @@ export VLM_RUN_OURS="${VLM_RUN_OURS:-1}"
 export VLM_RUN_DENSE_SIFT_BOVW_SELECTION="${VLM_RUN_DENSE_SIFT_BOVW_SELECTION:-1}"
 export VLM_DENSE_SIFT_BOVW_SELECTION_ROOT="${VLM_DENSE_SIFT_BOVW_SELECTION_ROOT:-artifacts/vlm_subset_selection/llava_dense_sift_bovw}"
 export VLM_DENSE_SIFT_BOVW_CACHE_DIR="${VLM_DENSE_SIFT_BOVW_CACHE_DIR:-artifacts/vlm_feature_cache/llava_dense_sift_bovw}"
+export VLM_DENSE_SIFT_BOVW_FEATURE_CACHE_ROOT="${VLM_DENSE_SIFT_BOVW_FEATURE_CACHE_ROOT:-artifacts/vlm_feature_cache_llava_dense_sift_bovw_full_pipeline}"
+export VLM_DENSE_SIFT_BOVW_TOPOLOGY_ROOT="${VLM_DENSE_SIFT_BOVW_TOPOLOGY_ROOT:-artifacts/vlm_topology_graph_dense_sift_bovw}"
+export VLM_DENSE_SIFT_BOVW_CROSS_MODAL_ROOT="${VLM_DENSE_SIFT_BOVW_CROSS_MODAL_ROOT:-artifacts/vlm_cross_modal_topology_dense_sift_bovw}"
+export VLM_DENSE_SIFT_BOVW_PIPELINE_SELECTION_ROOT="${VLM_DENSE_SIFT_BOVW_PIPELINE_SELECTION_ROOT:-artifacts/vlm_subset_selection_dense_sift_bovw_full_pipeline}"
 export VLM_SELECTION_DEVICE="${VLM_SELECTION_DEVICE:-cuda}"
 export VLM_SELECTION_TEXT_REPR_METHOD="${VLM_SELECTION_TEXT_REPR_METHOD:-bert}"
 export VLM_SELECTION_TEXT_BATCH_SIZE="${VLM_SELECTION_TEXT_BATCH_SIZE:-256}"
+export VLM_SELECTION_IMAGE_METRIC="${VLM_SELECTION_IMAGE_METRIC:-euclidean}"
+export VLM_SELECTION_TEXT_METRIC="${VLM_SELECTION_TEXT_METRIC:-cosine}"
+export VLM_SELECTION_WAVELET_FUSION_WEIGHT_MODE="${VLM_SELECTION_WAVELET_FUSION_WEIGHT_MODE:-fixed_per_scale}"
 export VLM_SELECTION_PROXY_NUM_STEPS="${VLM_SELECTION_PROXY_NUM_STEPS:-200}"
 export VLM_SELECTION_PROXY_BATCH_SIZE="${VLM_SELECTION_PROXY_BATCH_SIZE:-2048}"
 export VLM_SELECTION_PROXY_TARGET_BATCH_SIZE="${VLM_SELECTION_PROXY_TARGET_BATCH_SIZE:-2048}"
@@ -85,6 +92,8 @@ echo "  output root: ${VLM_FINETUNE_OUTPUT_ROOT}"
 echo "  ratios: ${VLM_SUBSET_RATIOS}"
 echo "  dense_sift_bovw selection: ${VLM_RUN_DENSE_SIFT_BOVW_SELECTION}"
 echo "  selection text feature: ${VLM_SELECTION_TEXT_REPR_METHOD}"
+echo "  selection topology root: ${VLM_DENSE_SIFT_BOVW_TOPOLOGY_ROOT}"
+echo "  selection cross-modal root: ${VLM_DENSE_SIFT_BOVW_CROSS_MODAL_ROOT}"
 echo "  ours template: ${VLM_OURS_SELECTED_INDICES_TEMPLATE:-<auto>}"
 echo "  finetune mode: ${VLM_FINETUNE_MODE}"
 echo "  merge for eval: ${VLM_MERGE_LORA_FOR_EVAL}"
@@ -112,11 +121,18 @@ if [[ "${VLM_RUN_OURS}" == "1" && -z "${VLM_OURS_SELECTED_INDICES_TEMPLATE}" ]];
       --image_root "${LLAVA_IMAGE_ROOT}" \
       --output_root "${VLM_DENSE_SIFT_BOVW_SELECTION_ROOT}" \
       --cache_dir "${VLM_DENSE_SIFT_BOVW_CACHE_DIR}" \
+      --feature_cache_root "${VLM_DENSE_SIFT_BOVW_FEATURE_CACHE_ROOT}" \
+      --topology_root "${VLM_DENSE_SIFT_BOVW_TOPOLOGY_ROOT}" \
+      --cross_modal_root "${VLM_DENSE_SIFT_BOVW_CROSS_MODAL_ROOT}" \
+      --pipeline_selection_output_root "${VLM_DENSE_SIFT_BOVW_PIPELINE_SELECTION_ROOT}" \
       --ratios "${VLM_SUBSET_RATIOS}" \
       --seed "${VLM_SEED}" \
       --device "${VLM_SELECTION_DEVICE}" \
       --text_repr_method "${VLM_SELECTION_TEXT_REPR_METHOD}" \
       --selection_text_batch_size "${VLM_SELECTION_TEXT_BATCH_SIZE}" \
+      --image_metric "${VLM_SELECTION_IMAGE_METRIC}" \
+      --text_metric "${VLM_SELECTION_TEXT_METRIC}" \
+      --wavelet_fusion_weight_mode "${VLM_SELECTION_WAVELET_FUSION_WEIGHT_MODE}" \
       --proxy_num_steps "${VLM_SELECTION_PROXY_NUM_STEPS}" \
       --proxy_batch_size "${VLM_SELECTION_PROXY_BATCH_SIZE}" \
       --proxy_target_batch_size "${VLM_SELECTION_PROXY_TARGET_BATCH_SIZE}" \

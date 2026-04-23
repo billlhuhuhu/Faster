@@ -13,7 +13,7 @@ from src.topology_graph import run_topology_graph
 
 def build_parser():
     parser = argparse.ArgumentParser(description="Build single-modality topology graphs from cached full-train features.")
-    parser.add_argument("--dataset", type=str, required=True, choices=["flickr", "coco"])
+    parser.add_argument("--dataset", type=str, required=True, choices=["flickr", "coco", "llava_instruct_150k"])
     parser.add_argument("--split", type=str, default="train", choices=["train"])
     parser.add_argument("--image_encoder", type=str, required=True)
     parser.add_argument("--text_encoder", type=str, default="bert")

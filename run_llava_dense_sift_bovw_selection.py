@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,11 +19,16 @@ from sklearn.neighbors import NearestNeighbors
 from tqdm import tqdm
 
 from data.subset_dataset import save_selected_indices
+from run_cross_modal_topology import build_parser as build_cross_modal_parser
+from run_subset_selection import build_parser as build_subset_parser
+from run_topology_graph import build_parser as build_topology_parser
 from run_vlm_finetune import extract_llava_turn, load_json_or_jsonl, resolve_image_path
+from src.cross_modal_topology import run_cross_modal_topology
 from src.fixed_image_features import extract_fixed_image_features
 from src.fixed_text_features import extract_fixed_text_features
 from src.proxy_optimization import l2_normalize
-from src.subset_match import run_proxy_optimized_selection, sort_selected_indices
+from src.subset_match import run_proxy_optimized_selection, run_subset_selection, sort_selected_indices
+from src.topology_graph import run_topology_graph
 
 
 def write_json(path, payload):
@@ -159,6 +165,275 @@ def build_knn_graph(representation, k=15, metric="cosine", desc="Building LLaVA 
     return graph
 
 
+def sanitize_component(value):
+    return str(value).replace("\\", "-").replace("/", "-").replace(" ", "_")
+
+
+def ratio_tag_from_percent(ratio):
+    return f"ratio_{int(round(float(ratio))):02d}"
+
+
+def hardlink_or_copy(src, dst):
+    src = Path(src)
+    dst = Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists():
+        try:
+            if src.resolve() == dst.resolve():
+                return
+        except OSError:
+            pass
+        if dst.stat().st_size == src.stat().st_size:
+            return
+        dst.unlink()
+    try:
+        os.link(src, dst)
+    except OSError:
+        shutil.copy2(src, dst)
+
+
+def ensure_structured_feature_cache(args):
+    flat_cache_dir = Path(args.cache_dir)
+    model_tag = f"{sanitize_component('dense_sift_bovw')}_{sanitize_component(args.text_repr_method)}"
+    structured_dir = Path(args.feature_cache_root) / args.pipeline_dataset_name / "train" / model_tag
+    for filename in ["img_features_selection.pt", "txt_features_selection.pt", "sample_meta.json", "feature_info.json"]:
+        src = flat_cache_dir / filename
+        if not src.exists():
+            raise FileNotFoundError(f"Missing flat LLaVA feature cache file: {src}")
+        hardlink_or_copy(src, structured_dir / filename)
+    print(f"[LLaVA selection] Structured feature cache ready: {structured_dir}", flush=True)
+    return structured_dir
+
+
+def topology_output_dir(args, modality, metric):
+    model_tag = f"{sanitize_component('dense_sift_bovw')}_{sanitize_component(args.text_repr_method)}"
+    return (
+        Path(args.topology_root)
+        / args.pipeline_dataset_name
+        / "train"
+        / model_tag
+        / modality
+        / f"k{int(args.knn_k)}_{sanitize_component(metric)}"
+    )
+
+
+def cross_modal_output_dir(args):
+    model_tag = f"{sanitize_component('dense_sift_bovw')}_{sanitize_component(args.text_repr_method)}"
+    return (
+        Path(args.cross_modal_root)
+        / args.pipeline_dataset_name
+        / "train"
+        / model_tag
+        / f"k{int(args.knn_k)}_{sanitize_component(args.image_metric)}_a1.0"
+    )
+
+
+def legacy_selection_output_dir(args, ratio):
+    return Path(args.output_root) / ratio_tag_from_percent(ratio) / "proxy_opt_lsrc" / f"seed_{int(args.seed)}"
+
+
+def is_current_full_pipeline_selection(output_dir):
+    summary_path = Path(output_dir) / "summary.json"
+    selected_path = Path(output_dir) / "selected_indices.json"
+    if not summary_path.exists() or not selected_path.exists():
+        return False
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return False
+    return summary.get("selection_pipeline") == "full_cross_modal_topology"
+
+
+def build_topology_args(args, modality, metric):
+    parser = build_topology_parser()
+    return parser.parse_args(
+        [
+            "--dataset", args.pipeline_dataset_name,
+            "--split", "train",
+            "--image_encoder", "dense_sift_bovw",
+            "--text_encoder", args.text_repr_method,
+            "--modality", modality,
+            "--feature_cache_root", args.feature_cache_root,
+            "--output_root", args.topology_root,
+            "--metric", metric,
+            "--knn_k", str(int(args.knn_k)),
+            "--graph_reduce_method", args.topology_graph_reduce_method,
+            "--graph_feature_dim", str(int(args.topology_graph_feature_dim)),
+            "--num_eigs", "32",
+            "--spectral_embedding_dim", "32",
+            "--n_jobs", str(int(args.topology_n_jobs)),
+            "--knn_backend", args.topology_knn_backend,
+            "--mst_weight_scale", "1.0",
+            "--random_state", str(int(args.seed)),
+        ]
+    )
+
+
+def build_cross_modal_args(args):
+    parser = build_cross_modal_parser()
+    return parser.parse_args(
+        [
+            "--dataset", args.pipeline_dataset_name,
+            "--split", "train",
+            "--image_encoder", "dense_sift_bovw",
+            "--text_encoder", args.text_repr_method,
+            "--topology_root", args.topology_root,
+            "--output_root", args.cross_modal_root,
+            "--metric", args.image_metric,
+            "--image_metric", args.image_metric,
+            "--text_metric", args.text_metric,
+            "--k", str(int(args.knn_k)),
+            "--alpha", "1.0",
+            "--correction_mode", "bidirectional",
+            "--correction_score_mode", "collapse_score",
+            "--collapse_score_mode", "edge_plus_neighborhood",
+            "--collapse_neighbor_topk", str(int(args.collapse_neighbor_topk)),
+            "--local_relation_alpha", str(float(args.local_relation_alpha)),
+            "--asymmetric_correction_lambda", str(float(args.asymmetric_correction_lambda)),
+            "--correction_confidence_gap_delta", str(float(args.correction_confidence_gap_delta)),
+            "--corrected_image_added_topk", str(int(args.corrected_image_added_topk)),
+            "--fusion_domain_mode", "wavelet_latent",
+            "--wavelet_fusion_weight_mode", args.wavelet_fusion_weight_mode,
+            "--wavelet_fusion_entropy_temperature", str(float(args.wavelet_fusion_entropy_temperature)),
+            "--wavelet_fusion_scales", args.wavelet_scales,
+            "--wavelet_fusion_probe_dim", str(int(args.wavelet_fusion_probe_dim)),
+            "--wavelet_latent_postprocess_topk", str(int(args.wavelet_latent_postprocess_topk)),
+            "--num_eigs", "64",
+            "--spectral_embedding_dim", "32",
+            "--embedding_type", "diffusion",
+        ]
+    )
+
+
+def build_subset_args(args, ratio):
+    parser = build_subset_parser()
+    argv = [
+        "--dataset", args.pipeline_dataset_name,
+        "--split", "train",
+        "--image_encoder", "dense_sift_bovw",
+        "--text_encoder", args.text_repr_method,
+        "--feature_cache_root", args.feature_cache_root,
+        "--cross_modal_root", args.cross_modal_root,
+        "--output_root", args.pipeline_selection_output_root,
+        "--metric", args.image_metric,
+        "--k", str(int(args.knn_k)),
+        "--alpha", "1.0",
+        "--budget_ratio", f"{float(ratio) / 100.0:.8f}",
+        "--selection_method", "proxy_opt",
+        "--reference_embedding_mode", "hybrid",
+        "--spectral_weight", "1.0",
+        "--random_state", str(int(args.seed)),
+        "--device", args.device,
+        "--proxy_projection_dim", str(int(args.proxy_projection_dim)),
+        "--proxy_init_method", args.proxy_init_method,
+        "--proxy_loss_type", args.proxy_loss_type,
+        "--proxy_lr", str(float(args.proxy_lr)),
+        "--proxy_num_steps", str(int(args.proxy_num_steps)),
+        "--proxy_reg_weight", str(float(args.proxy_reg_weight)),
+        "--proxy_target_batch_size", str(int(args.proxy_target_batch_size)),
+        "--proxy_batch_size", str(int(args.proxy_batch_size)),
+        "--use_wavelet_multiscale",
+        "--wavelet_scales", args.wavelet_scales,
+        "--wavelet_distance_type", "swd",
+        "--wavelet_schedule", "coarse_to_fine",
+        "--lambda_main", "1.0",
+        "--wavelet_main_scales", args.wavelet_main_scales,
+        "--wavelet_main_swd_num_projections", str(int(args.wavelet_main_swd_num_projections)),
+        "--wavelet_cov_weight", str(float(args.wavelet_cov_weight)),
+        "--wavelet_edge_weight", str(float(args.wavelet_edge_weight)),
+        "--wavelet_curriculum_schedule", "coarse_to_fine",
+        "--lambda_lsrc", str(float(args.lambda_lsrc)),
+        "--lambda_reg", "1.0",
+        "--reg_beta_topo", "1.0",
+        "--reg_gamma_init", "1.0",
+        "--enable_lsrc",
+        "--keep_lsrc",
+        "--lsrc_k", str(int(args.lsrc_k)),
+        "--lsrc_tau_r", "1.0",
+        "--lsrc_tau_c", "1.0",
+        "--lsrc_eta", "0.5",
+        "--lsrc_beta", "0.5",
+        "--lsrc_batch_size", str(int(args.lsrc_batch_size)),
+        "--lsrc_coverage_mode", "mean",
+        "--lsrc_rel_loss_mode", "weight_mean",
+        "--matching_top_k", str(int(args.matching_top_k)),
+        "--matching_cost_mode", args.matching_cost_mode,
+        "--cost_alpha_diff", "0.25",
+        "--cost_beta_wavelet", "1.0",
+        "--matching_wavelet_weight", "1.0",
+        "--cost_gamma_topo", "0.1",
+        "--cost_eta_lsrc", "0.1",
+        "--geometry_weight", "1.0",
+        "--diversity_sigma", "1.0",
+    ]
+    if args.use_dpp:
+        argv.extend(["--use_dpp", "--lambda_div", "0.01", "--reg_alpha_div", "1.0"])
+    else:
+        argv.extend(["--lambda_div", "0.0", "--reg_alpha_div", "0.0"])
+    return parser.parse_args(argv)
+
+
+def run_full_cross_modal_pipeline(args, ratio):
+    ensure_structured_feature_cache(args)
+
+    image_topology_dir = topology_output_dir(args, "image", args.image_metric)
+    if args.force_recompute_topology or not (image_topology_dir / "summary.json").exists():
+        print("[LLaVA selection] Stage A: build image topology graph", flush=True)
+        run_topology_graph(build_topology_args(args, "image", args.image_metric))
+    else:
+        print(f"[LLaVA selection] Skip image topology: {image_topology_dir}", flush=True)
+
+    text_topology_dir = topology_output_dir(args, "text", args.text_metric)
+    if args.force_recompute_topology or not (text_topology_dir / "summary.json").exists():
+        print("[LLaVA selection] Stage A: build text topology graph", flush=True)
+        run_topology_graph(build_topology_args(args, "text", args.text_metric))
+    else:
+        print(f"[LLaVA selection] Skip text topology: {text_topology_dir}", flush=True)
+
+    cross_dir = cross_modal_output_dir(args)
+    if args.force_recompute_cross_modal or not (cross_dir / "summary.json").exists():
+        print("[LLaVA selection] Stage B: run stage2 correction + stage3 wavelet-latent fusion", flush=True)
+        run_cross_modal_topology(build_cross_modal_args(args))
+    else:
+        print(f"[LLaVA selection] Skip cross-modal topology: {cross_dir}", flush=True)
+
+    print(f"[LLaVA selection] Stage C: wavelet_main subset selection ratio={ratio}%", flush=True)
+    outputs = run_subset_selection(build_subset_args(args, ratio))
+    return outputs, cross_dir
+
+
+def sync_selection_to_legacy_layout(args, ratio, outputs, cross_dir):
+    legacy_dir = legacy_selection_output_dir(args, ratio)
+    legacy_dir.mkdir(parents=True, exist_ok=True)
+    saved = outputs["saved"]
+    for key, filename in [
+        ("selected_indices", "selected_indices.json"),
+        ("selected_meta", "selected_meta.json"),
+        ("summary", "summary.json"),
+    ]:
+        src = Path(saved[key])
+        dst = legacy_dir / filename
+        shutil.copy2(src, dst)
+    summary_path = legacy_dir / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary.update(
+        {
+            "selection_pipeline": "full_cross_modal_topology",
+            "selection_pipeline_reference": "run_wavelet_main_dense_sift_bovw_combo",
+            "stage2_correction": True,
+            "stage3_wavelet_latent_fusion": True,
+            "stage4_wavelet_main_lsrc": True,
+            "cross_modal_dir": str(cross_dir),
+            "pipeline_selection_output_dir": outputs["output_dir"],
+        }
+    )
+    write_json(summary_path, summary)
+    if "proxy_points" in saved:
+        shutil.copy2(saved["proxy_points"], legacy_dir / "proxy_points.pt")
+    print(f"[LLaVA selection] Synced full-pipeline Ours selection to {legacy_dir}", flush=True)
+    return legacy_dir
+
+
 def make_selection_args(args, ratio):
     return SimpleNamespace(
         dataset="llava_instruct_150k",
@@ -271,10 +546,18 @@ def main():
     parser.add_argument("--image_root", type=str, required=True)
     parser.add_argument("--output_root", type=str, default="artifacts/vlm_subset_selection/llava_dense_sift_bovw")
     parser.add_argument("--cache_dir", type=str, default="artifacts/vlm_feature_cache/llava_dense_sift_bovw")
+    parser.add_argument("--feature_cache_root", type=str, default="artifacts/vlm_feature_cache_llava_dense_sift_bovw_full_pipeline")
+    parser.add_argument("--topology_root", type=str, default="artifacts/vlm_topology_graph_dense_sift_bovw")
+    parser.add_argument("--cross_modal_root", type=str, default="artifacts/vlm_cross_modal_topology_dense_sift_bovw")
+    parser.add_argument("--pipeline_selection_output_root", type=str, default="artifacts/vlm_subset_selection_dense_sift_bovw_full_pipeline")
+    parser.add_argument("--pipeline_dataset_name", type=str, default="llava_instruct_150k")
     parser.add_argument("--ratios", type=str, default="1 5 10")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--force_recompute_features", action="store_true", default=False)
+    parser.add_argument("--force_recompute_topology", action="store_true", default=False)
+    parser.add_argument("--force_recompute_cross_modal", action="store_true", default=False)
+    parser.add_argument("--force_recompute_selection", action="store_true", default=False)
 
     parser.add_argument("--selection_image_size", type=int, default=128)
     parser.add_argument("--bovw_codebook_size", type=int, default=512)
@@ -291,7 +574,22 @@ def main():
     parser.add_argument("--tfidf_svd_dim", type=int, default=256)
 
     parser.add_argument("--knn_k", type=int, default=15)
-    parser.add_argument("--metric", type=str, default="cosine", choices=["cosine", "euclidean"])
+    parser.add_argument("--metric", type=str, default="euclidean", choices=["cosine", "euclidean"])
+    parser.add_argument("--image_metric", type=str, default="euclidean", choices=["cosine", "euclidean"])
+    parser.add_argument("--text_metric", type=str, default="cosine", choices=["cosine", "euclidean"])
+    parser.add_argument("--topology_graph_reduce_method", type=str, default="pca", choices=["none", "pca", "random_projection"])
+    parser.add_argument("--topology_graph_feature_dim", type=int, default=256)
+    parser.add_argument("--topology_n_jobs", type=int, default=32)
+    parser.add_argument("--topology_knn_backend", type=str, default="auto", choices=["auto", "sklearn", "faiss"])
+    parser.add_argument("--collapse_neighbor_topk", type=int, default=15)
+    parser.add_argument("--local_relation_alpha", type=float, default=0.5)
+    parser.add_argument("--asymmetric_correction_lambda", type=float, default=0.3)
+    parser.add_argument("--correction_confidence_gap_delta", type=float, default=0.1)
+    parser.add_argument("--corrected_image_added_topk", type=int, default=5)
+    parser.add_argument("--wavelet_fusion_weight_mode", type=str, default="fixed_per_scale", choices=["fixed_per_scale", "collapse_aware"])
+    parser.add_argument("--wavelet_fusion_entropy_temperature", type=float, default=1.0)
+    parser.add_argument("--wavelet_fusion_probe_dim", type=int, default=32)
+    parser.add_argument("--wavelet_latent_postprocess_topk", type=int, default=64)
     parser.add_argument("--proxy_loss_type", type=str, default="wavelet_main")
     parser.add_argument("--proxy_init_method", type=str, default="kmeans")
     parser.add_argument("--proxy_projection_dim", type=int, default=128)
@@ -317,73 +615,24 @@ def main():
 
     records = load_json_or_jsonl(args.annotation_path)
     print(f"[LLaVA selection] Loaded {len(records)} LLaVA records from {args.annotation_path}", flush=True)
-    img_features, txt_features, sample_meta, feature_info = load_or_build_features(args, records)
-    print("[LLaVA selection] Normalizing image/text features and building unified representation", flush=True)
-    img_repr = l2_normalize(img_features.astype(np.float32))
-    txt_repr = l2_normalize(txt_features.astype(np.float32))
-    representation = np.concatenate([img_repr, txt_repr], axis=1).astype(np.float32)
-    unified_graph = build_knn_graph(
-        representation,
-        k=args.knn_k,
-        metric=args.metric,
-        desc="Building LLaVA unified kNN graph",
-    )
-    image_graph = build_knn_graph(
-        img_repr,
-        k=args.knn_k,
-        metric=args.metric,
-        desc="Building LLaVA image kNN graph for LSRC",
-    )
-    text_graph = build_knn_graph(
-        txt_repr,
-        k=args.knn_k,
-        metric=args.metric,
-        desc="Building LLaVA text kNN graph for LSRC",
-    )
+    load_or_build_features(args, records)
 
     output_root = Path(args.output_root)
     for ratio in parse_ratios(args.ratios):
         ratio_tag = f"ratio_{int(round(ratio)):02d}"
         output_dir = output_root / ratio_tag / "proxy_opt_lsrc" / f"seed_{int(args.seed)}"
         selected_path = output_dir / "selected_indices.json"
-        if selected_path.exists():
-            print(f"Skip existing LLaVA dense_sift_bovw selection: {selected_path}")
+        if selected_path.exists() and not args.force_recompute_selection and is_current_full_pipeline_selection(output_dir):
+            print(f"Skip existing full-pipeline LLaVA dense_sift_bovw selection: {selected_path}", flush=True)
             continue
-        output_dir.mkdir(parents=True, exist_ok=True)
-        selection_args = make_selection_args(args, ratio)
-        # LSRC needs modality-specific relation graphs. The LLaVA shortcut entry
-        # builds them from the same fixed image/text features used for the
-        # unified representation, mirroring the main retrieval pipeline.
-        selection_args._lsrc_image_graph = image_graph
-        selection_args._lsrc_text_graph = text_graph
-        selection_args._lsrc_rho_img = 0.5
-        selection_args._lsrc_rho_txt = 0.5
-        selection_outputs = run_proxy_optimized_selection(selection_args, representation, unified_graph)
-        selected_indices = sort_selected_indices(selection_outputs["selected_indices"])
-        selected_meta = [sample_meta[int(idx)] for idx in selected_indices]
-        save_selected_indices(selected_path, selected_indices)
-        write_json(output_dir / "selected_meta.json", selected_meta)
-        write_json(
-            output_dir / "summary.json",
-            {
-                "dataset": "llava_instruct_150k",
-                "selection_method": "proxy_opt_lsrc",
-                "image_feature_mode": "dense_sift_bovw",
-                "text_feature_mode": args.text_repr_method,
-                "budget_ratio_percent": float(ratio),
-                "subset_size": int(len(selected_indices)),
-                "num_samples": int(len(records)),
-                "seed": int(args.seed),
-                "feature_info": feature_info,
-                "graph_num_edges": int(unified_graph.nnz),
-                "image_graph_num_edges": int(image_graph.nnz),
-                "text_graph_num_edges": int(text_graph.nnz),
-                "proxy_summary": selection_outputs.get("extra_summary", {}),
-            },
-        )
-        if selection_outputs.get("proxy_bundle") is not None:
-            np.save(output_dir / "proxy_points.npy", selection_outputs["proxy_bundle"]["proxy_points"])
-        print(f"Saved LLaVA dense_sift_bovw Ours selection: {selected_path}")
+        if selected_path.exists() and not is_current_full_pipeline_selection(output_dir):
+            print(
+                f"[LLaVA selection] Existing selection is not marked as full pipeline; recomputing: {selected_path}",
+                flush=True,
+            )
+        outputs, cross_dir = run_full_cross_modal_pipeline(args, ratio)
+        legacy_dir = sync_selection_to_legacy_layout(args, ratio, outputs, cross_dir)
+        print(f"Saved full-pipeline LLaVA dense_sift_bovw Ours selection: {legacy_dir / 'selected_indices.json'}", flush=True)
 
 
 if __name__ == "__main__":

@@ -32,7 +32,7 @@ def apply_diagnostic_stage_preset(args):
 
 def build_parser():
     parser = argparse.ArgumentParser(description="Correct collapsed modality topology and reconstruct a unified cross-modal topology.")
-    parser.add_argument("--dataset", type=str, required=True, choices=["flickr", "coco"])
+    parser.add_argument("--dataset", type=str, required=True, choices=["flickr", "coco", "llava_instruct_150k"])
     parser.add_argument("--split", type=str, default="train", choices=["train"])
     parser.add_argument("--diagnostic_experiment_id", type=int, default=None, choices=[0, 1, 2, 3, 4])
     parser.add_argument("--enable_stage2_correction", dest="enable_stage2_correction", action="store_true", default=True)
