@@ -37,6 +37,10 @@ def write_json(path, payload):
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def stage_log(message):
+    print(f"[LLaVA selection] {message}", flush=True)
+
+
 def parse_ratios(value):
     return [float(item) for item in str(value).replace(",", " ").split() if item.strip()]
 
@@ -190,6 +194,56 @@ def hardlink_or_copy(src, dst):
         os.link(src, dst)
     except OSError:
         shutil.copy2(src, dst)
+
+
+class TeeLogger:
+    def __init__(self, path, prefix=None):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.prefix = prefix
+        self.handle = None
+
+    def __enter__(self):
+        import sys
+
+        self.stdout = sys.stdout
+        self.stderr = sys.stderr
+        self.handle = self.path.open("a", encoding="utf-8")
+        self.write(f"\n===== stage log start: {self.path} =====\n")
+        sys.stdout = self
+        sys.stderr = self
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        import sys
+
+        self.write(f"\n===== stage log end: {self.path} =====\n")
+        sys.stdout = self.stdout
+        sys.stderr = self.stderr
+        self.handle.close()
+        self.handle = None
+        return False
+
+    def write(self, data):
+        if self.handle is not None:
+            self.handle.write(data)
+            self.handle.flush()
+        self.stdout.write(data)
+        self.stdout.flush()
+
+    def flush(self):
+        if self.handle is not None:
+            self.handle.flush()
+        self.stdout.flush()
+
+
+def run_with_stage_log(log_dir, stage_name, func, *args, **kwargs):
+    if not log_dir:
+        return func(*args, **kwargs)
+    log_path = Path(log_dir) / f"{stage_name}.log"
+    stage_log(f"{stage_name}: log -> {log_path}")
+    with TeeLogger(log_path):
+        return func(*args, **kwargs)
 
 
 def ensure_structured_feature_cache(args):
@@ -374,31 +428,53 @@ def build_subset_args(args, ratio):
 
 
 def run_full_cross_modal_pipeline(args, ratio):
-    ensure_structured_feature_cache(args)
+    ratio_tag = ratio_tag_from_percent(ratio)
+    log_dir = Path(args.log_dir) / ratio_tag if args.log_dir else None
+    run_with_stage_log(log_dir, "stage0_structured_feature_cache", ensure_structured_feature_cache, args)
 
     image_topology_dir = topology_output_dir(args, "image", args.image_metric)
     if args.force_recompute_topology or not (image_topology_dir / "summary.json").exists():
-        print("[LLaVA selection] Stage A: build image topology graph", flush=True)
-        run_topology_graph(build_topology_args(args, "image", args.image_metric))
+        stage_log("Stage A1: build image topology graph")
+        run_with_stage_log(
+            log_dir,
+            "stage1_image_topology",
+            run_topology_graph,
+            build_topology_args(args, "image", args.image_metric),
+        )
     else:
-        print(f"[LLaVA selection] Skip image topology: {image_topology_dir}", flush=True)
+        stage_log(f"Skip image topology: {image_topology_dir}")
 
     text_topology_dir = topology_output_dir(args, "text", args.text_metric)
     if args.force_recompute_topology or not (text_topology_dir / "summary.json").exists():
-        print("[LLaVA selection] Stage A: build text topology graph", flush=True)
-        run_topology_graph(build_topology_args(args, "text", args.text_metric))
+        stage_log("Stage A2: build text topology graph")
+        run_with_stage_log(
+            log_dir,
+            "stage2_text_topology",
+            run_topology_graph,
+            build_topology_args(args, "text", args.text_metric),
+        )
     else:
-        print(f"[LLaVA selection] Skip text topology: {text_topology_dir}", flush=True)
+        stage_log(f"Skip text topology: {text_topology_dir}")
 
     cross_dir = cross_modal_output_dir(args)
     if args.force_recompute_cross_modal or not (cross_dir / "summary.json").exists():
-        print("[LLaVA selection] Stage B: run stage2 correction + stage3 wavelet-latent fusion", flush=True)
-        run_cross_modal_topology(build_cross_modal_args(args))
+        stage_log("Stage B: run stage2 correction + stage3 wavelet-latent fusion")
+        run_with_stage_log(
+            log_dir,
+            "stage3_cross_modal_correction_fusion",
+            run_cross_modal_topology,
+            build_cross_modal_args(args),
+        )
     else:
-        print(f"[LLaVA selection] Skip cross-modal topology: {cross_dir}", flush=True)
+        stage_log(f"Skip cross-modal topology: {cross_dir}")
 
-    print(f"[LLaVA selection] Stage C: wavelet_main subset selection ratio={ratio}%", flush=True)
-    outputs = run_subset_selection(build_subset_args(args, ratio))
+    stage_log(f"Stage C: wavelet_main subset selection ratio={ratio}%")
+    outputs = run_with_stage_log(
+        log_dir,
+        "stage4_wavelet_main_selection",
+        run_subset_selection,
+        build_subset_args(args, ratio),
+    )
     return outputs, cross_dir
 
 
@@ -551,6 +627,7 @@ def main():
     parser.add_argument("--cross_modal_root", type=str, default="artifacts/vlm_cross_modal_topology_dense_sift_bovw")
     parser.add_argument("--pipeline_selection_output_root", type=str, default="artifacts/vlm_subset_selection_dense_sift_bovw_full_pipeline")
     parser.add_argument("--pipeline_dataset_name", type=str, default="llava_instruct_150k")
+    parser.add_argument("--log_dir", type=str, default="")
     parser.add_argument("--ratios", type=str, default="1 5 10")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", type=str, default="cuda")
@@ -615,7 +692,7 @@ def main():
 
     records = load_json_or_jsonl(args.annotation_path)
     print(f"[LLaVA selection] Loaded {len(records)} LLaVA records from {args.annotation_path}", flush=True)
-    load_or_build_features(args, records)
+    run_with_stage_log(args.log_dir, "stage0_load_or_build_features", load_or_build_features, args, records)
 
     output_root = Path(args.output_root)
     for ratio in parse_ratios(args.ratios):

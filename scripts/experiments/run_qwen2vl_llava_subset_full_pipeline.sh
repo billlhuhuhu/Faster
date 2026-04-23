@@ -33,6 +33,9 @@ export VLM_DENSE_SIFT_BOVW_FEATURE_CACHE_ROOT="${VLM_DENSE_SIFT_BOVW_FEATURE_CAC
 export VLM_DENSE_SIFT_BOVW_TOPOLOGY_ROOT="${VLM_DENSE_SIFT_BOVW_TOPOLOGY_ROOT:-artifacts/vlm_topology_graph_dense_sift_bovw}"
 export VLM_DENSE_SIFT_BOVW_CROSS_MODAL_ROOT="${VLM_DENSE_SIFT_BOVW_CROSS_MODAL_ROOT:-artifacts/vlm_cross_modal_topology_dense_sift_bovw}"
 export VLM_DENSE_SIFT_BOVW_PIPELINE_SELECTION_ROOT="${VLM_DENSE_SIFT_BOVW_PIPELINE_SELECTION_ROOT:-artifacts/vlm_subset_selection_dense_sift_bovw_full_pipeline}"
+export VLM_DENSE_SIFT_BOVW_LOG_ROOT="${VLM_DENSE_SIFT_BOVW_LOG_ROOT:-artifacts/vlm_experiment_logs}"
+export VLM_RUN_TIMESTAMP="${VLM_RUN_TIMESTAMP:-$(date '+%Y%m%d_%H%M%S')}"
+export VLM_SELECTION_LOG_DIR="${VLM_SELECTION_LOG_DIR:-${VLM_DENSE_SIFT_BOVW_LOG_ROOT}/qwen2vl_llava_dense_sift_bovw_${VLM_RUN_TIMESTAMP}}"
 export VLM_SELECTION_DEVICE="${VLM_SELECTION_DEVICE:-cuda}"
 export VLM_SELECTION_TEXT_REPR_METHOD="${VLM_SELECTION_TEXT_REPR_METHOD:-bert}"
 export VLM_SELECTION_TEXT_BATCH_SIZE="${VLM_SELECTION_TEXT_BATCH_SIZE:-256}"
@@ -94,6 +97,7 @@ echo "  dense_sift_bovw selection: ${VLM_RUN_DENSE_SIFT_BOVW_SELECTION}"
 echo "  selection text feature: ${VLM_SELECTION_TEXT_REPR_METHOD}"
 echo "  selection topology root: ${VLM_DENSE_SIFT_BOVW_TOPOLOGY_ROOT}"
 echo "  selection cross-modal root: ${VLM_DENSE_SIFT_BOVW_CROSS_MODAL_ROOT}"
+echo "  selection log dir: ${VLM_SELECTION_LOG_DIR}"
 echo "  ours template: ${VLM_OURS_SELECTED_INDICES_TEMPLATE:-<auto>}"
 echo "  finetune mode: ${VLM_FINETUNE_MODE}"
 echo "  merge for eval: ${VLM_MERGE_LORA_FOR_EVAL}"
@@ -125,6 +129,7 @@ if [[ "${VLM_RUN_OURS}" == "1" && -z "${VLM_OURS_SELECTED_INDICES_TEMPLATE}" ]];
       --topology_root "${VLM_DENSE_SIFT_BOVW_TOPOLOGY_ROOT}" \
       --cross_modal_root "${VLM_DENSE_SIFT_BOVW_CROSS_MODAL_ROOT}" \
       --pipeline_selection_output_root "${VLM_DENSE_SIFT_BOVW_PIPELINE_SELECTION_ROOT}" \
+      --log_dir "${VLM_SELECTION_LOG_DIR}" \
       --ratios "${VLM_SUBSET_RATIOS}" \
       --seed "${VLM_SEED}" \
       --device "${VLM_SELECTION_DEVICE}" \
