@@ -440,13 +440,28 @@ def benchmark_names(raw_value: str) -> List[str]:
 
 def build_eval_dataset_mapping(benchmarks: Sequence[str]) -> Dict[str, str]:
     default_mapping = {
-        "GQA": "GQA_TestDev_Balanced",
+        "GQA": "GQA",
         "ScienceQA-IMG": "ScienceQA_VAL",
-        "MMBench": "MMBench_DEV_EN",
+        "MMBench": "MMBench_DEV_EN_V11",
         "TextVQA": "TextVQA_VAL",
         "POPE": "POPE",
     }
     return {name: default_mapping.get(name, name) for name in benchmarks}
+
+
+def build_vlmeval_dataset_config(dataset_name: str) -> Dict[str, str]:
+    name = str(dataset_name)
+    lower = name.lower()
+    if "mmbench" in lower or "scienceqa" in lower:
+        dataset_class = "ImageMCQDataset"
+    elif "pope" in lower:
+        dataset_class = "ImageYORNDataset"
+    else:
+        dataset_class = "ImageVQADataset"
+    return {
+        "class": dataset_class,
+        "dataset": name,
+    }
 
 
 def save_adapter_for_eval(trainer: Any, processor: Any, output_dir: Path, args: argparse.Namespace) -> Path:
@@ -508,7 +523,7 @@ def write_vlmeval_config(
             }
         },
         "data": {
-            dataset_mapping.get(name, name): {}
+            dataset_mapping.get(name, name): build_vlmeval_dataset_config(dataset_mapping.get(name, name))
             for name in benchmarks
         },
     }

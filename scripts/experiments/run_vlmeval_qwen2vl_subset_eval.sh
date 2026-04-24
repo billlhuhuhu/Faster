@@ -80,6 +80,20 @@ def resolve_dataset_name(name, supported_names):
     return name
 
 
+def build_dataset_config(name):
+    lower = str(name).lower()
+    if "mmbench" in lower or "scienceqa" in lower:
+        dataset_class = "ImageMCQDataset"
+    elif "pope" in lower:
+        dataset_class = "ImageYORNDataset"
+    else:
+        dataset_class = "ImageVQADataset"
+    return {
+        "class": dataset_class,
+        "dataset": name,
+    }
+
+
 supported_dataset_names = collect_supported_dataset_names(vlmevalkit_root)
 override_names = split_names(datasets_override)
 if supported_dataset_names:
@@ -110,7 +124,11 @@ for plan_path in plans:
                 if isinstance(model_cfg, dict):
                     model_cfg["use_flash_attn"] = bool(use_flash_attn)
                     model_cfg["attn_implementation"] = "flash_attention_2" if use_flash_attn else "sdpa"
-            original_data_names = list(cfg.get("data", {}).keys())
+            original_data = cfg.get("data", {})
+            original_data_names = [
+                value.get("dataset", key) if isinstance(value, dict) and value.get("dataset") else key
+                for key, value in original_data.items()
+            ]
             if override_names:
                 resolved_data_names = override_names
             else:
@@ -118,9 +136,11 @@ for plan_path in plans:
                     resolve_dataset_name(name, supported_dataset_names)
                     for name in original_data_names
                 ]
-            cfg["data"] = {name: {} for name in resolved_data_names}
+            cfg["data"] = {name: build_dataset_config(name) for name in resolved_data_names}
             if original_data_names != resolved_data_names:
                 print(f"[VLMEvalKit] remapped datasets: {original_data_names} -> {resolved_data_names}")
+            else:
+                print(f"[VLMEvalKit] using datasets: {resolved_data_names}")
             cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     commands = plan.get("recommended_commands", {})
     command = commands.get("vlmevalkit_config_torchrun" if use_torchrun else "vlmevalkit_config_python")
