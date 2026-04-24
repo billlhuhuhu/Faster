@@ -503,6 +503,8 @@ def write_vlmeval_config(
                 "model": eval_model_path,
                 "pretrained": eval_model_path,
                 "trust_remote_code": bool(args.trust_remote_code),
+                "use_flash_attn": False,
+                "attn_implementation": "sdpa",
             }
         },
         "data": {

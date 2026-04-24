@@ -33,6 +33,16 @@ lines = [
 
 for plan_path in plans:
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    config_path = plan.get("vlmevalkit_config_path")
+    if config_path:
+        cfg_path = Path(config_path)
+        if cfg_path.exists():
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+            for model_cfg in cfg.get("model", {}).values():
+                if isinstance(model_cfg, dict):
+                    model_cfg["use_flash_attn"] = False
+                    model_cfg["attn_implementation"] = "sdpa"
+            cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     commands = plan.get("recommended_commands", {})
     command = commands.get("vlmevalkit_config_torchrun" if use_torchrun else "vlmevalkit_config_python")
     if not command:
