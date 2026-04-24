@@ -42,6 +42,34 @@ MERGE_LORA_FOR_EVAL="${VLM_MERGE_LORA_FOR_EVAL:-0}"
 EVAL_BENCHMARKS="${VLM_EVAL_BENCHMARKS:-GQA,ScienceQA-IMG,MMBench,TextVQA,POPE}"
 VLMEVAL_MODEL_KEY="${VLM_VLMEVAL_MODEL_KEY:-qwen2vl_subset}"
 VLMEVAL_MODEL_CLASS="${VLM_VLMEVAL_MODEL_CLASS:-Qwen2VLChat}"
+FINETUNE_CUDA_VISIBLE_DEVICES="${VLM_FINETUNE_CUDA_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-}}"
+FINETUNE_USE_TORCHRUN="${VLM_FINETUNE_USE_TORCHRUN:-auto}"
+FINETUNE_NPROC_PER_NODE="${VLM_FINETUNE_NPROC_PER_NODE:-}"
+
+count_cuda_devices() {
+  local devices="$1"
+  if [[ -z "${devices}" ]]; then
+    echo "1"
+    return
+  fi
+  python - <<PY
+devices = "${devices}".strip()
+items = [item for item in devices.split(",") if item.strip()]
+print(max(len(items), 1))
+PY
+}
+
+FINETUNE_VISIBLE_DEVICE_COUNT="$(count_cuda_devices "${FINETUNE_CUDA_VISIBLE_DEVICES}")"
+if [[ -z "${FINETUNE_NPROC_PER_NODE}" ]]; then
+  FINETUNE_NPROC_PER_NODE="${FINETUNE_VISIBLE_DEVICE_COUNT}"
+fi
+if [[ "${FINETUNE_USE_TORCHRUN}" == "auto" ]]; then
+  if [[ "${FINETUNE_VISIBLE_DEVICE_COUNT}" -gt 1 ]]; then
+    FINETUNE_USE_TORCHRUN="1"
+  else
+    FINETUNE_USE_TORCHRUN="0"
+  fi
+fi
 
 REPORT_DIR="${OUTPUT_ROOT}/reports"
 mkdir -p "${REPORT_DIR}"
@@ -106,7 +134,18 @@ run_one() {
   fi
 
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] VLM finetune start: ${mode_label}"
-  python "${PROJECT_ROOT}/run_vlm_finetune.py" \
+  if [[ -n "${FINETUNE_CUDA_VISIBLE_DEVICES}" ]]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] VLM finetune visible GPU(s): ${FINETUNE_CUDA_VISIBLE_DEVICES}"
+  fi
+  local launcher=(python)
+  if [[ "${FINETUNE_USE_TORCHRUN}" == "1" ]]; then
+    launcher=(torchrun --standalone --nproc_per_node "${FINETUNE_NPROC_PER_NODE}")
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] VLM finetune launcher: torchrun nproc_per_node=${FINETUNE_NPROC_PER_NODE}"
+  else
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] VLM finetune launcher: python"
+  fi
+  CUDA_VISIBLE_DEVICES="${FINETUNE_CUDA_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-}}" \
+  "${launcher[@]}" "${PROJECT_ROOT}/run_vlm_finetune.py" \
     --model_name_or_path "${MODEL_NAME_OR_PATH}" \
     --dataset_name "${DATASET_NAME}" \
     --annotation_path "${ANNOTATION_PATH}" \

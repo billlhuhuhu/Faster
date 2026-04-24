@@ -273,6 +273,20 @@ def write_json(path: Path, payload: Dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def is_env_rank_zero() -> bool:
+    return int(os.environ.get("RANK", "0")) == 0
+
+
+def unwrap_trainer_model(trainer: Any) -> Any:
+    if hasattr(trainer, "accelerator"):
+        try:
+            return trainer.accelerator.unwrap_model(trainer.model)
+        except Exception:
+            pass
+    model = trainer.model
+    return model.module if hasattr(model, "module") else model
+
+
 def load_model_and_processor(args: argparse.Namespace):
     try:
         from transformers import AutoProcessor
@@ -387,6 +401,14 @@ def build_trainer(args: argparse.Namespace, model: Any, processor: Any, train_da
     training_kwargs[eval_strategy_key] = eval_strategy
     if eval_strategy != "no":
         training_kwargs["eval_steps"] = int(args.eval_steps)
+    try:
+        import inspect
+
+        training_arg_params = inspect.signature(TrainingArguments.__init__).parameters
+        if "ddp_find_unused_parameters" in training_arg_params:
+            training_kwargs["ddp_find_unused_parameters"] = False
+    except Exception:
+        pass
     training_args = TrainingArguments(**training_kwargs)
     collator = Qwen2VlDataCollator(processor=processor, max_length=int(args.max_length))
     trainer_kwargs = {
@@ -430,7 +452,7 @@ def build_eval_dataset_mapping(benchmarks: Sequence[str]) -> Dict[str, str]:
 def save_adapter_for_eval(trainer: Any, processor: Any, output_dir: Path, args: argparse.Namespace) -> Path:
     adapter_dir = output_dir / "adapter"
     adapter_dir.mkdir(parents=True, exist_ok=True)
-    trainer.model.save_pretrained(str(adapter_dir))
+    unwrap_trainer_model(trainer).save_pretrained(str(adapter_dir))
     try:
         processor.save_pretrained(str(adapter_dir))
     except Exception as exc:
@@ -671,23 +693,24 @@ def main() -> None:
 
     output_dir = build_output_dir(args, subset_size=len(selected_records))
     output_dir.mkdir(parents=True, exist_ok=True)
-    write_json(
-        output_dir / "subset_info.json",
-        {
-            "dataset_name": args.dataset_name,
-            "annotation_path": args.annotation_path,
-            "image_root": args.image_root,
-            "subset_mode": args.subset_mode,
-            "subset_ratio": args.subset_ratio,
-            "selected_indices_path": args.selected_indices_path,
-            "num_total_records": len(records),
-            "num_selected_records": len(selected_records),
-            "num_train_records": len(train_records),
-            "num_eval_records": len(eval_records),
-            "seed": int(args.seed),
-            "selected_indices_preview": selected_indices[:20],
-        },
-    )
+    if is_env_rank_zero():
+        write_json(
+            output_dir / "subset_info.json",
+            {
+                "dataset_name": args.dataset_name,
+                "annotation_path": args.annotation_path,
+                "image_root": args.image_root,
+                "subset_mode": args.subset_mode,
+                "subset_ratio": args.subset_ratio,
+                "selected_indices_path": args.selected_indices_path,
+                "num_total_records": len(records),
+                "num_selected_records": len(selected_records),
+                "num_train_records": len(train_records),
+                "num_eval_records": len(eval_records),
+                "seed": int(args.seed),
+                "selected_indices_preview": selected_indices[:20],
+            },
+        )
 
     train_dataset = LlavaInstructionDataset(train_records, image_root=args.image_root)
     eval_dataset = LlavaInstructionDataset(eval_records, image_root=args.image_root) if eval_records else None
@@ -698,7 +721,6 @@ def main() -> None:
     start = time.time()
     train_result = trainer.train()
     trainer.save_model(str(output_dir / "last_checkpoint"))
-    adapter_path = save_adapter_for_eval(trainer, processor, output_dir, args)
     if getattr(trainer.state, "best_model_checkpoint", None):
         best_checkpoint = trainer.state.best_model_checkpoint
     else:
@@ -723,8 +745,11 @@ def main() -> None:
     if eval_dataset is not None and len(eval_dataset) > 0:
         eval_metrics = trainer.evaluate()
         metrics.update({f"final_{key}": value for key, value in eval_metrics.items()})
+    if not trainer.is_world_process_zero():
+        return
+    adapter_path = save_adapter_for_eval(trainer, processor, output_dir, args)
     write_json(output_dir / "metrics.json", metrics)
-    merged_model_path, merge_status = maybe_merge_lora_for_eval(trainer.model, processor, output_dir, args)
+    merged_model_path, merge_status = maybe_merge_lora_for_eval(unwrap_trainer_model(trainer), processor, output_dir, args)
     write_evaluation_plan(
         output_dir,
         args,
