@@ -389,14 +389,24 @@ def build_trainer(args: argparse.Namespace, model: Any, processor: Any, train_da
         training_kwargs["eval_steps"] = int(args.eval_steps)
     training_args = TrainingArguments(**training_kwargs)
     collator = Qwen2VlDataCollator(processor=processor, max_length=int(args.max_length))
-    return Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=eval_dataset if eval_strategy != "no" else None,
-        data_collator=collator,
-        tokenizer=getattr(processor, "tokenizer", None),
-    )
+    trainer_kwargs = {
+        "model": model,
+        "args": training_args,
+        "train_dataset": train_dataset,
+        "eval_dataset": eval_dataset if eval_strategy != "no" else None,
+        "data_collator": collator,
+    }
+    try:
+        import inspect
+
+        trainer_params = inspect.signature(Trainer.__init__).parameters
+        if "processing_class" in trainer_params:
+            trainer_kwargs["processing_class"] = processor
+        elif "tokenizer" in trainer_params:
+            trainer_kwargs["tokenizer"] = getattr(processor, "tokenizer", None)
+    except Exception:
+        trainer_kwargs["processing_class"] = processor
+    return Trainer(**trainer_kwargs)
 
 
 def benchmark_names(raw_value: str) -> List[str]:
