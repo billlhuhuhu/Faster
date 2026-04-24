@@ -67,6 +67,30 @@ if [[ "${EXECUTE}" == "1" ]]; then
   fi
   export VLMEVALKIT_ROOT
   export VLMEVAL_NPROC
+  export VLM_EVAL_USE_FLASH_ATTN="${USE_FLASH_ATTN}"
+  if [[ "${USE_FLASH_ATTN}" != "1" ]]; then
+    python - <<'PY'
+import os
+import shutil
+from pathlib import Path
+
+root = Path(os.environ["VLMEVALKIT_ROOT"])
+target = root / "vlmeval" / "vlm" / "qwen2_vl" / "model.py"
+if not target.exists():
+    print(f"[VLMEvalKit patch] skip: {target} not found")
+else:
+    text = target.read_text(encoding="utf-8")
+    patched = text.replace("flash_attention_2", "sdpa")
+    if patched != text:
+        backup = target.with_suffix(target.suffix + ".flash_attn.bak")
+        if not backup.exists():
+            shutil.copy2(target, backup)
+        target.write_text(patched, encoding="utf-8")
+        print(f"[VLMEvalKit patch] disabled hard-coded flash_attention_2 in {target}")
+    else:
+        print(f"[VLMEvalKit patch] no hard-coded flash_attention_2 found in {target}")
+PY
+  fi
   bash "${COMMANDS_PATH}"
 else
   echo "Dry run only. Review and execute:"
