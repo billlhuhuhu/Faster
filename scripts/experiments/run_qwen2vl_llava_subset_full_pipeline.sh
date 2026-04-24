@@ -66,6 +66,17 @@ export VLM_SAVE_TOTAL_LIMIT="${VLM_SAVE_TOTAL_LIMIT:-2}"
 export VLM_VAL_RATIO="${VLM_VAL_RATIO:-0.02}"
 export VLM_REPORT_TO="${VLM_REPORT_TO:-none}"
 export VLM_BF16="${VLM_BF16:-1}"
+export VLM_FINETUNE_USE_TORCHRUN="${VLM_FINETUNE_USE_TORCHRUN:-auto}"
+export VLM_FINETUNE_CUDA_VISIBLE_DEVICES="${VLM_FINETUNE_CUDA_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-}}"
+if [[ -z "${VLM_FINETUNE_NPROC_PER_NODE:-}" && -n "${VLM_FINETUNE_CUDA_VISIBLE_DEVICES}" ]]; then
+  export VLM_FINETUNE_NPROC_PER_NODE="$(python - <<PY
+devices = "${VLM_FINETUNE_CUDA_VISIBLE_DEVICES}".strip()
+print(max(len([item for item in devices.split(",") if item.strip()]), 1))
+PY
+)"
+else
+  export VLM_FINETUNE_NPROC_PER_NODE="${VLM_FINETUNE_NPROC_PER_NODE:-1}"
+fi
 
 # Export merged LoRA model for VLMEvalKit when possible. If this fails, the eval
 # plan still records the adapter path and the merge failure reason.
@@ -82,6 +93,7 @@ export VLM_EVAL_PLAN_ROOT="${VLM_EVAL_PLAN_ROOT:-${VLM_FINETUNE_OUTPUT_ROOT}}"
 export VLM_EVAL_EXECUTE="${VLM_EVAL_EXECUTE:-0}"
 export VLM_EVAL_USE_TORCHRUN="${VLM_EVAL_USE_TORCHRUN:-0}"
 export VLMEVAL_NPROC="${VLMEVAL_NPROC:-1}"
+export VLM_EVAL_USE_FLASH_ATTN="${VLM_EVAL_USE_FLASH_ATTN:-0}"
 
 timestamp() {
   date '+%Y-%m-%d %H:%M:%S'
@@ -100,8 +112,10 @@ echo "  selection cross-modal root: ${VLM_DENSE_SIFT_BOVW_CROSS_MODAL_ROOT}"
 echo "  selection log dir: ${VLM_SELECTION_LOG_DIR}"
 echo "  ours template: ${VLM_OURS_SELECTED_INDICES_TEMPLATE:-<auto>}"
 echo "  finetune mode: ${VLM_FINETUNE_MODE}"
+echo "  finetune torchrun: ${VLM_FINETUNE_USE_TORCHRUN} nproc=${VLM_FINETUNE_NPROC_PER_NODE} visible=${VLM_FINETUNE_CUDA_VISIBLE_DEVICES:-<inherit>}"
 echo "  merge for eval: ${VLM_MERGE_LORA_FOR_EVAL}"
 echo "  eval execute: ${VLM_EVAL_EXECUTE}"
+echo "  eval backend: VLMEvalKit root=${VLMEVALKIT_ROOT:-<unset>} nproc=${VLMEVAL_NPROC} flash_attn=${VLM_EVAL_USE_FLASH_ATTN}"
 
 if [[ ! -e "${VLM_MODEL_NAME_OR_PATH}" ]]; then
   echo "Model path not found: ${VLM_MODEL_NAME_OR_PATH}" >&2
