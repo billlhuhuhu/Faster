@@ -8,6 +8,7 @@ cd "${PROJECT_ROOT}"
 BASELINE_METHODS="${BASELINE_METHODS:-presel visa dataprophet dynamic_pruning}"
 ABS_BUDGETS="${ABS_BUDGETS:-100 200 500}"
 RATIOS="${RATIOS:-0.01 0.02 0.03}"
+DATAPROPHET_MASTER_RATIO="${DATAPROPHET_MASTER_RATIO:-0.05}"
 BASELINE_SEEDS="${BASELINE_SEEDS:-0}"
 BASELINE_DEVICE="${BASELINE_DEVICE:-cuda:0}"
 BASELINE_OUTPUT_ROOT="${BASELINE_OUTPUT_ROOT:-artifacts/baselines_coco}"
@@ -39,11 +40,185 @@ echo "[coco-formal] dataset=${BASELINE_DATASET}"
 echo "[coco-formal] methods=${BASELINE_METHODS}"
 echo "[coco-formal] abs_budgets=${ABS_BUDGETS}"
 echo "[coco-formal] ratios=${RATIOS:-<disabled>}"
+echo "[coco-formal] dataprophet_master_ratio=${DATAPROPHET_MASTER_RATIO}"
 echo "[coco-formal] seeds=${BASELINE_SEEDS}"
 echo "[coco-formal] output_root=${BASELINE_OUTPUT_ROOT}"
 echo "[coco-formal] device=${BASELINE_DEVICE}"
 echo "[coco-formal] image_root=${BASELINE_IMAGE_ROOT}"
 echo "[coco-formal] ann_root=${BASELINE_ANN_ROOT}"
+
+max_abs_budget() {
+  local max_b=0
+  local b
+  for b in ${ABS_BUDGETS}; do
+    if [[ "${b}" -gt "${max_b}" ]]; then
+      max_b="${b}"
+    fi
+  done
+  echo "${max_b}"
+}
+
+ratio_to_tag() {
+  local ratio="$1"
+  python - <<PY
+r = float("${ratio}")
+print(f"ratio_{int(round(r*100)):02d}")
+PY
+}
+
+ensure_dataprophet_master_selection() {
+  local seed="$1"
+  run_ratio_job "dataprophet" "${DATAPROPHET_MASTER_RATIO}" "${seed}"
+}
+
+materialize_dataprophet_budget_from_master_ratio() {
+  local seed="$1"
+  local target_budget="$2"
+  local master_ratio="$3"
+
+  local method="dataprophet"
+  local master_tag
+  master_tag="$(ratio_to_tag "${master_ratio}")"
+  local model_tag="${BASELINE_IMAGE_ENCODER}_${BASELINE_TEXT_ENCODER}"
+  local src_dir="${BASELINE_OUTPUT_ROOT}/${BASELINE_DATASET}/train/${model_tag}/${master_tag}/${method}/seed_${seed}"
+  local dst_dir="${BASELINE_OUTPUT_ROOT}/${BASELINE_DATASET}/${BASELINE_IMAGE_ENCODER}_${BASELINE_TEXT_ENCODER}/${method}/budget_$(printf "%04d" "${target_budget}")/seed_${seed}"
+  local src_selected="${src_dir}/selected_indices.json"
+  local src_summary="${src_dir}/baseline_summary.json"
+  local src_scores="${src_dir}/selection_scores.npz"
+  local dst_selected="${dst_dir}/selected_indices.json"
+  local dst_summary="${dst_dir}/baseline_summary.json"
+  local dst_scores="${dst_dir}/selection_scores.npz"
+
+  if [[ -f "${dst_selected}" ]]; then
+    echo "[dataprophet-reuse][skip] selection exists budget=${target_budget} seed=${seed}"
+    return 0
+  fi
+  if [[ ! -f "${src_selected}" ]]; then
+    echo "[dataprophet-reuse][warn] source selection missing, cannot derive budget=${target_budget} from ratio=${master_ratio}"
+    return 1
+  fi
+
+  mkdir -p "${dst_dir}"
+  python - <<PY
+import json
+import os
+import shutil
+
+src_selected = "${src_selected}"
+src_summary = "${src_summary}"
+src_scores = "${src_scores}"
+dst_selected = "${dst_selected}"
+dst_summary = "${dst_summary}"
+dst_scores = "${dst_scores}"
+target_budget = int("${target_budget}")
+master_ratio = float("${master_ratio}")
+
+with open(src_selected, "r", encoding="utf-8") as f:
+    payload = json.load(f)
+src_idx = [int(x) for x in payload.get("selected_indices", [])]
+selected = src_idx[:target_budget]
+with open(dst_selected, "w", encoding="utf-8") as f:
+    json.dump({"selected_indices": selected}, f, ensure_ascii=False, indent=2)
+
+summary = {}
+if os.path.exists(src_summary):
+    with open(src_summary, "r", encoding="utf-8") as f:
+        summary = json.load(f)
+total = int(summary.get("total_train_size", max(len(selected), 1)))
+summary["budget"] = int(target_budget)
+summary["subset_size"] = int(len(selected))
+summary["ratio"] = float(len(selected)) / max(float(total), 1.0)
+summary["derived_from_ratio"] = float(master_ratio)
+summary["derived_from"] = src_selected
+with open(dst_summary, "w", encoding="utf-8") as f:
+    json.dump(summary, f, ensure_ascii=False, indent=2)
+
+if os.path.exists(src_scores):
+    shutil.copy2(src_scores, dst_scores)
+PY
+  echo "[dataprophet-reuse] derived budget=${target_budget} from ratio=${master_ratio} seed=${seed}"
+}
+
+materialize_dataprophet_ratio_from_master_ratio() {
+  local seed="$1"
+  local target_ratio="$2"
+  local master_ratio="$3"
+
+  local method="dataprophet"
+  local target_tag
+  local master_tag
+  target_tag="$(ratio_to_tag "${target_ratio}")"
+  master_tag="$(ratio_to_tag "${master_ratio}")"
+
+  if [[ "${target_tag}" == "${master_tag}" ]]; then
+    return 0
+  fi
+
+  local model_tag="${BASELINE_IMAGE_ENCODER}_${BASELINE_TEXT_ENCODER}"
+  local src_dir="${BASELINE_OUTPUT_ROOT}/${BASELINE_DATASET}/train/${model_tag}/${master_tag}/${method}/seed_${seed}"
+  local dst_dir="${BASELINE_OUTPUT_ROOT}/${BASELINE_DATASET}/train/${model_tag}/${target_tag}/${method}/seed_${seed}"
+  local src_selected="${src_dir}/selected_indices.json"
+  local src_summary="${src_dir}/baseline_summary.json"
+  local src_scores="${src_dir}/selection_scores.npz"
+  local dst_selected="${dst_dir}/selected_indices.json"
+  local dst_summary="${dst_dir}/baseline_summary.json"
+  local dst_scores="${dst_dir}/selection_scores.npz"
+
+  if [[ -f "${dst_selected}" ]]; then
+    echo "[dataprophet-reuse][skip] ratio selection exists ratio=${target_ratio} seed=${seed}"
+    return 0
+  fi
+  if [[ ! -f "${src_selected}" ]]; then
+    echo "[dataprophet-reuse][warn] source ratio selection missing, cannot derive ratio=${target_ratio} from ratio=${master_ratio}"
+    return 1
+  fi
+
+  mkdir -p "${dst_dir}"
+  python - <<PY
+import json
+import math
+import os
+import shutil
+
+src_selected = "${src_selected}"
+src_summary = "${src_summary}"
+src_scores = "${src_scores}"
+dst_selected = "${dst_selected}"
+dst_summary = "${dst_summary}"
+dst_scores = "${dst_scores}"
+target_ratio = float("${target_ratio}")
+master_ratio = float("${master_ratio}")
+
+with open(src_selected, "r", encoding="utf-8") as f:
+    payload = json.load(f)
+src_idx = [int(x) for x in payload.get("selected_indices", [])]
+
+summary = {}
+if os.path.exists(src_summary):
+    with open(src_summary, "r", encoding="utf-8") as f:
+        summary = json.load(f)
+
+total = int(summary.get("total_train_size", max(len(src_idx), 1)))
+target_k = int(round(target_ratio * total))
+target_k = max(1, min(target_k, len(src_idx)))
+selected = src_idx[:target_k]
+
+with open(dst_selected, "w", encoding="utf-8") as f:
+    json.dump({"selected_indices": selected}, f, ensure_ascii=False, indent=2)
+
+summary["ratio"] = float(len(selected)) / max(float(total), 1.0)
+summary["budget"] = int(len(selected))
+summary["subset_size"] = int(len(selected))
+summary["derived_from_ratio"] = float(master_ratio)
+summary["derived_from"] = src_selected
+with open(dst_summary, "w", encoding="utf-8") as f:
+    json.dump(summary, f, ensure_ascii=False, indent=2)
+
+if os.path.exists(src_scores):
+    shutil.copy2(src_scores, dst_scores)
+PY
+  echo "[dataprophet-reuse] derived ratio=${target_ratio} from ratio=${master_ratio} seed=${seed}"
+}
 
 run_abs_job() {
   local method="$1"
@@ -158,8 +333,20 @@ PY
 
 # 1) Absolute budgets
 for seed in ${BASELINE_SEEDS}; do
+  # dataprophet: run one master ratio selection, then derive all budgets.
+  if [[ " ${BASELINE_METHODS} " == *" dataprophet "* ]]; then
+    ensure_dataprophet_master_selection "${seed}"
+    for budget in ${ABS_BUDGETS}; do
+      materialize_dataprophet_budget_from_master_ratio "${seed}" "${budget}" "${DATAPROPHET_MASTER_RATIO}" || true
+      run_abs_job "dataprophet" "${budget}" "${seed}"
+    done
+  fi
+
   for budget in ${ABS_BUDGETS}; do
     for method in ${BASELINE_METHODS}; do
+      if [[ "${method}" == "dataprophet" ]]; then
+        continue
+      fi
       run_abs_job "${method}" "${budget}" "${seed}"
     done
   done
@@ -168,8 +355,20 @@ done
 # 2) Ratio budgets (optional)
 if [[ -n "${RATIOS}" ]]; then
   for seed in ${BASELINE_SEEDS}; do
+    # dataprophet: derive all target ratios from the same master ratio run.
+    if [[ " ${BASELINE_METHODS} " == *" dataprophet "* ]]; then
+      ensure_dataprophet_master_selection "${seed}"
+      for ratio in ${RATIOS}; do
+        materialize_dataprophet_ratio_from_master_ratio "${seed}" "${ratio}" "${DATAPROPHET_MASTER_RATIO}" || true
+        run_ratio_job "dataprophet" "${ratio}" "${seed}"
+      done
+    fi
+
     for ratio in ${RATIOS}; do
       for method in ${BASELINE_METHODS}; do
+        if [[ "${method}" == "dataprophet" ]]; then
+          continue
+        fi
         run_ratio_job "${method}" "${ratio}" "${seed}"
       done
     done
