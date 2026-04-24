@@ -418,11 +418,58 @@ def dpp_diversity_loss(proxy_points, kernel="rbf", sigma=1.0, eps=1e-6, max_poin
     return -logdet / max(int(proxy_points.shape[0]), 1)
 
 
-def nearest_reference_loss(proxy_points, reference_points):
+def resolve_reference_loss_devices(primary_device):
+    primary_device = torch.device(primary_device)
+    devices = [primary_device]
+    if primary_device.type != "cuda":
+        return devices
+    for index in range(torch.cuda.device_count()):
+        device = torch.device(f"cuda:{index}")
+        if str(device) != str(primary_device):
+            devices.append(device)
+    return devices
+
+
+def build_reference_shards(reference_points, devices, shard_size=16384):
     if reference_points is None:
+        return []
+    shard_size = max(1, int(shard_size))
+    devices = [torch.device(device) for device in devices] if devices else [reference_points.device]
+    shards = []
+    shard_index = 0
+    for start in range(0, int(reference_points.shape[0]), shard_size):
+        end = min(int(reference_points.shape[0]), start + shard_size)
+        target_device = devices[shard_index % len(devices)]
+        shards.append(reference_points[start:end].to(device=target_device))
+        shard_index += 1
+    return shards
+
+
+def nearest_reference_loss(
+    proxy_points,
+    reference_points=None,
+    reference_shards=None,
+    proxy_chunk_size=2048,
+):
+    if reference_points is None and not reference_shards:
         return torch.tensor(0.0, dtype=proxy_points.dtype, device=proxy_points.device)
-    distances = torch.cdist(proxy_points, reference_points, p=2) ** 2
-    return torch.mean(torch.min(distances, dim=1).values)
+    if reference_shards is None or len(reference_shards) == 0:
+        reference_shards = [reference_points]
+
+    proxy_chunk_size = max(1, int(proxy_chunk_size))
+    best_values = []
+    for start in range(0, int(proxy_points.shape[0]), proxy_chunk_size):
+        end = min(int(proxy_points.shape[0]), start + proxy_chunk_size)
+        proxy_chunk = proxy_points[start:end]
+        best_chunk = None
+        for shard in reference_shards:
+            local_proxy = proxy_chunk if shard.device == proxy_chunk.device else proxy_chunk.to(device=shard.device)
+            local_distances = torch.cdist(local_proxy, shard, p=2) ** 2
+            local_best = torch.min(local_distances, dim=1).values
+            local_best = local_best.to(device=proxy_points.device)
+            best_chunk = local_best if best_chunk is None else torch.minimum(best_chunk, local_best)
+        best_values.append(best_chunk)
+    return torch.mean(torch.cat(best_values, dim=0)) if best_values else torch.tensor(0.0, dtype=proxy_points.dtype, device=proxy_points.device)
 
 
 def row_normalize_sparse_graph(graph, eps=1e-12):
@@ -878,6 +925,33 @@ def optimize_proxy_points(
         graph_reference = torch.tensor(projected_graph_reference, dtype=torch.float32, device=torch_device)
     else:
         graph_reference = None
+    reference_loss_devices = resolve_reference_loss_devices(torch_device)
+    reference_loss_shard_size = max(4096, min(16384, int(projected_representation.shape[0]) if projected_representation.shape[0] > 0 else 4096))
+    reference_loss_proxy_chunk_size = max(512, int(proxy_batch_size) if proxy_batch_size is not None else 2048)
+    match_reference_shards = build_reference_shards(
+        match_reference,
+        reference_loss_devices,
+        shard_size=reference_loss_shard_size,
+    ) if match_reference is not None else []
+    graph_reference_shards = build_reference_shards(
+        graph_reference,
+        reference_loss_devices,
+        shard_size=reference_loss_shard_size,
+    ) if graph_reference is not None else []
+    if len(reference_loss_devices) > 1 and (match_reference_shards or graph_reference_shards):
+        print(
+            "[proxy-opt] reference matching uses multi-GPU shards on "
+            f"{[str(device) for device in reference_loss_devices]} "
+            f"(shard_size={reference_loss_shard_size}, proxy_chunk_size={reference_loss_proxy_chunk_size})",
+            flush=True,
+        )
+    elif match_reference_shards or graph_reference_shards:
+        print(
+            "[proxy-opt] reference matching uses chunked cdist on "
+            f"{str(torch_device)} "
+            f"(shard_size={reference_loss_shard_size}, proxy_chunk_size={reference_loss_proxy_chunk_size})",
+            flush=True,
+        )
 
     if wavelet_graph_signatures is not None:
         anchor_count = min(int(projected_representation.shape[0]), 1024)
@@ -1056,8 +1130,18 @@ def optimize_proxy_points(
             kernel=diversity_kernel,
             sigma=diversity_sigma,
         ) if use_dpp or float(lambda_div) > 0 else torch.tensor(0.0, dtype=proxy_points.dtype, device=torch_device)
-        match_loss = nearest_reference_loss(proxy_points, match_reference)
-        graph_loss = nearest_reference_loss(proxy_points, graph_reference)
+        match_loss = nearest_reference_loss(
+            proxy_points,
+            reference_points=match_reference,
+            reference_shards=match_reference_shards,
+            proxy_chunk_size=reference_loss_proxy_chunk_size,
+        )
+        graph_loss = nearest_reference_loss(
+            proxy_points,
+            reference_points=graph_reference,
+            reference_shards=graph_reference_shards,
+            proxy_chunk_size=reference_loss_proxy_chunk_size,
+        )
         if effective_keep_lsrc:
             lsrc_outputs = compute_multiscale_lsrc_outputs(
                 proxy_points,
@@ -1310,6 +1394,10 @@ def optimize_proxy_points(
         "lambda_div": float(lambda_div),
         "lambda_match": float(lambda_match),
         "lambda_graph": float(lambda_graph),
+        "reference_loss_multi_gpu": bool(len(reference_loss_devices) > 1),
+        "reference_loss_devices": [str(device) for device in reference_loss_devices],
+        "reference_loss_shard_size": int(reference_loss_shard_size),
+        "reference_loss_proxy_chunk_size": int(reference_loss_proxy_chunk_size),
         "enable_lsrc": bool(enable_lsrc),
         "keep_lsrc": bool(effective_keep_lsrc),
         "lsrc_k": int(lsrc_k),
