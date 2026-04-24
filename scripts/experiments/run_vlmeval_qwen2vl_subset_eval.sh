@@ -10,8 +10,9 @@ EXECUTE="${VLM_EVAL_EXECUTE:-0}"
 VLMEVALKIT_ROOT="${VLMEVALKIT_ROOT:-}"
 VLMEVAL_NPROC="${VLMEVAL_NPROC:-1}"
 USE_TORCHRUN="${VLM_EVAL_USE_TORCHRUN:-0}"
+USE_FLASH_ATTN="${VLM_EVAL_USE_FLASH_ATTN:-0}"
 
-python - "${PLAN_ROOT}" "${PLAN_GLOB}" "${COMMANDS_PATH}" "${USE_TORCHRUN}" <<'PY'
+python - "${PLAN_ROOT}" "${PLAN_GLOB}" "${COMMANDS_PATH}" "${USE_TORCHRUN}" "${USE_FLASH_ATTN}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -20,6 +21,7 @@ plan_root = Path(sys.argv[1])
 plan_glob = sys.argv[2]
 commands_path = Path(sys.argv[3])
 use_torchrun = str(sys.argv[4]) == "1"
+use_flash_attn = str(sys.argv[5]) == "1"
 
 plans = sorted(plan_root.rglob(plan_glob))
 commands_path.parent.mkdir(parents=True, exist_ok=True)
@@ -40,8 +42,8 @@ for plan_path in plans:
             cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
             for model_cfg in cfg.get("model", {}).values():
                 if isinstance(model_cfg, dict):
-                    model_cfg["use_flash_attn"] = False
-                    model_cfg["attn_implementation"] = "sdpa"
+                    model_cfg["use_flash_attn"] = bool(use_flash_attn)
+                    model_cfg["attn_implementation"] = "flash_attention_2" if use_flash_attn else "sdpa"
             cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     commands = plan.get("recommended_commands", {})
     command = commands.get("vlmevalkit_config_torchrun" if use_torchrun else "vlmevalkit_config_python")

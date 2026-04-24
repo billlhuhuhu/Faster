@@ -42,6 +42,7 @@ MERGE_LORA_FOR_EVAL="${VLM_MERGE_LORA_FOR_EVAL:-0}"
 EVAL_BENCHMARKS="${VLM_EVAL_BENCHMARKS:-GQA,ScienceQA-IMG,MMBench,TextVQA,POPE}"
 VLMEVAL_MODEL_KEY="${VLM_VLMEVAL_MODEL_KEY:-qwen2vl_subset}"
 VLMEVAL_MODEL_CLASS="${VLM_VLMEVAL_MODEL_CLASS:-Qwen2VLChat}"
+VLMEVAL_USE_FLASH_ATTN="${VLM_EVAL_USE_FLASH_ATTN:-0}"
 FINETUNE_CUDA_VISIBLE_DEVICES="${VLM_FINETUNE_CUDA_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-}}"
 FINETUNE_USE_TORCHRUN="${VLM_FINETUNE_USE_TORCHRUN:-auto}"
 FINETUNE_NPROC_PER_NODE="${VLM_FINETUNE_NPROC_PER_NODE:-}"
@@ -131,6 +132,9 @@ run_one() {
   fi
   if [[ "${MERGE_LORA_FOR_EVAL}" == "1" ]]; then
     extra_args+=(--merge_lora_for_eval)
+  fi
+  if [[ "${VLMEVAL_USE_FLASH_ATTN}" == "1" ]]; then
+    extra_args+=(--vlmeval_use_flash_attn)
   fi
 
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] VLM finetune start: ${mode_label}"

@@ -503,8 +503,8 @@ def write_vlmeval_config(
                 "model": eval_model_path,
                 "pretrained": eval_model_path,
                 "trust_remote_code": bool(args.trust_remote_code),
-                "use_flash_attn": False,
-                "attn_implementation": "sdpa",
+                "use_flash_attn": bool(args.vlmeval_use_flash_attn),
+                "attn_implementation": "flash_attention_2" if bool(args.vlmeval_use_flash_attn) else "sdpa",
             }
         },
         "data": {
@@ -674,6 +674,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eval_backend", type=str, default="vlmevalkit", choices=["vlmevalkit", "lmms-eval"])
     parser.add_argument("--vlmeval_model_key", type=str, default="qwen2vl_subset")
     parser.add_argument("--vlmeval_model_class", type=str, default="Qwen2VLChat")
+    parser.add_argument("--vlmeval_use_flash_attn", action="store_true", default=False)
     parser.add_argument("--merge_lora_for_eval", action="store_true", default=False)
     return parser
 
