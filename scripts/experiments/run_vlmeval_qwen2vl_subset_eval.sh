@@ -11,9 +11,11 @@ VLMEVALKIT_ROOT="${VLMEVALKIT_ROOT:-}"
 VLMEVAL_NPROC="${VLMEVAL_NPROC:-1}"
 USE_TORCHRUN="${VLM_EVAL_USE_TORCHRUN:-0}"
 USE_FLASH_ATTN="${VLM_EVAL_USE_FLASH_ATTN:-0}"
+DATASETS_OVERRIDE="${VLM_EVAL_VLMEVAL_DATASETS:-}"
 
-python - "${PLAN_ROOT}" "${PLAN_GLOB}" "${COMMANDS_PATH}" "${USE_TORCHRUN}" "${USE_FLASH_ATTN}" <<'PY'
+python - "${PLAN_ROOT}" "${PLAN_GLOB}" "${COMMANDS_PATH}" "${USE_TORCHRUN}" "${USE_FLASH_ATTN}" "${VLMEVALKIT_ROOT}" "${DATASETS_OVERRIDE}" <<'PY'
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -22,6 +24,70 @@ plan_glob = sys.argv[2]
 commands_path = Path(sys.argv[3])
 use_torchrun = str(sys.argv[4]) == "1"
 use_flash_attn = str(sys.argv[5]) == "1"
+vlmevalkit_root = Path(sys.argv[6]) if len(sys.argv) > 6 and sys.argv[6] else None
+datasets_override = sys.argv[7] if len(sys.argv) > 7 else ""
+
+
+def split_names(raw):
+    return [item.strip() for item in str(raw or "").replace(",", " ").split() if item.strip()]
+
+
+def collect_supported_dataset_names(root):
+    if root is None or not root.exists():
+        return set()
+    import importlib
+
+    sys.path.insert(0, str(root))
+    names = set()
+    try:
+        dataset_module = importlib.import_module("vlmeval.dataset")
+    except Exception as exc:
+        print(f"[VLMEvalKit] warning: failed to inspect supported datasets: {exc}")
+        return names
+    for attr in dir(dataset_module):
+        value = getattr(dataset_module, attr, None)
+        if isinstance(value, dict):
+            names.update(str(key) for key in value.keys())
+    return names
+
+
+def resolve_dataset_name(name, supported_names):
+    if not supported_names or name in supported_names:
+        return name
+    aliases = {
+        "GQA_TestDev_Balanced": ["GQA", "GQA_TESTDEV", "GQA_TestDev", "GQA_VAL"],
+        "GQA": ["GQA", "GQA_TESTDEV", "GQA_TestDev", "GQA_VAL"],
+        "ScienceQA_VAL": ["ScienceQA_TEST", "ScienceQA_VAL", "ScienceQA", "ScienceQA_IMG"],
+        "ScienceQA-IMG": ["ScienceQA_TEST", "ScienceQA_VAL", "ScienceQA", "ScienceQA_IMG"],
+        "MMBench_DEV_EN": ["MMBench_DEV_EN", "MMBench_DEV_EN_V11", "MMBench_DEV_EN_V12", "MMBench_DEV"],
+        "MMBench": ["MMBench_DEV_EN", "MMBench_DEV_EN_V11", "MMBench_DEV_EN_V12", "MMBench_DEV"],
+        "TextVQA_VAL": ["TextVQA_VAL", "TextVQA"],
+        "TextVQA": ["TextVQA_VAL", "TextVQA"],
+        "POPE": ["POPE", "POPE_COCO", "POPE_Random", "POPE_RANDOM", "POPE_POPULAR", "POPE_ADVERSARIAL"],
+    }
+    for candidate in aliases.get(name, []):
+        if candidate in supported_names:
+            return candidate
+    lower = name.lower()
+    for candidate in sorted(supported_names):
+        if candidate.lower() == lower:
+            return candidate
+    compact = lower.replace("_", "").replace("-", "")
+    for candidate in sorted(supported_names):
+        cand_compact = candidate.lower().replace("_", "").replace("-", "")
+        if compact and (compact in cand_compact or cand_compact in compact):
+            return candidate
+    return name
+
+
+supported_dataset_names = collect_supported_dataset_names(vlmevalkit_root)
+override_names = split_names(datasets_override)
+if supported_dataset_names:
+    interesting = [
+        name for name in sorted(supported_dataset_names)
+        if any(token in name.lower() for token in ["gqa", "science", "mmbench", "textvqa", "pope"])
+    ]
+    print(f"[VLMEvalKit] matched dataset candidates: {interesting[:80]}")
 
 plans = sorted(plan_root.rglob(plan_glob))
 commands_path.parent.mkdir(parents=True, exist_ok=True)
@@ -44,6 +110,17 @@ for plan_path in plans:
                 if isinstance(model_cfg, dict):
                     model_cfg["use_flash_attn"] = bool(use_flash_attn)
                     model_cfg["attn_implementation"] = "flash_attention_2" if use_flash_attn else "sdpa"
+            original_data_names = list(cfg.get("data", {}).keys())
+            if override_names:
+                resolved_data_names = override_names
+            else:
+                resolved_data_names = [
+                    resolve_dataset_name(name, supported_dataset_names)
+                    for name in original_data_names
+                ]
+            cfg["data"] = {name: {} for name in resolved_data_names}
+            if original_data_names != resolved_data_names:
+                print(f"[VLMEvalKit] remapped datasets: {original_data_names} -> {resolved_data_names}")
             cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     commands = plan.get("recommended_commands", {})
     command = commands.get("vlmevalkit_config_torchrun" if use_torchrun else "vlmevalkit_config_python")
