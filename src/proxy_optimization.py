@@ -420,14 +420,61 @@ def dpp_diversity_loss(proxy_points, kernel="rbf", sigma=1.0, eps=1e-6, max_poin
 
 def resolve_reference_loss_devices(primary_device):
     primary_device = torch.device(primary_device)
-    devices = [primary_device]
     if primary_device.type != "cuda":
-        return devices
-    for index in range(torch.cuda.device_count()):
-        device = torch.device(f"cuda:{index}")
-        if str(device) != str(primary_device):
-            devices.append(device)
+        return [primary_device]
+
+    primary_index = primary_device.index
+    if primary_index is None:
+        primary_index = torch.cuda.current_device()
+    primary_device = torch.device(f"cuda:{int(primary_index)}")
+
+    devices = []
+    seen = set()
+    for device in [primary_device] + [torch.device(f"cuda:{index}") for index in range(torch.cuda.device_count())]:
+        key = str(device)
+        if key in seen:
+            continue
+        seen.add(key)
+        devices.append(device)
     return devices
+
+
+def resolve_safe_proxy_chunk_size(proxy_batch_size=None, lsrc_batch_size=None, default=1024):
+    candidates = [int(default)]
+    for value in (proxy_batch_size, lsrc_batch_size):
+        if value is not None and int(value) > 0:
+            candidates.append(int(value))
+    return max(1, min(candidates))
+
+
+def compute_direct_coverage(
+    proxy_points,
+    real_points,
+    tau_c=1.0,
+    batch_size=4096,
+    coverage_mode="mean",
+    proxy_chunk_size=None,
+):
+    tau_c = max(float(tau_c), 1e-8)
+    batch_size = max(1, int(batch_size))
+    proxy_chunk_size = resolve_safe_proxy_chunk_size(
+        proxy_batch_size=proxy_chunk_size,
+        lsrc_batch_size=batch_size,
+        default=1024,
+    )
+
+    coverages = []
+    for batch in real_points.split(batch_size, dim=0):
+        coverage = torch.zeros(batch.shape[0], dtype=proxy_points.dtype, device=batch.device)
+        for proxy_chunk in proxy_points.split(proxy_chunk_size, dim=0):
+            sqdist = torch.cdist(batch, proxy_chunk, p=2) ** 2
+            coverage = coverage + torch.exp(-sqdist / tau_c).sum(dim=1)
+        if coverage_mode == "mean":
+            coverage = coverage / max(int(proxy_points.shape[0]), 1)
+        elif coverage_mode != "sum":
+            raise ValueError(f"Unsupported LSRC coverage mode: {coverage_mode}")
+        coverages.append(coverage)
+    return torch.cat(coverages, dim=0) if coverages else torch.empty(0, dtype=proxy_points.dtype, device=proxy_points.device)
 
 
 def build_reference_shards(reference_points, devices, shard_size=16384):
@@ -577,20 +624,6 @@ def build_lsrc_relation_graph(
     }
 
 
-def compute_direct_coverage(proxy_points, real_points, tau_c=1.0, batch_size=4096, coverage_mode="mean"):
-    tau_c = max(float(tau_c), 1e-8)
-    coverages = []
-    for batch in real_points.split(int(batch_size), dim=0):
-        sqdist = torch.cdist(batch, proxy_points, p=2) ** 2
-        coverage = torch.exp(-sqdist / tau_c).sum(dim=1)
-        if coverage_mode == "mean":
-            coverage = coverage / max(int(proxy_points.shape[0]), 1)
-        elif coverage_mode != "sum":
-            raise ValueError(f"Unsupported LSRC coverage mode: {coverage_mode}")
-        coverages.append(coverage)
-    return torch.cat(coverages, dim=0) if coverages else torch.empty(0, dtype=proxy_points.dtype, device=proxy_points.device)
-
-
 def compute_lsrc_losses(
     proxy_points,
     real_points,
@@ -599,6 +632,7 @@ def compute_lsrc_losses(
     beta=0.5,
     eps=1e-8,
     batch_size=4096,
+    proxy_chunk_size=None,
     coverage_mode="mean",
     rel_loss_mode="weight_mean",
 ):
@@ -607,6 +641,7 @@ def compute_lsrc_losses(
         real_points,
         tau_c=tau_c,
         batch_size=batch_size,
+        proxy_chunk_size=proxy_chunk_size,
         coverage_mode=coverage_mode,
     )
     if relation_graph is None or relation_graph["num_edges"] <= 0:
@@ -641,6 +676,7 @@ def compute_multiscale_lsrc_outputs(
     beta=0.5,
     eps=1e-8,
     batch_size=4096,
+    proxy_chunk_size=None,
     coverage_mode="mean",
     rel_loss_mode="weight_mean",
 ):
@@ -660,6 +696,7 @@ def compute_multiscale_lsrc_outputs(
             beta=beta,
             eps=eps,
             batch_size=batch_size,
+            proxy_chunk_size=proxy_chunk_size,
             coverage_mode=coverage_mode,
             rel_loss_mode=rel_loss_mode,
         )
@@ -928,6 +965,11 @@ def optimize_proxy_points(
     reference_loss_devices = resolve_reference_loss_devices(torch_device)
     reference_loss_shard_size = max(4096, min(16384, int(projected_representation.shape[0]) if projected_representation.shape[0] > 0 else 4096))
     reference_loss_proxy_chunk_size = max(512, int(proxy_batch_size) if proxy_batch_size is not None else 2048)
+    lsrc_proxy_chunk_size = resolve_safe_proxy_chunk_size(
+        proxy_batch_size=proxy_batch_size,
+        lsrc_batch_size=lsrc_batch_size,
+        default=1024,
+    )
     match_reference_shards = build_reference_shards(
         match_reference,
         reference_loss_devices,
@@ -950,6 +992,14 @@ def optimize_proxy_points(
             "[proxy-opt] reference matching uses chunked cdist on "
             f"{str(torch_device)} "
             f"(shard_size={reference_loss_shard_size}, proxy_chunk_size={reference_loss_proxy_chunk_size})",
+            flush=True,
+        )
+    if effective_keep_lsrc:
+        print(
+            "[proxy-opt] LSRC coverage uses chunked cdist "
+            f"(real_batch_size={int(lsrc_batch_size)}, "
+            f"proxy_sample_size<={int(lsrc_proxy_chunk_size)}, "
+            f"proxy_chunk_size={int(lsrc_proxy_chunk_size)})",
             flush=True,
         )
 
@@ -1143,8 +1193,12 @@ def optimize_proxy_points(
             proxy_chunk_size=reference_loss_proxy_chunk_size,
         )
         if effective_keep_lsrc:
+            lsrc_proxy_points = proxy_points
+            if proxy_points.shape[0] > int(lsrc_proxy_chunk_size):
+                lsrc_proxy_indices = torch.randperm(proxy_points.shape[0], device=torch_device)[: int(lsrc_proxy_chunk_size)]
+                lsrc_proxy_points = proxy_points[lsrc_proxy_indices]
             lsrc_outputs = compute_multiscale_lsrc_outputs(
-                proxy_points,
+                lsrc_proxy_points,
                 full_repr,
                 lsrc_relation_graphs,
                 active_scales=active_scales,
@@ -1153,6 +1207,7 @@ def optimize_proxy_points(
                 beta=lsrc_beta,
                 eps=lsrc_eps,
                 batch_size=lsrc_batch_size,
+                proxy_chunk_size=lsrc_proxy_chunk_size,
                 coverage_mode=lsrc_coverage_mode,
                 rel_loss_mode=lsrc_rel_loss_mode,
             )
@@ -1408,6 +1463,9 @@ def optimize_proxy_points(
         "lambda_lsrc_cov": float(lambda_lsrc_cov),
         "lambda_lsrc_rel": float(lambda_lsrc_rel),
         "lsrc_eps": float(lsrc_eps),
+        "lsrc_batch_size": int(lsrc_batch_size),
+        "lsrc_proxy_chunk_size": int(lsrc_proxy_chunk_size),
+        "lsrc_proxy_sample_size": int(min(proxy_points.shape[0], int(lsrc_proxy_chunk_size))),
         "lsrc_num_edges": int(sum(graph["num_edges"] for graph in lsrc_relation_graphs.values())) if lsrc_relation_graphs is not None else 0,
         "lsrc_use_global_confidence": bool(lsrc_use_global_confidence),
         "lsrc_coverage_mode": lsrc_coverage_mode,
