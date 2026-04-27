@@ -68,7 +68,7 @@ PY
 
 ensure_dataprophet_master_selection() {
   local seed="$1"
-  run_ratio_job "dataprophet" "${DATAPROPHET_MASTER_RATIO}" "${seed}"
+  run_ratio_selection_only "dataprophet" "${DATAPROPHET_MASTER_RATIO}" "${seed}"
 }
 
 materialize_dataprophet_budget_from_master_ratio() {
@@ -329,6 +329,38 @@ PY
     --num_workers "${BASELINE_NUM_WORKERS}" \
     --eval_interval 1 \
     --no_aug
+}
+
+run_ratio_selection_only() {
+  local method="$1"
+  local ratio="$2"
+  local seed="$3"
+
+  local ratio_tag
+  ratio_tag="$(ratio_to_tag "${ratio}")"
+  local model_tag="${BASELINE_IMAGE_ENCODER}_${BASELINE_TEXT_ENCODER}"
+  local run_dir="${BASELINE_OUTPUT_ROOT}/${BASELINE_DATASET}/train/${model_tag}/${ratio_tag}/${method}/seed_${seed}"
+  local selected_path="${run_dir}/selected_indices.json"
+
+  if [[ -f "${selected_path}" ]]; then
+    echo "[skip][ratio][selection-only] exists method=${method} ratio=${ratio} seed=${seed}"
+    return 0
+  fi
+
+  echo "[run][ratio][selection-only] method=${method} ratio=${ratio} seed=${seed}"
+  python -m baselines.runners.run_baseline_selection \
+    --method "${method}" \
+    --ratio "${ratio}" \
+    --dataset_name "${BASELINE_DATASET}" \
+    --split train \
+    --image_encoder "${BASELINE_IMAGE_ENCODER}" \
+    --text_encoder "${BASELINE_TEXT_ENCODER}" \
+    --feature_source "${BASELINE_FEATURE_SOURCE}" \
+    --output_dir "${BASELINE_OUTPUT_ROOT}" \
+    --config "${BASELINE_CONFIG}" \
+    --output_layout ratio \
+    --seed "${seed}" \
+    --device "${BASELINE_DEVICE}"
 }
 
 # 1) Absolute budgets
