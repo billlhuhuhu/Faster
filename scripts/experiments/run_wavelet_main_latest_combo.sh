@@ -25,6 +25,17 @@ TRAIN_OUTPUT_ROOT="${WAVELET_MAIN_LATEST_TRAIN_OUTPUT_ROOT:-artifacts/subset_tra
 REPORT_NAME="${WAVELET_MAIN_LATEST_REPORT_NAME:-wavelet_main_latest_combo_collapse_aware}"
 RUN_SELECTION="${WAVELET_MAIN_LATEST_RUN_SELECTION:-1}"
 RUN_TRAIN="${WAVELET_MAIN_LATEST_RUN_TRAIN:-1}"
+SELECTION_USE_TORCHRUN="${WAVELET_MAIN_LATEST_SELECTION_USE_TORCHRUN:-0}"
+SELECTION_CUDA_VISIBLE_DEVICES="${WAVELET_MAIN_LATEST_SELECTION_CUDA_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-}}"
+if [[ -z "${WAVELET_MAIN_LATEST_SELECTION_NPROC_PER_NODE:-}" && -n "${SELECTION_CUDA_VISIBLE_DEVICES}" ]]; then
+  SELECTION_NPROC_PER_NODE="$(python - <<PY
+devices = "${SELECTION_CUDA_VISIBLE_DEVICES}".strip()
+print(max(len([item for item in devices.split(",") if item.strip()]), 1))
+PY
+)"
+else
+  SELECTION_NPROC_PER_NODE="${WAVELET_MAIN_LATEST_SELECTION_NPROC_PER_NODE:-1}"
+fi
 
 CORRECTION_MODE="${WAVELET_MAIN_LATEST_CORRECTION_MODE:-bidirectional}"
 FUSION_MODE="${WAVELET_MAIN_LATEST_FUSION_MODE:-confidence_aware}"
@@ -77,6 +88,8 @@ WAVELET_EDGE_WEIGHT="${WAVELET_MAIN_LATEST_EDGE_WEIGHT:-0.25}"
 WAVELET_CURRICULUM_SCHEDULE="${WAVELET_MAIN_LATEST_CURRICULUM_SCHEDULE:-coarse_to_fine}"
 
 MATCHING_COST_MODE="${WAVELET_MAIN_LATEST_MATCHING_COST_MODE:-candidate_topk}"
+MATCHING_TOP_K="${WAVELET_MAIN_LATEST_MATCHING_TOP_K:-64}"
+MATCHING_CANDIDATE_BATCH_SIZE="${WAVELET_MAIN_LATEST_MATCHING_CANDIDATE_BATCH_SIZE:-128}"
 COST_ALPHA_DIFF="${WAVELET_MAIN_LATEST_COST_ALPHA_DIFF:-0.25}"
 COST_BETA_WAVELET="${WAVELET_MAIN_LATEST_COST_BETA_WAVELET:-1.0}"
 MATCHING_WAVELET_WEIGHT="${WAVELET_MAIN_LATEST_MATCHING_WAVELET_WEIGHT:-1.0}"
@@ -436,7 +449,11 @@ run_selection_abs() {
     stage_log "Skip selection by config: budget=${budget} seed=${seed}"
   elif [[ ! -f "${selected_indices_path}" ]]; then
     stage_log "Selection start: budget=${budget} seed=${seed}"
-    python "${PROJECT_ROOT}/run_subset_selection.py" \
+    local selection_launcher=(python)
+    if [[ "${SELECTION_USE_TORCHRUN}" == "1" && "${SELECTION_NPROC_PER_NODE}" -gt 1 ]]; then
+      selection_launcher=(torchrun --standalone --nproc_per_node "${SELECTION_NPROC_PER_NODE}")
+    fi
+    "${selection_launcher[@]}" "${PROJECT_ROOT}/run_subset_selection.py" \
       --dataset "${DATASET}" \
       --split train \
       --image_encoder "${BACKBONE}" \
@@ -486,6 +503,8 @@ run_selection_abs() {
       --lsrc_coverage_mode "${LSRC_COVERAGE_MODE}" \
       --lsrc_rel_loss_mode "${LSRC_REL_LOSS_MODE}" \
       --matching_cost_mode "${MATCHING_COST_MODE}" \
+      --matching_top_k "${MATCHING_TOP_K}" \
+      --matching_candidate_batch_size "${MATCHING_CANDIDATE_BATCH_SIZE}" \
       --cost_alpha_diff "${COST_ALPHA_DIFF}" \
       --cost_beta_wavelet "${COST_BETA_WAVELET}" \
       --matching_wavelet_weight "${MATCHING_WAVELET_WEIGHT}" \
@@ -609,7 +628,11 @@ run_selection_ratio() {
     stage_log "Skip selection by config: ratio=${ratio} seed=${seed}"
   elif [[ ! -f "${selected_indices_path}" ]]; then
     stage_log "Selection start: ratio=${ratio} seed=${seed}"
-    python "${PROJECT_ROOT}/run_subset_selection.py" \
+    local selection_launcher=(python)
+    if [[ "${SELECTION_USE_TORCHRUN}" == "1" && "${SELECTION_NPROC_PER_NODE}" -gt 1 ]]; then
+      selection_launcher=(torchrun --standalone --nproc_per_node "${SELECTION_NPROC_PER_NODE}")
+    fi
+    "${selection_launcher[@]}" "${PROJECT_ROOT}/run_subset_selection.py" \
       --dataset "${DATASET}" \
       --split train \
       --image_encoder "${BACKBONE}" \
@@ -659,6 +682,8 @@ run_selection_ratio() {
       --lsrc_coverage_mode "${LSRC_COVERAGE_MODE}" \
       --lsrc_rel_loss_mode "${LSRC_REL_LOSS_MODE}" \
       --matching_cost_mode "${MATCHING_COST_MODE}" \
+      --matching_top_k "${MATCHING_TOP_K}" \
+      --matching_candidate_batch_size "${MATCHING_CANDIDATE_BATCH_SIZE}" \
       --cost_alpha_diff "${COST_ALPHA_DIFF}" \
       --cost_beta_wavelet "${COST_BETA_WAVELET}" \
       --matching_wavelet_weight "${MATCHING_WAVELET_WEIGHT}" \
@@ -712,6 +737,7 @@ cd "${PROJECT_ROOT}"
 run_precompute_if_needed
 
 stage_log "Wavelet-main latest combo start: dataset=${DATASET} budgets=${BUDGETS[*]} ratios=${RATIOS[*]} seeds=${SEEDS[*]} fusion_weight_mode=${WAVELET_FUSION_WEIGHT_MODE} exp_id=${DIAGNOSTIC_EXPERIMENT_ID:-none} stage2=${STAGE2_SWITCH:-preset} stage3=${STAGE3_SWITCH:-preset} stage4=${STAGE4_SWITCH:-preset} run_selection=${RUN_SELECTION} run_train=${RUN_TRAIN}"
+stage_log "Selection launcher: torchrun=${SELECTION_USE_TORCHRUN} nproc=${SELECTION_NPROC_PER_NODE} visible=${SELECTION_CUDA_VISIBLE_DEVICES:-<inherit>}"
 
 for budget in "${BUDGETS[@]}"; do
   for seed in "${SEEDS[@]}"; do

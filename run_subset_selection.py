@@ -1,5 +1,5 @@
-import os
 import argparse
+import os
 
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -8,6 +8,7 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
 os.environ.setdefault("BLIS_NUM_THREADS", "1")
 
+from src.proxy_optimization import distributed_info
 from src.subset_match import run_subset_selection
 
 
@@ -168,6 +169,9 @@ def main():
         else:
             args.proxy_loss_type = "wavelet_main"
     outputs = run_subset_selection(args)
+    rank, world_size = distributed_info()
+    if world_size > 1 and rank != 0:
+        return
     print("Subset selection finished:")
     print(f"  output_dir: {outputs['output_dir']}")
     print(f"  subset_size: {outputs['subset_size']}")
