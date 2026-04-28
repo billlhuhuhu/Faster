@@ -11,7 +11,7 @@ from sklearn.neighbors import NearestNeighbors
 
 from data.subset_dataset import save_selected_indices
 from src.graph_wavelet import build_multi_scale_wavelet_signatures, parse_wavelet_scales
-from src.proxy_optimization import l2_normalize, optimize_proxy_points, resolve_proxy_loss_type
+from src.proxy_optimization import distributed_info, l2_normalize, optimize_proxy_points, resolve_proxy_loss_type
 
 
 def sanitize_name(name):
@@ -1100,6 +1100,9 @@ def run_proxy_optimized_selection(args, representation, unified_graph):
         reg_beta_topo=getattr(args, "reg_beta_topo", 1.0),
         reg_gamma_init=getattr(args, "reg_gamma_init", 1.0),
     )
+    distributed_rank, distributed_world_size = distributed_info()
+    if distributed_world_size > 1 and distributed_rank != 0:
+        return None
     projected_representation = proxy_bundle["projected_representation"]
     topology_targets = build_topology_targets(unified_graph, projected_representation, hop_weight=args.topology_hop_weight)
     wavelet_bundle = resolve_wavelet_signature_bundle(proxy_bundle, unified_graph, projected_representation)
@@ -1242,6 +1245,19 @@ def run_subset_selection(args):
 
     if selection_method == "proxy_opt":
         outputs = run_proxy_optimized_selection(args, representation, unified_graph)
+        if outputs is None:
+            output_dir = build_output_dir(args)
+            return {
+                "output_dir": str(output_dir),
+                "subset_size": resolve_subset_size(
+                    representation.shape[0],
+                    budget_ratio=getattr(args, "budget_ratio", None),
+                    budget_size=getattr(args, "budget_size", None),
+                ),
+                "selected_indices": [],
+                "saved": {},
+                "summary": {"distributed_nonzero_rank": True},
+            }
     else:
         outputs = run_baseline_selection(args, representation, unified_graph)
 

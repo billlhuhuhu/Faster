@@ -41,6 +41,45 @@ def stage_log(message):
     print(f"[LLaVA selection] {message}", flush=True)
 
 
+def maybe_init_distributed():
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size <= 1:
+        return False
+    if not torch.distributed.is_available():
+        return False
+    if not torch.distributed.is_initialized():
+        if torch.cuda.is_available() and os.environ.get("LOCAL_RANK") is not None:
+            torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+        torch.distributed.init_process_group(backend=backend)
+    return True
+
+
+def distributed_info():
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return int(torch.distributed.get_rank()), int(torch.distributed.get_world_size())
+    return 0, 1
+
+
+def is_rank0():
+    rank, _ = distributed_info()
+    return rank == 0
+
+
+def distributed_barrier():
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.barrier()
+
+
+def broadcast_skip_flag(skip):
+    if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
+        return bool(skip)
+    device = torch.device(f"cuda:{int(os.environ.get('LOCAL_RANK', '0'))}") if torch.cuda.is_available() else torch.device("cpu")
+    flag = torch.tensor([1 if bool(skip) else 0], dtype=torch.int64, device=device)
+    torch.distributed.broadcast(flag, src=0)
+    return bool(flag.item())
+
+
 def parse_ratios(value):
     return [float(item) for item in str(value).replace(",", " ").split() if item.strip()]
 
@@ -240,7 +279,9 @@ class TeeLogger:
 def run_with_stage_log(log_dir, stage_name, func, *args, **kwargs):
     if not log_dir:
         return func(*args, **kwargs)
-    log_path = Path(log_dir) / f"{stage_name}.log"
+    rank, world_size = distributed_info()
+    suffix = "" if world_size <= 1 or rank == 0 else f"_rank{rank}"
+    log_path = Path(log_dir) / f"{stage_name}{suffix}.log"
     stage_log(f"{stage_name}: log -> {log_path}")
     with TeeLogger(log_path):
         return func(*args, **kwargs)
@@ -430,10 +471,12 @@ def build_subset_args(args, ratio):
 def run_full_cross_modal_pipeline(args, ratio):
     ratio_tag = ratio_tag_from_percent(ratio)
     log_dir = Path(args.log_dir) / ratio_tag if args.log_dir else None
-    run_with_stage_log(log_dir, "stage0_structured_feature_cache", ensure_structured_feature_cache, args)
+    if is_rank0():
+        run_with_stage_log(log_dir, "stage0_structured_feature_cache", ensure_structured_feature_cache, args)
+    distributed_barrier()
 
     image_topology_dir = topology_output_dir(args, "image", args.image_metric)
-    if args.force_recompute_topology or not (image_topology_dir / "summary.json").exists():
+    if is_rank0() and (args.force_recompute_topology or not (image_topology_dir / "summary.json").exists()):
         stage_log("Stage A1: build image topology graph")
         run_with_stage_log(
             log_dir,
@@ -441,11 +484,12 @@ def run_full_cross_modal_pipeline(args, ratio):
             run_topology_graph,
             build_topology_args(args, "image", args.image_metric),
         )
-    else:
+    elif is_rank0():
         stage_log(f"Skip image topology: {image_topology_dir}")
+    distributed_barrier()
 
     text_topology_dir = topology_output_dir(args, "text", args.text_metric)
-    if args.force_recompute_topology or not (text_topology_dir / "summary.json").exists():
+    if is_rank0() and (args.force_recompute_topology or not (text_topology_dir / "summary.json").exists()):
         stage_log("Stage A2: build text topology graph")
         run_with_stage_log(
             log_dir,
@@ -453,11 +497,12 @@ def run_full_cross_modal_pipeline(args, ratio):
             run_topology_graph,
             build_topology_args(args, "text", args.text_metric),
         )
-    else:
+    elif is_rank0():
         stage_log(f"Skip text topology: {text_topology_dir}")
+    distributed_barrier()
 
     cross_dir = cross_modal_output_dir(args)
-    if args.force_recompute_cross_modal or not (cross_dir / "summary.json").exists():
+    if is_rank0() and (args.force_recompute_cross_modal or not (cross_dir / "summary.json").exists()):
         stage_log("Stage B: run stage2 correction + stage3 wavelet-latent fusion")
         run_with_stage_log(
             log_dir,
@@ -465,16 +510,19 @@ def run_full_cross_modal_pipeline(args, ratio):
             run_cross_modal_topology,
             build_cross_modal_args(args),
         )
-    else:
+    elif is_rank0():
         stage_log(f"Skip cross-modal topology: {cross_dir}")
+    distributed_barrier()
 
-    stage_log(f"Stage C: wavelet_main subset selection ratio={ratio}%")
+    if is_rank0():
+        stage_log(f"Stage C: wavelet_main subset selection ratio={ratio}%")
     outputs = run_with_stage_log(
         log_dir,
         "stage4_wavelet_main_selection",
         run_subset_selection,
         build_subset_args(args, ratio),
     )
+    distributed_barrier()
     return outputs, cross_dir
 
 
@@ -617,6 +665,8 @@ def make_selection_args(args, ratio):
 
 
 def main():
+    maybe_init_distributed()
+    rank, world_size = distributed_info()
     parser = argparse.ArgumentParser(description="Select LLaVA instruction subsets with dense_sift_bovw image features and the project's proxy/wavelet sampler.")
     parser.add_argument("--annotation_path", type=str, required=True)
     parser.add_argument("--image_root", type=str, required=True)
@@ -690,26 +740,36 @@ def main():
     parser.add_argument("--disable_dpp", action="store_false", dest="use_dpp")
     args = parser.parse_args()
 
-    records = load_json_or_jsonl(args.annotation_path)
-    print(f"[LLaVA selection] Loaded {len(records)} LLaVA records from {args.annotation_path}", flush=True)
-    run_with_stage_log(args.log_dir, "stage0_load_or_build_features", load_or_build_features, args, records)
+    if world_size > 1 and rank == 0:
+        stage_log(f"Distributed selection enabled: world_size={world_size}")
+
+    if is_rank0():
+        records = load_json_or_jsonl(args.annotation_path)
+        print(f"[LLaVA selection] Loaded {len(records)} LLaVA records from {args.annotation_path}", flush=True)
+        run_with_stage_log(args.log_dir, "stage0_load_or_build_features", load_or_build_features, args, records)
+    distributed_barrier()
 
     output_root = Path(args.output_root)
     for ratio in parse_ratios(args.ratios):
         ratio_tag = f"ratio_{int(round(ratio)):02d}"
         output_dir = output_root / ratio_tag / "proxy_opt_lsrc" / f"seed_{int(args.seed)}"
         selected_path = output_dir / "selected_indices.json"
-        if selected_path.exists() and not args.force_recompute_selection and is_current_full_pipeline_selection(output_dir):
+        skip_existing = False
+        if is_rank0() and selected_path.exists() and not args.force_recompute_selection and is_current_full_pipeline_selection(output_dir):
             print(f"Skip existing full-pipeline LLaVA dense_sift_bovw selection: {selected_path}", flush=True)
+            skip_existing = True
+        if broadcast_skip_flag(skip_existing):
             continue
-        if selected_path.exists() and not is_current_full_pipeline_selection(output_dir):
+        if is_rank0() and selected_path.exists() and not is_current_full_pipeline_selection(output_dir):
             print(
                 f"[LLaVA selection] Existing selection is not marked as full pipeline; recomputing: {selected_path}",
                 flush=True,
             )
         outputs, cross_dir = run_full_cross_modal_pipeline(args, ratio)
-        legacy_dir = sync_selection_to_legacy_layout(args, ratio, outputs, cross_dir)
-        print(f"Saved full-pipeline LLaVA dense_sift_bovw Ours selection: {legacy_dir / 'selected_indices.json'}", flush=True)
+        if is_rank0():
+            legacy_dir = sync_selection_to_legacy_layout(args, ratio, outputs, cross_dir)
+            print(f"Saved full-pipeline LLaVA dense_sift_bovw Ours selection: {legacy_dir / 'selected_indices.json'}", flush=True)
+        distributed_barrier()
 
 
 if __name__ == "__main__":

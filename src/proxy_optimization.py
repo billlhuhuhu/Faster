@@ -1,4 +1,5 @@
 import math
+import os
 
 import numpy as np
 import torch
@@ -6,6 +7,41 @@ from sklearn.cluster import KMeans, MiniBatchKMeans
 from sklearn.neighbors import NearestNeighbors
 
 from src.graph_wavelet import build_multi_scale_wavelet_signatures, parse_wavelet_scales, resolve_active_scales
+
+
+def maybe_init_distributed_from_env():
+    if int(os.environ.get("WORLD_SIZE", "1")) <= 1:
+        return False
+    if not torch.distributed.is_available():
+        return False
+    if not torch.distributed.is_initialized():
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+        if torch.cuda.is_available() and os.environ.get("LOCAL_RANK") is not None:
+            torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+        torch.distributed.init_process_group(backend=backend)
+    return True
+
+
+def distributed_info():
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return int(torch.distributed.get_rank()), int(torch.distributed.get_world_size())
+    return 0, 1
+
+
+def is_distributed_rank0():
+    rank, _ = distributed_info()
+    return rank == 0
+
+
+def average_gradients(parameters):
+    _, world_size = distributed_info()
+    if world_size <= 1:
+        return
+    for parameter in parameters:
+        if parameter.grad is None:
+            continue
+        torch.distributed.all_reduce(parameter.grad, op=torch.distributed.ReduceOp.SUM)
+        parameter.grad.div_(float(world_size))
 
 
 def l2_normalize(features, eps=1e-12):
@@ -418,7 +454,41 @@ def dpp_diversity_loss(proxy_points, kernel="rbf", sigma=1.0, eps=1e-6, max_poin
     return -logdet / max(int(proxy_points.shape[0]), 1)
 
 
-def resolve_reference_loss_devices(primary_device):
+def get_cuda_free_memory(device):
+    device = torch.device(device)
+    if device.type != "cuda":
+        return None
+    try:
+        with torch.cuda.device(device):
+            free_bytes, _ = torch.cuda.mem_get_info()
+        return int(free_bytes)
+    except Exception:
+        return None
+
+
+def resolve_compute_device(device):
+    torch_device = torch.device(device)
+    if int(os.environ.get("WORLD_SIZE", "1")) > 1 and torch_device.type == "cuda" and torch.cuda.is_available():
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        torch_device = torch.device(f"cuda:{local_rank}")
+        torch.cuda.set_device(torch_device)
+        return torch_device
+    if torch_device.type != "cuda" or torch_device.index is not None or not torch.cuda.is_available():
+        return torch_device
+
+    best_device = torch.device("cuda:0")
+    best_free = -1
+    for index in range(torch.cuda.device_count()):
+        candidate = torch.device(f"cuda:{index}")
+        free_bytes = get_cuda_free_memory(candidate)
+        if free_bytes is not None and free_bytes > best_free:
+            best_free = int(free_bytes)
+            best_device = candidate
+    torch.cuda.set_device(best_device)
+    return best_device
+
+
+def resolve_reference_loss_devices(primary_device, min_free_bytes=512 * 1024 * 1024):
     primary_device = torch.device(primary_device)
     if primary_device.type != "cuda":
         return [primary_device]
@@ -434,9 +504,12 @@ def resolve_reference_loss_devices(primary_device):
         key = str(device)
         if key in seen:
             continue
+        free_bytes = get_cuda_free_memory(device)
+        if free_bytes is not None and free_bytes < int(min_free_bytes):
+            continue
         seen.add(key)
         devices.append(device)
-    return devices
+    return devices if devices else [torch.device("cpu")]
 
 
 def resolve_safe_proxy_chunk_size(proxy_batch_size=None, lsrc_batch_size=None, default=1024):
@@ -447,6 +520,21 @@ def resolve_safe_proxy_chunk_size(proxy_batch_size=None, lsrc_batch_size=None, d
     return max(1, min(candidates))
 
 
+def normalize_work_devices(devices, fallback_device):
+    if not devices:
+        return [torch.device(fallback_device)]
+    normalized = []
+    seen = set()
+    for device in devices:
+        device = torch.device(device)
+        key = str(device)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(device)
+    return normalized or [torch.device(fallback_device)]
+
+
 def compute_direct_coverage(
     proxy_points,
     real_points,
@@ -454,6 +542,7 @@ def compute_direct_coverage(
     batch_size=4096,
     coverage_mode="mean",
     proxy_chunk_size=None,
+    compute_devices=None,
 ):
     tau_c = max(float(tau_c), 1e-8)
     batch_size = max(1, int(batch_size))
@@ -462,18 +551,33 @@ def compute_direct_coverage(
         lsrc_batch_size=batch_size,
         default=1024,
     )
+    compute_devices = normalize_work_devices(compute_devices, fallback_device=proxy_points.device)
 
     coverages = []
-    for batch in real_points.split(batch_size, dim=0):
-        coverage = torch.zeros(batch.shape[0], dtype=proxy_points.dtype, device=batch.device)
+    for batch_index, batch in enumerate(real_points.split(batch_size, dim=0)):
+        work_device = compute_devices[batch_index % len(compute_devices)]
+        local_batch = batch if batch.device == work_device else batch.to(device=work_device)
+        coverage = torch.zeros(local_batch.shape[0], dtype=proxy_points.dtype, device=work_device)
         for proxy_chunk in proxy_points.split(proxy_chunk_size, dim=0):
-            sqdist = torch.cdist(batch, proxy_chunk, p=2) ** 2
-            coverage = coverage + torch.exp(-sqdist / tau_c).sum(dim=1)
+            local_proxy = proxy_chunk if proxy_chunk.device == work_device else proxy_chunk.to(device=work_device)
+            try:
+                sqdist = torch.cdist(local_batch, local_proxy, p=2) ** 2
+                coverage = coverage + torch.exp(-sqdist / tau_c).sum(dim=1)
+            except RuntimeError as exc:
+                if work_device.type != "cuda" or "out of memory" not in str(exc).lower():
+                    raise
+                torch.cuda.empty_cache()
+                cpu_batch = batch.to(device="cpu")
+                cpu_proxy = proxy_chunk.to(device="cpu")
+                sqdist = torch.cdist(cpu_batch, cpu_proxy, p=2) ** 2
+                coverage = coverage.to(device="cpu") + torch.exp(-sqdist / tau_c).sum(dim=1)
+                local_batch = cpu_batch
+                work_device = torch.device("cpu")
         if coverage_mode == "mean":
             coverage = coverage / max(int(proxy_points.shape[0]), 1)
         elif coverage_mode != "sum":
             raise ValueError(f"Unsupported LSRC coverage mode: {coverage_mode}")
-        coverages.append(coverage)
+        coverages.append(coverage.to(device=proxy_points.device))
     return torch.cat(coverages, dim=0) if coverages else torch.empty(0, dtype=proxy_points.dtype, device=proxy_points.device)
 
 
@@ -511,7 +615,15 @@ def nearest_reference_loss(
         best_chunk = None
         for shard in reference_shards:
             local_proxy = proxy_chunk if shard.device == proxy_chunk.device else proxy_chunk.to(device=shard.device)
-            local_distances = torch.cdist(local_proxy, shard, p=2) ** 2
+            try:
+                local_distances = torch.cdist(local_proxy, shard, p=2) ** 2
+            except RuntimeError as exc:
+                if shard.device.type != "cuda" or "out of memory" not in str(exc).lower():
+                    raise
+                torch.cuda.empty_cache()
+                cpu_proxy = proxy_chunk.to(device="cpu")
+                cpu_shard = shard.to(device="cpu")
+                local_distances = torch.cdist(cpu_proxy, cpu_shard, p=2) ** 2
             local_best = torch.min(local_distances, dim=1).values
             local_best = local_best.to(device=proxy_points.device)
             best_chunk = local_best if best_chunk is None else torch.minimum(best_chunk, local_best)
@@ -633,6 +745,7 @@ def compute_lsrc_losses(
     eps=1e-8,
     batch_size=4096,
     proxy_chunk_size=None,
+    compute_devices=None,
     coverage_mode="mean",
     rel_loss_mode="weight_mean",
 ):
@@ -642,6 +755,7 @@ def compute_lsrc_losses(
         tau_c=tau_c,
         batch_size=batch_size,
         proxy_chunk_size=proxy_chunk_size,
+        compute_devices=compute_devices,
         coverage_mode=coverage_mode,
     )
     if relation_graph is None or relation_graph["num_edges"] <= 0:
@@ -677,6 +791,7 @@ def compute_multiscale_lsrc_outputs(
     eps=1e-8,
     batch_size=4096,
     proxy_chunk_size=None,
+    compute_devices=None,
     coverage_mode="mean",
     rel_loss_mode="weight_mean",
 ):
@@ -697,6 +812,7 @@ def compute_multiscale_lsrc_outputs(
             eps=eps,
             batch_size=batch_size,
             proxy_chunk_size=proxy_chunk_size,
+            compute_devices=compute_devices,
             coverage_mode=coverage_mode,
             rel_loss_mode=rel_loss_mode,
         )
@@ -844,6 +960,8 @@ def optimize_proxy_points(
     wavelet_curriculum_schedule="coarse_to_fine",
     keep_lsrc=True,
 ):
+    maybe_init_distributed_from_env()
+    distributed_rank, distributed_world_size = distributed_info()
     active_loss_type = resolve_proxy_loss_type(proxy_loss_type, objective_mode=objective_mode)
     if active_loss_type not in {"wavelet_main", "diffusion_mmd", "diffusion_swd", "diffusion_ms_swd", "pdcfd", "cfd"}:
         raise ValueError(f"Unsupported proxy loss type: {active_loss_type}")
@@ -937,7 +1055,12 @@ def optimize_proxy_points(
         minibatch_size=minibatch_size,
     )
 
-    torch_device = torch.device(device)
+    torch_device = resolve_compute_device(device)
+    if distributed_world_size > 1:
+        rank_seed = int(random_state) + 100003 * int(distributed_rank)
+        torch.manual_seed(rank_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(rank_seed)
     full_repr = torch.tensor(projected_representation, dtype=torch.float32, device=torch_device)
     if lsrc_relation_graph_np is not None:
         lsrc_relation_graphs = {
@@ -962,14 +1085,30 @@ def optimize_proxy_points(
         graph_reference = torch.tensor(projected_graph_reference, dtype=torch.float32, device=torch_device)
     else:
         graph_reference = None
-    reference_loss_devices = resolve_reference_loss_devices(torch_device)
-    reference_loss_shard_size = max(4096, min(16384, int(projected_representation.shape[0]) if projected_representation.shape[0] > 0 else 4096))
-    reference_loss_proxy_chunk_size = max(512, int(proxy_batch_size) if proxy_batch_size is not None else 2048)
+    if torch.device(device) != torch_device:
+        print(f"[proxy-opt] resolved compute device: requested={device} actual={torch_device}", flush=True)
+    if distributed_world_size > 1:
+        reference_loss_devices = [torch_device]
+        if distributed_rank == 0:
+            print(
+                f"[proxy-opt] distributed proxy optimization enabled "
+                f"(world_size={distributed_world_size}); each rank uses its local device.",
+                flush=True,
+            )
+    else:
+        reference_loss_devices = resolve_reference_loss_devices(torch_device)
+    reference_loss_shard_size = max(512, min(4096, int(projected_representation.shape[0]) if projected_representation.shape[0] > 0 else 4096))
+    reference_loss_proxy_chunk_size = max(32, min(256, int(proxy_batch_size) if proxy_batch_size is not None else 256))
+    reference_loss_proxy_sample_size = max(
+        int(reference_loss_proxy_chunk_size),
+        min(int(proxy_points.shape[0]), int(proxy_batch_size) if proxy_batch_size is not None and int(proxy_batch_size) > 0 else 1024),
+    )
     lsrc_proxy_chunk_size = resolve_safe_proxy_chunk_size(
         proxy_batch_size=proxy_batch_size,
         lsrc_batch_size=lsrc_batch_size,
         default=1024,
     )
+    lsrc_coverage_devices = normalize_work_devices(reference_loss_devices, fallback_device=torch_device)
     match_reference_shards = build_reference_shards(
         match_reference,
         reference_loss_devices,
@@ -984,19 +1123,25 @@ def optimize_proxy_points(
         print(
             "[proxy-opt] reference matching uses multi-GPU shards on "
             f"{[str(device) for device in reference_loss_devices]} "
-            f"(shard_size={reference_loss_shard_size}, proxy_chunk_size={reference_loss_proxy_chunk_size})",
+            f"(shard_size={reference_loss_shard_size}, "
+            f"proxy_sample_size<={reference_loss_proxy_sample_size}, "
+            f"proxy_chunk_size={reference_loss_proxy_chunk_size})",
             flush=True,
         )
     elif match_reference_shards or graph_reference_shards:
         print(
             "[proxy-opt] reference matching uses chunked cdist on "
             f"{str(torch_device)} "
-            f"(shard_size={reference_loss_shard_size}, proxy_chunk_size={reference_loss_proxy_chunk_size})",
+            f"(shard_devices={[str(device) for device in reference_loss_devices]}, "
+            f"shard_size={reference_loss_shard_size}, "
+            f"proxy_sample_size<={reference_loss_proxy_sample_size}, "
+            f"proxy_chunk_size={reference_loss_proxy_chunk_size})",
             flush=True,
         )
     if effective_keep_lsrc:
         print(
             "[proxy-opt] LSRC coverage uses chunked cdist "
+            f"on {[str(device) for device in lsrc_coverage_devices]} "
             f"(real_batch_size={int(lsrc_batch_size)}, "
             f"proxy_sample_size<={int(lsrc_proxy_chunk_size)}, "
             f"proxy_chunk_size={int(lsrc_proxy_chunk_size)})",
@@ -1180,14 +1325,18 @@ def optimize_proxy_points(
             kernel=diversity_kernel,
             sigma=diversity_sigma,
         ) if use_dpp or float(lambda_div) > 0 else torch.tensor(0.0, dtype=proxy_points.dtype, device=torch_device)
+        reference_proxy_points = proxy_points
+        if proxy_points.shape[0] > int(reference_loss_proxy_sample_size):
+            reference_proxy_indices = torch.randperm(proxy_points.shape[0], device=torch_device)[: int(reference_loss_proxy_sample_size)]
+            reference_proxy_points = proxy_points[reference_proxy_indices]
         match_loss = nearest_reference_loss(
-            proxy_points,
+            reference_proxy_points,
             reference_points=match_reference,
             reference_shards=match_reference_shards,
             proxy_chunk_size=reference_loss_proxy_chunk_size,
         )
         graph_loss = nearest_reference_loss(
-            proxy_points,
+            reference_proxy_points,
             reference_points=graph_reference,
             reference_shards=graph_reference_shards,
             proxy_chunk_size=reference_loss_proxy_chunk_size,
@@ -1208,6 +1357,7 @@ def optimize_proxy_points(
                 eps=lsrc_eps,
                 batch_size=lsrc_batch_size,
                 proxy_chunk_size=lsrc_proxy_chunk_size,
+                compute_devices=lsrc_coverage_devices,
                 coverage_mode=lsrc_coverage_mode,
                 rel_loss_mode=lsrc_rel_loss_mode,
             )
@@ -1334,9 +1484,10 @@ def optimize_proxy_points(
 
         loss = loss_global_alignment + loss_multiscale + loss_lsrc_block + loss_reg_block
         loss.backward()
+        average_gradients([proxy_points])
         optimizer.step()
 
-        if step in {0, int(num_steps) - 1} or (step + 1) % max(1, int(num_steps) // 10) == 0:
+        if distributed_rank == 0 and (step in {0, int(num_steps) - 1} or (step + 1) % max(1, int(num_steps) // 10) == 0):
             if effective_use_wavelet_multiscale:
                 print(
                     f"[proxy-opt] step={step + 1}/{int(num_steps)} active_scales={active_scales} "
@@ -1450,9 +1601,13 @@ def optimize_proxy_points(
         "lambda_match": float(lambda_match),
         "lambda_graph": float(lambda_graph),
         "reference_loss_multi_gpu": bool(len(reference_loss_devices) > 1),
+        "distributed_proxy_optimization": bool(distributed_world_size > 1),
+        "distributed_world_size": int(distributed_world_size),
+        "distributed_rank": int(distributed_rank),
         "reference_loss_devices": [str(device) for device in reference_loss_devices],
         "reference_loss_shard_size": int(reference_loss_shard_size),
         "reference_loss_proxy_chunk_size": int(reference_loss_proxy_chunk_size),
+        "reference_loss_proxy_sample_size": int(reference_loss_proxy_sample_size),
         "enable_lsrc": bool(enable_lsrc),
         "keep_lsrc": bool(effective_keep_lsrc),
         "lsrc_k": int(lsrc_k),
@@ -1466,6 +1621,7 @@ def optimize_proxy_points(
         "lsrc_batch_size": int(lsrc_batch_size),
         "lsrc_proxy_chunk_size": int(lsrc_proxy_chunk_size),
         "lsrc_proxy_sample_size": int(min(proxy_points.shape[0], int(lsrc_proxy_chunk_size))),
+        "lsrc_coverage_devices": [str(device) for device in lsrc_coverage_devices],
         "lsrc_num_edges": int(sum(graph["num_edges"] for graph in lsrc_relation_graphs.values())) if lsrc_relation_graphs is not None else 0,
         "lsrc_use_global_confidence": bool(lsrc_use_global_confidence),
         "lsrc_coverage_mode": lsrc_coverage_mode,

@@ -46,6 +46,17 @@ export VLM_SELECTION_PROXY_NUM_STEPS="${VLM_SELECTION_PROXY_NUM_STEPS:-200}"
 export VLM_SELECTION_PROXY_BATCH_SIZE="${VLM_SELECTION_PROXY_BATCH_SIZE:-1024}"
 export VLM_SELECTION_PROXY_TARGET_BATCH_SIZE="${VLM_SELECTION_PROXY_TARGET_BATCH_SIZE:-1024}"
 export VLM_SELECTION_LSRC_BATCH_SIZE="${VLM_SELECTION_LSRC_BATCH_SIZE:-1024}"
+export VLM_SELECTION_USE_TORCHRUN="${VLM_SELECTION_USE_TORCHRUN:-auto}"
+export VLM_SELECTION_CUDA_VISIBLE_DEVICES="${VLM_SELECTION_CUDA_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-}}"
+if [[ -z "${VLM_SELECTION_NPROC_PER_NODE:-}" && -n "${VLM_SELECTION_CUDA_VISIBLE_DEVICES}" ]]; then
+  export VLM_SELECTION_NPROC_PER_NODE="$(python - <<PY
+devices = "${VLM_SELECTION_CUDA_VISIBLE_DEVICES}".strip()
+print(max(len([item for item in devices.split(",") if item.strip()]), 1))
+PY
+)"
+else
+  export VLM_SELECTION_NPROC_PER_NODE="${VLM_SELECTION_NPROC_PER_NODE:-1}"
+fi
 
 # Cost-effective default. Use qlora if LoRA still exceeds memory.
 export VLM_FINETUNE_MODE="${VLM_FINETUNE_MODE:-lora}"
@@ -110,6 +121,7 @@ echo "  selection text feature: ${VLM_SELECTION_TEXT_REPR_METHOD}"
 echo "  selection topology root: ${VLM_DENSE_SIFT_BOVW_TOPOLOGY_ROOT}"
 echo "  selection cross-modal root: ${VLM_DENSE_SIFT_BOVW_CROSS_MODAL_ROOT}"
 echo "  selection log dir: ${VLM_SELECTION_LOG_DIR}"
+echo "  selection torchrun: ${VLM_SELECTION_USE_TORCHRUN} nproc=${VLM_SELECTION_NPROC_PER_NODE} visible=${VLM_SELECTION_CUDA_VISIBLE_DEVICES:-<inherit>}"
 echo "  ours template: ${VLM_OURS_SELECTED_INDICES_TEMPLATE:-<auto>}"
 echo "  finetune mode: ${VLM_FINETUNE_MODE}"
 echo "  finetune torchrun: ${VLM_FINETUNE_USE_TORCHRUN} nproc=${VLM_FINETUNE_NPROC_PER_NODE} visible=${VLM_FINETUNE_CUDA_VISIBLE_DEVICES:-<inherit>}"
@@ -134,7 +146,11 @@ if [[ "${VLM_RUN_OURS}" == "1" && -z "${VLM_OURS_SELECTED_INDICES_TEMPLATE}" ]];
   export VLM_OURS_SELECTED_INDICES_TEMPLATE="${VLM_DENSE_SIFT_BOVW_SELECTION_ROOT}/{ratio_tag}/proxy_opt_lsrc/seed_${VLM_SEED}/selected_indices.json"
   if [[ "${VLM_RUN_DENSE_SIFT_BOVW_SELECTION}" == "1" ]]; then
     echo "[$(timestamp)] Stage 0/4: sample LLaVA Ours subsets with dense_sift_bovw"
-    python -u "${PROJECT_ROOT}/run_llava_dense_sift_bovw_selection.py" \
+    selection_launcher=(python -u)
+    if [[ "${VLM_SELECTION_USE_TORCHRUN}" == "1" || ( "${VLM_SELECTION_USE_TORCHRUN}" == "auto" && "${VLM_SELECTION_NPROC_PER_NODE}" -gt 1 ) ]]; then
+      selection_launcher=(torchrun --standalone --nproc_per_node "${VLM_SELECTION_NPROC_PER_NODE}")
+    fi
+    "${selection_launcher[@]}" "${PROJECT_ROOT}/run_llava_dense_sift_bovw_selection.py" \
       --annotation_path "${LLAVA_ANNOTATION_PATH}" \
       --image_root "${LLAVA_IMAGE_ROOT}" \
       --output_root "${VLM_DENSE_SIFT_BOVW_SELECTION_ROOT}" \

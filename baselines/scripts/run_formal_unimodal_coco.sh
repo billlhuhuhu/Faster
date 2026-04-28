@@ -27,6 +27,11 @@ BASELINE_BATCH_TRAIN="${BASELINE_BATCH_TRAIN:-64}"
 BASELINE_BATCH_TEST="${BASELINE_BATCH_TEST:-128}"
 BASELINE_TEXT_BATCH="${BASELINE_TEXT_BATCH:-1024}"
 BASELINE_NUM_WORKERS="${BASELINE_NUM_WORKERS:-4}"
+# Method-specific candidate pool to avoid OOM/kill on very large COCO train set.
+BASELINE_CANDIDATE_POOL_DFOOL="${BASELINE_CANDIDATE_POOL_DFOOL:-5000}"
+BASELINE_CANDIDATE_POOL_ADAPSNE="${BASELINE_CANDIDATE_POOL_ADAPSNE:-20000}"
+BASELINE_CANDIDATE_POOL_ENTROPY="${BASELINE_CANDIDATE_POOL_ENTROPY:-20000}"
+BASELINE_CANDIDATE_POOL_MODE="${BASELINE_CANDIDATE_POOL_MODE:-head}"
 
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-8}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
@@ -54,6 +59,25 @@ echo "[coco-unimodal] seeds=${BASELINE_SEEDS}"
 echo "[coco-unimodal] output_root=${BASELINE_OUTPUT_ROOT}"
 echo "[coco-unimodal] device=${BASELINE_DEVICE}"
 echo "[coco-unimodal] gpus=${GPU_ARRAY[*]} max_parallel=${MAX_PARALLEL}"
+echo "[coco-unimodal] pool_dfool=${BASELINE_CANDIDATE_POOL_DFOOL} pool_adapsne=${BASELINE_CANDIDATE_POOL_ADAPSNE} pool_entropy=${BASELINE_CANDIDATE_POOL_ENTROPY} pool_mode=${BASELINE_CANDIDATE_POOL_MODE}"
+
+method_pool_args() {
+  local method="$1"
+  case "${method}" in
+    dfool)
+      echo "--candidate_pool_size ${BASELINE_CANDIDATE_POOL_DFOOL} --candidate_pool_mode ${BASELINE_CANDIDATE_POOL_MODE}"
+      ;;
+    adap_sne)
+      echo "--candidate_pool_size ${BASELINE_CANDIDATE_POOL_ADAPSNE} --candidate_pool_mode ${BASELINE_CANDIDATE_POOL_MODE}"
+      ;;
+    entropy)
+      echo "--candidate_pool_size ${BASELINE_CANDIDATE_POOL_ENTROPY} --candidate_pool_mode ${BASELINE_CANDIDATE_POOL_MODE}"
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
 
 pick_gpu() {
   local idx="$1"
@@ -89,6 +113,8 @@ run_abs_job() {
 
   if [[ ! -f "${selected_path}" ]]; then
     echo "[run][abs][selection] method=${method} budget=${budget} seed=${seed} gpu=${gpu_id}"
+    local extra_args
+    extra_args="$(method_pool_args "${method}")"
     CUDA_VISIBLE_DEVICES="${gpu_id}" python -m baselines.runners.run_baseline_selection \
       --method "${method}" \
       --budget "${budget}" \
@@ -101,7 +127,8 @@ run_abs_job() {
       --config "${BASELINE_CONFIG}" \
       --output_layout budget \
       --seed "${seed}" \
-      --device "${BASELINE_DEVICE}"
+      --device "${BASELINE_DEVICE}" \
+      ${extra_args}
   else
     echo "[skip][abs][selection] exists method=${method} budget=${budget} seed=${seed}"
   fi
@@ -149,6 +176,8 @@ PY
 
   if [[ ! -f "${selected_path}" ]]; then
     echo "[run][ratio][selection] method=${method} ratio=${ratio} seed=${seed} gpu=${gpu_id}"
+    local extra_args
+    extra_args="$(method_pool_args "${method}")"
     CUDA_VISIBLE_DEVICES="${gpu_id}" python -m baselines.runners.run_baseline_selection \
       --method "${method}" \
       --ratio "${ratio}" \
@@ -161,7 +190,8 @@ PY
       --config "${BASELINE_CONFIG}" \
       --output_layout ratio \
       --seed "${seed}" \
-      --device "${BASELINE_DEVICE}"
+      --device "${BASELINE_DEVICE}" \
+      ${extra_args}
   else
     echo "[skip][ratio][selection] exists method=${method} ratio=${ratio} seed=${seed}"
   fi
