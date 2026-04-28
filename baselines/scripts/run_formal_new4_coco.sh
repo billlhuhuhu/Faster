@@ -27,6 +27,9 @@ BASELINE_BATCH_TEST="${BASELINE_BATCH_TEST:-128}"
 BASELINE_TEXT_BATCH="${BASELINE_TEXT_BATCH:-1024}"
 BASELINE_NUM_WORKERS="${BASELINE_NUM_WORKERS:-4}"
 BASELINE_CONFIG="${BASELINE_CONFIG:-baselines/configs/main_aligned_flickr_nfnet_bert.yaml}"
+BASELINE_POOL_DYNAMIC_PRUNING="${BASELINE_POOL_DYNAMIC_PRUNING:-50000}"
+BASELINE_POOL_DFOOL="${BASELINE_POOL_DFOOL:-50000}"
+BASELINE_POOL_MODE="${BASELINE_POOL_MODE:-head}"
 
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-8}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
@@ -46,6 +49,22 @@ echo "[coco-formal] output_root=${BASELINE_OUTPUT_ROOT}"
 echo "[coco-formal] device=${BASELINE_DEVICE}"
 echo "[coco-formal] image_root=${BASELINE_IMAGE_ROOT}"
 echo "[coco-formal] ann_root=${BASELINE_ANN_ROOT}"
+echo "[coco-formal] pool_dynamic_pruning=${BASELINE_POOL_DYNAMIC_PRUNING} pool_dfool=${BASELINE_POOL_DFOOL} pool_mode=${BASELINE_POOL_MODE}"
+
+method_selection_pool_args() {
+  local method="$1"
+  case "${method}" in
+    dynamic_pruning|infobatch)
+      echo "--candidate_pool_size ${BASELINE_POOL_DYNAMIC_PRUNING} --candidate_pool_mode ${BASELINE_POOL_MODE}"
+      ;;
+    dfool)
+      echo "--candidate_pool_size ${BASELINE_POOL_DFOOL} --candidate_pool_mode ${BASELINE_POOL_MODE}"
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
 
 max_abs_budget() {
   local max_b=0
@@ -236,6 +255,8 @@ run_abs_job() {
 
   if [[ ! -f "${selected_path}" ]]; then
     echo "[run][abs][selection] method=${method} budget=${budget} seed=${seed}"
+    local extra_args
+    extra_args="$(method_selection_pool_args "${method}")"
     python -m baselines.runners.run_baseline_selection \
       --method "${method}" \
       --budget "${budget}" \
@@ -248,7 +269,8 @@ run_abs_job() {
       --config "${BASELINE_CONFIG}" \
       --output_layout budget \
       --seed "${seed}" \
-      --device "${BASELINE_DEVICE}"
+      --device "${BASELINE_DEVICE}" \
+      ${extra_args}
   else
     echo "[skip][abs][selection] exists method=${method} budget=${budget} seed=${seed}"
   fi
@@ -295,6 +317,8 @@ PY
 
   if [[ ! -f "${selected_path}" ]]; then
     echo "[run][ratio][selection] method=${method} ratio=${ratio} seed=${seed}"
+    local extra_args
+    extra_args="$(method_selection_pool_args "${method}")"
     python -m baselines.runners.run_baseline_selection \
       --method "${method}" \
       --ratio "${ratio}" \
@@ -307,7 +331,8 @@ PY
       --config "${BASELINE_CONFIG}" \
       --output_layout ratio \
       --seed "${seed}" \
-      --device "${BASELINE_DEVICE}"
+      --device "${BASELINE_DEVICE}" \
+      ${extra_args}
   else
     echo "[skip][ratio][selection] exists method=${method} ratio=${ratio} seed=${seed}"
   fi
@@ -348,6 +373,8 @@ run_ratio_selection_only() {
   fi
 
   echo "[run][ratio][selection-only] method=${method} ratio=${ratio} seed=${seed}"
+  local extra_args
+  extra_args="$(method_selection_pool_args "${method}")"
   python -m baselines.runners.run_baseline_selection \
     --method "${method}" \
     --ratio "${ratio}" \
@@ -360,7 +387,8 @@ run_ratio_selection_only() {
     --config "${BASELINE_CONFIG}" \
     --output_layout ratio \
     --seed "${seed}" \
-    --device "${BASELINE_DEVICE}"
+    --device "${BASELINE_DEVICE}" \
+    ${extra_args}
 }
 
 # 1) Absolute budgets

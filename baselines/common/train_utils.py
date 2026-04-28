@@ -10,6 +10,7 @@ import torch.nn.functional as F
 class SurrogateConfig:
     epochs: int = 5
     batch_size: int = 256
+    embed_batch_size: int = 1024
     proj_dim: int = 128
     lr: float = 1e-2
     temperature: float = 0.07
@@ -41,11 +42,17 @@ def run_surrogate_training(
 ) -> Dict[str, object]:
     _seed_everything(cfg.seed)
     device = torch.device(cfg.device)
-    img = torch.tensor(image_features, dtype=torch.float32, device=device)
-    txt = torch.tensor(text_features, dtype=torch.float32, device=device)
-    n = img.shape[0]
+    # Keep full features on CPU and move mini-batches to device to avoid
+    # allocating the whole dataset on GPU for large-scale settings (e.g. COCO).
+    # Avoid duplicating huge arrays in memory on large datasets:
+    # torch.from_numpy shares underlying storage when possible.
+    img_np = np.asarray(image_features, dtype=np.float32, order="C")
+    txt_np = np.asarray(text_features, dtype=np.float32, order="C")
+    img_cpu = torch.from_numpy(img_np)
+    txt_cpu = torch.from_numpy(txt_np)
+    n = img_cpu.shape[0]
 
-    model = PairProjectionModel(img.shape[1], txt.shape[1], cfg.proj_dim).to(device)
+    model = PairProjectionModel(img_cpu.shape[1], txt_cpu.shape[1], cfg.proj_dim).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr)
 
     history_loss: List[np.ndarray] = []
@@ -60,22 +67,22 @@ def run_surrogate_training(
     history_grand_txt: List[np.ndarray] = []
 
     for _ in range(int(cfg.epochs)):
-        indices = torch.randperm(n, device=device)
-        loss_epoch = torch.zeros(n, device=device)
-        conf_epoch = torch.zeros(n, device=device)
-        conf_img_epoch = torch.zeros(n, device=device)
-        conf_txt_epoch = torch.zeros(n, device=device)
-        el2n_epoch = torch.zeros(n, device=device)
-        el2n_img_epoch = torch.zeros(n, device=device)
-        el2n_txt_epoch = torch.zeros(n, device=device)
-        grand_epoch = torch.zeros(n, device=device)
-        grand_img_epoch = torch.zeros(n, device=device)
-        grand_txt_epoch = torch.zeros(n, device=device)
+        indices = torch.randperm(n)
+        loss_epoch = torch.zeros(n, dtype=torch.float32)
+        conf_epoch = torch.zeros(n, dtype=torch.float32)
+        conf_img_epoch = torch.zeros(n, dtype=torch.float32)
+        conf_txt_epoch = torch.zeros(n, dtype=torch.float32)
+        el2n_epoch = torch.zeros(n, dtype=torch.float32)
+        el2n_img_epoch = torch.zeros(n, dtype=torch.float32)
+        el2n_txt_epoch = torch.zeros(n, dtype=torch.float32)
+        grand_epoch = torch.zeros(n, dtype=torch.float32)
+        grand_img_epoch = torch.zeros(n, dtype=torch.float32)
+        grand_txt_epoch = torch.zeros(n, dtype=torch.float32)
 
         for start in range(0, n, int(cfg.batch_size)):
             batch_ids = indices[start:start + int(cfg.batch_size)]
-            img_b = img[batch_ids]
-            txt_b = txt[batch_ids]
+            img_b = img_cpu[batch_ids].to(device, non_blocking=True)
+            txt_b = txt_cpu[batch_ids].to(device, non_blocking=True)
             bsz = img_b.shape[0]
             target = torch.arange(bsz, device=device)
 
@@ -103,36 +110,45 @@ def run_surrogate_training(
             grand = grand_img + grand_txt
 
             per_sample_loss = (loss_row + loss_col) / 2.0
-            loss_epoch[batch_ids] = per_sample_loss.detach()
-            conf_epoch[batch_ids] = conf.detach()
-            conf_img_epoch[batch_ids] = conf_img.detach()
-            conf_txt_epoch[batch_ids] = conf_txt.detach()
-            el2n_epoch[batch_ids] = ((el2n_row + el2n_col) / 2.0).detach()
-            el2n_img_epoch[batch_ids] = el2n_row.detach()
-            el2n_txt_epoch[batch_ids] = el2n_col.detach()
-            grand_epoch[batch_ids] = grand.detach()
-            grand_img_epoch[batch_ids] = grand_img.detach()
-            grand_txt_epoch[batch_ids] = grand_txt.detach()
+            loss_epoch[batch_ids] = per_sample_loss.detach().cpu()
+            conf_epoch[batch_ids] = conf.detach().cpu()
+            conf_img_epoch[batch_ids] = conf_img.detach().cpu()
+            conf_txt_epoch[batch_ids] = conf_txt.detach().cpu()
+            el2n_epoch[batch_ids] = ((el2n_row + el2n_col) / 2.0).detach().cpu()
+            el2n_img_epoch[batch_ids] = el2n_row.detach().cpu()
+            el2n_txt_epoch[batch_ids] = el2n_col.detach().cpu()
+            grand_epoch[batch_ids] = grand.detach().cpu()
+            grand_img_epoch[batch_ids] = grand_img.detach().cpu()
+            grand_txt_epoch[batch_ids] = grand_txt.detach().cpu()
 
-        history_loss.append(loss_epoch.detach().cpu().numpy().astype(np.float32))
-        history_conf.append(conf_epoch.detach().cpu().numpy().astype(np.float32))
-        history_conf_img.append(conf_img_epoch.detach().cpu().numpy().astype(np.float32))
-        history_conf_txt.append(conf_txt_epoch.detach().cpu().numpy().astype(np.float32))
-        history_el2n.append(el2n_epoch.detach().cpu().numpy().astype(np.float32))
-        history_el2n_img.append(el2n_img_epoch.detach().cpu().numpy().astype(np.float32))
-        history_el2n_txt.append(el2n_txt_epoch.detach().cpu().numpy().astype(np.float32))
-        history_grand.append(grand_epoch.detach().cpu().numpy().astype(np.float32))
-        history_grand_img.append(grand_img_epoch.detach().cpu().numpy().astype(np.float32))
-        history_grand_txt.append(grand_txt_epoch.detach().cpu().numpy().astype(np.float32))
+        history_loss.append(loss_epoch.numpy().astype(np.float32))
+        history_conf.append(conf_epoch.numpy().astype(np.float32))
+        history_conf_img.append(conf_img_epoch.numpy().astype(np.float32))
+        history_conf_txt.append(conf_txt_epoch.numpy().astype(np.float32))
+        history_el2n.append(el2n_epoch.numpy().astype(np.float32))
+        history_el2n_img.append(el2n_img_epoch.numpy().astype(np.float32))
+        history_el2n_txt.append(el2n_txt_epoch.numpy().astype(np.float32))
+        history_grand.append(grand_epoch.numpy().astype(np.float32))
+        history_grand_img.append(grand_img_epoch.numpy().astype(np.float32))
+        history_grand_txt.append(grand_txt_epoch.numpy().astype(np.float32))
 
     model.eval()
+    embed_batch_size = max(1, int(cfg.embed_batch_size))
+    img_embed_chunks: List[np.ndarray] = []
+    txt_embed_chunks: List[np.ndarray] = []
     with torch.no_grad():
-        img_z, txt_z = model(img, txt)
+        for start in range(0, n, embed_batch_size):
+            end = min(start + embed_batch_size, n)
+            img_b = img_cpu[start:end].to(device, non_blocking=True)
+            txt_b = txt_cpu[start:end].to(device, non_blocking=True)
+            img_z, txt_z = model(img_b, txt_b)
+            img_embed_chunks.append(img_z.detach().cpu().numpy().astype(np.float32))
+            txt_embed_chunks.append(txt_z.detach().cpu().numpy().astype(np.float32))
 
     return {
         "model": model,
-        "img_embed": img_z.detach().cpu().numpy().astype(np.float32),
-        "txt_embed": txt_z.detach().cpu().numpy().astype(np.float32),
+        "img_embed": np.concatenate(img_embed_chunks, axis=0),
+        "txt_embed": np.concatenate(txt_embed_chunks, axis=0),
         "history": {
             "loss": history_loss,
             "confidence": history_conf,
