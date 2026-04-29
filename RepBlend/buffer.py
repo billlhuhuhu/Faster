@@ -16,10 +16,10 @@ import numpy as np
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 def main(args):
+    no_aug_suffix = "_NoAug" if args.no_aug else ""
     if args.disabled_wandb == True:
         wandb.init(mode="disabled")
     else:  
-        no_aug_suffix = "_NoAug" if args.no_aug else "" 
         wandb.init(project='RepBlend-Buffer', config=args, 
                    name=f"{args.dataset}_{args.image_encoder}_{args.text_encoder}_{args.loss_type}{no_aug_suffix}")
 
