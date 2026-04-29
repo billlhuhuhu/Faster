@@ -33,6 +33,8 @@ LORS_PIX_INIT="${LORS_PIX_INIT:-real}"
 LORS_TXT_INIT="${LORS_TXT_INIT:-real}"
 LORS_RUN_TAG="${LORS_RUN_TAG:-}"
 LORS_FORCE_REDISTILL="${LORS_FORCE_REDISTILL:-0}"
+LORS_MAX_FILES="${LORS_MAX_FILES:-}"
+LORS_MAX_EXPERTS="${LORS_MAX_EXPERTS:-}"
 
 IMAGE_ROOT="$(get_image_root "${LORS_DATASET}")"
 MODEL_TAG="$(sanitize_component "${LORS_IMAGE_ENCODER}")_$(sanitize_component "${LORS_TEXT_ENCODER}")"
@@ -207,6 +209,12 @@ run_distill_stage() {
   distill_extra_args=()
   if [[ "${LORS_NO_AUG}" == "1" ]]; then
     distill_extra_args+=(--no_aug)
+  fi
+  if [[ -n "${LORS_MAX_FILES}" ]]; then
+    distill_extra_args+=(--max_files "${LORS_MAX_FILES}")
+  fi
+  if [[ -n "${LORS_MAX_EXPERTS}" ]]; then
+    distill_extra_args+=(--max_experts "${LORS_MAX_EXPERTS}")
   fi
 
   python "${PROJECT_ROOT}/distill_tesla_lors.py" \

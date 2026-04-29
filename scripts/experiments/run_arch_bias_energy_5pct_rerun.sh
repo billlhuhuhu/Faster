@@ -51,6 +51,17 @@ devices = "${CUDA_VISIBLE_DEVICES:-}".strip()
 print(max(len([x for x in devices.split(",") if x.strip()]), 1))
 PY
 )}"
+ARCH5_SELECTION_USE_TORCHRUN="${ARCH5_SELECTION_USE_TORCHRUN:-$(python - <<PY
+print(1 if int("${GPU_COUNT}") > 1 else 0)
+PY
+)}"
+ARCH5_SELECTION_NPROC_PER_NODE="${ARCH5_SELECTION_NPROC_PER_NODE:-${GPU_COUNT}}"
+ARCH5_ENABLE_TRAIN_DATA_PARALLEL="${ARCH5_ENABLE_TRAIN_DATA_PARALLEL:-$(python - <<PY
+print(1 if int("${GPU_COUNT}") > 1 else 0)
+PY
+)}"
+ARCH5_TRAIN_DP_DEVICE_IDS="${ARCH5_TRAIN_DP_DEVICE_IDS:-${CUDA_VISIBLE_DEVICES:-}}"
+REPBLEND_CUDA_VISIBLE_DEVICES="${REPBLEND_CUDA_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-0}}"
 
 method_enabled() {
   local name="$1"
@@ -140,6 +151,9 @@ run_ours_selection() {
       WAVELET_MAIN_LATEST_SEEDS="${seed}" \
       WAVELET_MAIN_LATEST_RUN_SELECTION=1 \
       WAVELET_MAIN_LATEST_RUN_TRAIN=0 \
+      WAVELET_MAIN_LATEST_SELECTION_USE_TORCHRUN="${ARCH5_SELECTION_USE_TORCHRUN}" \
+      WAVELET_MAIN_LATEST_SELECTION_NPROC_PER_NODE="${ARCH5_SELECTION_NPROC_PER_NODE}" \
+      WAVELET_MAIN_LATEST_SELECTION_CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-}" \
       WAVELET_MAIN_LATEST_REPORT_NAME="ours_5pct_energy_selection" \
       SELECTION_IMAGE_REPR_METHOD="dense_sift_bovw" \
       BOVW_CODEBOOK_SIZE="${BOVW_CODEBOOK_SIZE}" \
@@ -193,6 +207,12 @@ run_real_training() {
   local train_extra=()
   if [[ "${TRAIN_NO_AUG}" == "1" ]]; then
     train_extra+=(--no_aug)
+  fi
+  if [[ "${ARCH5_ENABLE_TRAIN_DATA_PARALLEL}" == "1" ]]; then
+    train_extra+=(--enable_image_encoder_data_parallel)
+    if [[ -n "${ARCH5_TRAIN_DP_DEVICE_IDS}" ]]; then
+      train_extra+=(--image_encoder_data_parallel_device_ids "${ARCH5_TRAIN_DP_DEVICE_IDS}")
+    fi
   fi
 
   stage_log "Measure ${method} training/eval: ${RATIO_TAG} eval_backbone=${eval_backbone} seed=${seed}"
@@ -279,7 +299,7 @@ run_repblend() {
 
   stage_log "Measure RepBlend distillation as selection: ${RATIO_TAG} count=${budget_count} num_queries=${REPBLEND_NUM_QUERIES}"
   measure_command "repblend_${RATIO_TAG}_distill" "${distill_measure}" "${distill_log}" "${REPBLEND_ROOT}" \
-    env WANDB_MODE=disabled python distill_repblend.py \
+    env CUDA_VISIBLE_DEVICES="${REPBLEND_CUDA_VISIBLE_DEVICES}" WANDB_MODE=disabled python distill_repblend.py \
       --dataset "${DATASET}" \
       --buffer_path "${REPBLEND_BUFFER_ROOT}/${DATASET}/${MODEL_TAG}/InfoNCE" \
       --image_root "${IMAGE_ROOT}" \
@@ -304,7 +324,7 @@ run_repblend() {
     local eval_measure="${MEASURE_DIR}/repblend_${RATIO_TAG}_${eval_backbone}_evaluate.json"
     stage_log "Measure RepBlend training/eval: ${RATIO_TAG} eval_backbone=${eval_backbone}"
     measure_command "repblend_${RATIO_TAG}_${eval_backbone}_evaluate" "${eval_measure}" "${eval_log}" "${PROJECT_ROOT}" \
-      python "${PROJECT_ROOT}/evaluate_only.py" \
+      env CUDA_VISIBLE_DEVICES="${REPBLEND_CUDA_VISIBLE_DEVICES}" python "${PROJECT_ROOT}/evaluate_only.py" \
         --dataset "${DATASET}" \
         --image_root "${IMAGE_ROOT}" \
         --ann_root "${ANN_ROOT}" \
@@ -330,6 +350,8 @@ stage_log "  methods=${METHODS}"
 stage_log "  dataset=${DATASET} ratio=${RATIO} tag=${RATIO_TAG}"
 stage_log "  source=${MODEL_TAG} eval_backbones=${EVAL_BACKBONES}"
 stage_log "  output=${OUTPUT_ROOT}/${RUN_TAG}"
+stage_log "  multi-gpu: visible=${CUDA_VISIBLE_DEVICES:-<unset>} gpu_count=${GPU_COUNT} ours_selection_torchrun=${ARCH5_SELECTION_USE_TORCHRUN} nproc=${ARCH5_SELECTION_NPROC_PER_NODE} train_dp=${ARCH5_ENABLE_TRAIN_DATA_PARALLEL}"
+stage_log "  repblend_visible=${REPBLEND_CUDA_VISIBLE_DEVICES} note=RepBlend upstream distillation is single-process; CUDA_VISIBLE_DEVICES controls placement, not DDP."
 stage_log "  energy: GPU=Zeus preferred with nvidia-smi fallback, CPU=Intel RAPL"
 
 if method_enabled ours; then
