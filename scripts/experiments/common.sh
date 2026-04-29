@@ -4,9 +4,14 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 DATA_ROOT="${DATA_ROOT:-data}"
-FLICKR_IMAGE_ROOT="${FLICKR_IMAGE_ROOT:-${DATA_ROOT}/flickr30k}"
-COCO_IMAGE_ROOT="${COCO_IMAGE_ROOT:-${DATA_ROOT}/coco}"
-ANN_ROOT="${ANN_ROOT:-data/Flickr30k_ann}"
+if [[ "${DATA_ROOT}" = /* ]]; then
+  DATA_ROOT_ABS="${DATA_ROOT}"
+else
+  DATA_ROOT_ABS="${PROJECT_ROOT}/${DATA_ROOT}"
+fi
+FLICKR_IMAGE_ROOT="${FLICKR_IMAGE_ROOT:-${DATA_ROOT_ABS}/flickr30k}"
+COCO_IMAGE_ROOT="${COCO_IMAGE_ROOT:-${DATA_ROOT_ABS}/coco}"
+ANN_ROOT="${ANN_ROOT:-${DATA_ROOT_ABS}/Flickr30k_ann}"
 
 FEATURE_CACHE_ROOT="${FEATURE_CACHE_ROOT:-artifacts/feature_cache}"
 TOPOLOGY_ROOT="${TOPOLOGY_ROOT:-artifacts/topology_graph}"

@@ -3,6 +3,7 @@ import glob
 import os
 import argparse
 import re
+from pathlib import Path
 
 
 import torch
@@ -62,6 +63,13 @@ def mix_embedding_up_second(x, y, index, lam):
 
 def main(args):
     ''' organize the real train dataset '''  
+    project_root = Path(__file__).resolve().parents[1]
+    for attr in ("image_root", "ann_root"):
+        value = getattr(args, attr)
+        if value and not os.path.isabs(value) and not os.path.exists(value):
+            candidate = project_root / value
+            if candidate.exists():
+                setattr(args, attr, str(candidate))
     trainloader, testloader, train_dataset, test_dataset = get_dataset(args)
 
     train_sentences = train_dataset.get_all_captions() 

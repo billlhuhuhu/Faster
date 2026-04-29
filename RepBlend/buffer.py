@@ -9,6 +9,7 @@ import copy
 import wandb
 import warnings
 import datetime
+from pathlib import Path
 from data import get_dataset, textprocess, textprocess_train
 from src.networks import CLIPModel_full
 import numpy as np
@@ -26,6 +27,13 @@ def main(args):
     args.dsa = True if args.dsa == 'True' else False
     args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
     args.distributed = torch.cuda.device_count() > 1
+    project_root = Path(__file__).resolve().parents[1]
+    for attr in ("image_root", "ann_root"):
+        value = getattr(args, attr)
+        if value and not os.path.isabs(value) and not os.path.exists(value):
+            candidate = project_root / value
+            if candidate.exists():
+                setattr(args, attr, str(candidate))
 
     
     print('Hyper-parameters: \n', args.__dict__)
