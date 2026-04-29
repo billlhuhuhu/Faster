@@ -1,0 +1,246 @@
+import argparse
+import csv
+import json
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional
+
+
+BENCHMARK_ORDER = ["GQA", "ScienceQA", "MMBench", "TextVQA", "POPE"]
+
+
+def load_json(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def normalize_benchmark_name(name: str) -> Optional[str]:
+    lower = str(name).lower()
+    if "gqa" in lower:
+        return "GQA"
+    if "science" in lower:
+        return "ScienceQA"
+    if "mmbench" in lower:
+        return "MMBench"
+    if "textvqa" in lower:
+        return "TextVQA"
+    if "pope" in lower:
+        return "POPE"
+    return None
+
+
+def to_float(value: Any) -> Optional[float]:
+    try:
+        if value in {"", None, "-"}:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def as_percent(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    if 0.0 <= value <= 1.0:
+        return value * 100.0
+    return value
+
+
+def normalize_ratio(value: Any, run_dir: Path) -> Optional[int]:
+    raw = str(value if value not in {None, ""} else "").strip()
+    if raw:
+        numeric = to_float(raw)
+        if numeric is not None:
+            if 0.0 < numeric < 1.0:
+                return int(round(numeric * 100))
+            return int(round(numeric))
+    text = str(run_dir).lower()
+    for ratio in (1, 5, 10):
+        if f"_{ratio}" in text or f"ratio_{ratio:02d}" in text:
+            return ratio
+    return None
+
+
+def normalize_mode(value: Any, run_dir: Path) -> str:
+    raw = str(value if value not in {None, ""} else "").strip().lower()
+    if raw in {"ours", "random"}:
+        return raw
+    text = str(run_dir).lower()
+    if "random" in text:
+        return "random"
+    if "ours" in text:
+        return "ours"
+    return raw
+
+
+def iter_dicts(payload: Any) -> Iterable[Dict[str, Any]]:
+    if isinstance(payload, dict):
+        yield payload
+        for value in payload.values():
+            yield from iter_dicts(value)
+    elif isinstance(payload, list):
+        for value in payload:
+            yield from iter_dicts(value)
+
+
+def collect_from_summary_csv(path: Path) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                benchmark = row.get("benchmark") or row.get("dataset") or row.get("data") or row.get("name")
+                metric_value = (
+                    row.get("primary_metric_value")
+                    or row.get("score")
+                    or row.get("accuracy")
+                    or row.get("acc")
+                    or row.get("Overall")
+                    or row.get("overall")
+                )
+                canonical = normalize_benchmark_name(str(benchmark))
+                value = as_percent(to_float(metric_value))
+                if canonical and value is not None:
+                    out[canonical] = value
+    except Exception:
+        return {}
+    return out
+
+
+def collect_from_json(path: Path) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    try:
+        payload = load_json(path)
+    except Exception:
+        return out
+    for item in iter_dicts(payload):
+        benchmark = item.get("benchmark") or item.get("dataset") or item.get("name")
+        canonical = normalize_benchmark_name(str(benchmark))
+        if canonical is None:
+            continue
+        value = (
+            item.get("primary_metric_value")
+            or item.get("score")
+            or item.get("accuracy")
+            or item.get("acc")
+            or item.get("Overall")
+            or item.get("overall")
+        )
+        parsed = as_percent(to_float(value))
+        if parsed is not None:
+            out[canonical] = parsed
+    return out
+
+
+def collect_benchmark_scores(output_dir: Path) -> Dict[str, float]:
+    if not output_dir.exists():
+        return {}
+    scores: Dict[str, float] = {}
+    candidate_files = sorted(
+        [path for path in output_dir.rglob("*") if path.is_file() and path.suffix.lower() in {".csv", ".json"}],
+        key=lambda path: (0 if "summary" in path.name.lower() else 1, len(str(path))),
+    )
+    for path in candidate_files:
+        local = collect_from_summary_csv(path) if path.suffix.lower() == ".csv" else collect_from_json(path)
+        scores.update(local)
+    return scores
+
+
+def mean_available(row: Dict[str, Any]) -> str:
+    values = [to_float(row.get(name)) for name in BENCHMARK_ORDER]
+    values = [value for value in values if value is not None]
+    if not values:
+        return ""
+    return f"{sum(values) / len(values):.4f}"
+
+
+def format_value(value: Any) -> str:
+    parsed = to_float(value)
+    if parsed is None:
+        return ""
+    return f"{parsed:.4f}"
+
+
+def write_markdown(rows: List[Dict[str, Any]], output_md: Path) -> None:
+    headers = ["subset_mode", "subset_ratio", "seed", "num_selected_records"] + BENCHMARK_ORDER + ["mean_score"]
+    lines = ["| " + " | ".join(headers) + " |", "| " + " | ".join(["---"] * len(headers)) + " |"]
+    for row in rows:
+        values = [str(row.get(key, "")) for key in headers]
+        lines.append("| " + " | ".join(values) + " |")
+    output_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Build the final VLM benchmark table for ours/random 1/5/10 runs.")
+    parser.add_argument("--plan_root", type=str, default="artifacts/vlm_finetune/qwen2vl_llava_subset")
+    parser.add_argument("--output_csv", type=str, default=None)
+    parser.add_argument("--output_md", type=str, default=None)
+    parser.add_argument("--ratios", type=str, default="1,5,10")
+    parser.add_argument("--modes", type=str, default="ours,random")
+    args = parser.parse_args()
+
+    plan_root = Path(args.plan_root)
+    output_csv = Path(args.output_csv) if args.output_csv else plan_root / "reports" / "vlm_final_ours_random_1_5_10.csv"
+    output_md = Path(args.output_md) if args.output_md else plan_root / "reports" / "vlm_final_ours_random_1_5_10.md"
+    keep_ratios = {int(item.strip()) for item in args.ratios.replace(",", " ").split() if item.strip()}
+    keep_modes = {item.strip().lower() for item in args.modes.replace(",", " ").split() if item.strip()}
+
+    rows: List[Dict[str, Any]] = []
+    for plan_path in sorted(plan_root.rglob("benchmark_eval_plan.json")):
+        plan = load_json(plan_path)
+        subset_info_path = plan_path.parent / "subset_info.json"
+        train_metrics_path = plan_path.parent / "metrics.json"
+        subset_info = load_json(subset_info_path) if subset_info_path.exists() else {}
+        train_metrics = load_json(train_metrics_path) if train_metrics_path.exists() else {}
+
+        mode = normalize_mode(plan.get("subset_mode", subset_info.get("subset_mode", "")), plan_path.parent)
+        ratio = normalize_ratio(plan.get("subset_ratio", subset_info.get("subset_ratio", "")), plan_path.parent)
+        if mode not in keep_modes or ratio not in keep_ratios:
+            continue
+
+        output_dir = Path(
+            plan.get("vlmevalkit_output_dir")
+            or plan.get("output_dir")
+            or plan_path.parent / "vlmevalkit_outputs"
+        )
+        scores = collect_benchmark_scores(output_dir)
+        row: Dict[str, Any] = {
+            "subset_mode": mode,
+            "subset_ratio": ratio,
+            "seed": plan.get("seed", subset_info.get("seed", "")),
+            "num_selected_records": subset_info.get("num_selected_records", train_metrics.get("num_selected_records", "")),
+            "train_loss": format_value(train_metrics.get("train_loss", "")),
+            "run_dir": str(plan_path.parent),
+            "vlmevalkit_output_dir": str(output_dir),
+        }
+        for benchmark in BENCHMARK_ORDER:
+            row[benchmark] = format_value(scores.get(benchmark, ""))
+        row["mean_score"] = mean_available(row)
+        rows.append(row)
+
+    mode_order = {"ours": 0, "random": 1}
+    rows.sort(key=lambda row: (int(row["subset_ratio"]), mode_order.get(str(row["subset_mode"]), 99), str(row["seed"])))
+
+    output_csv.parent.mkdir(parents=True, exist_ok=True)
+    output_md.parent.mkdir(parents=True, exist_ok=True)
+    fields = [
+        "subset_mode",
+        "subset_ratio",
+        "seed",
+        "num_selected_records",
+        *BENCHMARK_ORDER,
+        "mean_score",
+        "train_loss",
+        "run_dir",
+        "vlmevalkit_output_dir",
+    ]
+    with output_csv.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+    write_markdown(rows, output_md)
+    print(f"saved csv: {output_csv}")
+    print(f"saved markdown: {output_md}")
+    print(f"collected rows: {len(rows)}")
+
+
+if __name__ == "__main__":
+    main()

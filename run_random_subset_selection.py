@@ -13,8 +13,8 @@ from src.random_subset_selection import run_random_subset_selection
 
 def build_parser():
     parser = argparse.ArgumentParser(description="Generate a random real subset from the train split.")
-    parser.add_argument("--dataset", type=str, required=True, choices=["flickr", "coco"])
-    parser.add_argument("--split", type=str, default="train", choices=["train"])
+    parser.add_argument("--dataset", type=str, required=True, choices=["flickr", "coco", "audiocaps"])
+    parser.add_argument("--split", type=str, default="train")
     parser.add_argument("--image_encoder", type=str, required=True)
     parser.add_argument("--text_encoder", type=str, default="bert")
     parser.add_argument("--feature_cache_root", type=str, default="artifacts/feature_cache")
