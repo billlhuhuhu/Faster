@@ -848,6 +848,8 @@ def load_from_timm(model_name, pretrained, checkpoint_root=None):
 def canonical_image_encoder_name(model_name):
     aliases = {
         'resnet-50': 'resnet50',
+        'resnet-10': 'resnet10t',
+        'resnet10': 'resnet10t',
         'vit_b16': 'vit_base_patch16_224',
         'vit-b16': 'vit_base_patch16_224',
         'vit-b/16': 'vit_base_patch16_224',
@@ -861,12 +863,12 @@ def infer_image_embedding_dim(model_name, eval_stage=False):
         return 1000 if eval_stage else 2304
     if model_name == 'resnet50':
         return 2048
+    if model_name in {'resnet10t', 'resnet18'}:
+        return 512
     if model_name == 'vit_base_patch16_224':
         return 768
     if model_name == 'convnet':
         return 768
-    if model_name == 'resnet18':
-        return 512
     if model_name == 'convnext':
         return 640
     return 1000

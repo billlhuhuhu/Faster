@@ -198,13 +198,15 @@ if __name__ == '__main__':
     parser = make_buffer_parser()
     args = parser.parse_args()
 
-    args.image_root = {
-        'flickr': "path to flickr30k images",
-        'coco': "path to coco images",
-    }[args.dataset]
-    args.ann_root = {
-        'flickr': "path to flickr30k annotations",
-        'coco': "path to coco annotations",
-    }[args.dataset]
+    if not args.image_root or args.image_root.startswith("path to "):
+        args.image_root = {
+            'flickr': "path to flickr30k images",
+            'coco': "path to coco images",
+        }[args.dataset]
+    if not args.ann_root or args.ann_root.startswith("path to "):
+        args.ann_root = {
+            'flickr': "path to flickr30k annotations",
+            'coco': "path to coco annotations",
+        }[args.dataset]
 
     main(args)

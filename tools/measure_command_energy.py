@@ -176,6 +176,7 @@ def main() -> None:
     parser.add_argument("--working_dir", type=str, default=None)
     parser.add_argument("--gpu_sampler_interval", type=float, default=1.0)
     parser.add_argument("--prefer_zeus", action="store_true", default=False)
+    parser.add_argument("--tee_log", type=str, default=None, help="Optional path to mirror child stdout/stderr while keeping live progress visible.")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
 
@@ -197,15 +198,35 @@ def main() -> None:
     returncode = 1
     gpu_energy_wh_zeus = None
     zeus_error = None
+    def run_child() -> int:
+        if not args.tee_log:
+            proc = subprocess.run(command, cwd=args.working_dir)
+            return int(proc.returncode)
+        tee_path = Path(args.tee_log)
+        tee_path.parent.mkdir(parents=True, exist_ok=True)
+        with tee_path.open("w", encoding="utf-8", errors="ignore") as handle:
+            proc = subprocess.Popen(
+                command,
+                cwd=args.working_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                print(line, end="", flush=True)
+                handle.write(line)
+                handle.flush()
+            return int(proc.wait())
+
     try:
         if zeus is not None:
             with zeus:
-                proc = subprocess.run(command, cwd=args.working_dir)
-                returncode = int(proc.returncode)
+                returncode = run_child()
             gpu_energy_wh_zeus, zeus_error = zeus.end()
         else:
-            proc = subprocess.run(command, cwd=args.working_dir)
-            returncode = int(proc.returncode)
+            returncode = run_child()
     finally:
         end = time.time()
         sampler.stop()
@@ -221,6 +242,7 @@ def main() -> None:
         "label": args.label,
         "command": command,
         "working_dir": args.working_dir or os.getcwd(),
+        "tee_log": args.tee_log,
         "returncode": returncode,
         "wall_seconds": wall_seconds,
         "gpu_energy_Wh": gpu_energy_wh,

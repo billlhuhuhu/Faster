@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+ARCH5_METHODS="repblend" \
+ARCH5_DATASET="${ARCH3_DATASET:-flickr}" \
+ARCH5_RATIO="0.03" \
+ARCH5_SOURCE_BACKBONE="${ARCH3_UPSTREAM_BACKBONE:-resnet10}" \
+ARCH5_TEXT_ENCODER="${ARCH3_TEXT_ENCODER:-bert}" \
+ARCH5_EVAL_BACKBONES="${ARCH3_EVAL_BACKBONES:-nfnet resnet50 vit_b16}" \
+ARCH5_OUTPUT_ROOT="${ARCH3_OUTPUT_ROOT:-artifacts/arch_bias_energy_3pct}/repblend" \
+ARCH5_RUN_TAG="${ARCH3_RUN_TAG:-repblend_3pct_$(date '+%Y%m%d_%H%M%S')}" \
+ARCH5_TEE_PROGRESS="${ARCH3_TEE_PROGRESS:-1}" \
+REPBLEND_CUDA_VISIBLE_DEVICES="${REPBLEND_CUDA_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-0}}" \
+REPBLEND_ROOT="${REPBLEND_ROOT:-/home/hzx/Faster/RepBlend}" \
+REPBLEND_EPOCH_EVAL_TRAIN="${REPBLEND_EPOCH_EVAL_TRAIN:-200}" \
+ENERGY_PREFER_ZEUS="${ENERGY_PREFER_ZEUS:-1}" \
+bash "${SCRIPT_DIR}/run_arch_bias_energy_5pct_rerun.sh"

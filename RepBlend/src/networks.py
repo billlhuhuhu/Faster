@@ -680,8 +680,21 @@ class ProjectionHead(nn.Module):
     
 
 
+def canonical_image_encoder_name(model_name):
+    aliases = {
+        'resnet-10': 'resnet10t',
+        'resnet10': 'resnet10t',
+        'resnet-50': 'resnet50',
+        'vit_b16': 'vit_base_patch16_224',
+        'vit-b16': 'vit_base_patch16_224',
+        'vit-b/16': 'vit_base_patch16_224',
+    }
+    return aliases.get(model_name, model_name)
+
+
 @functools.lru_cache(maxsize=128)
 def load_from_timm(model_name, pretrained):
+    model_name = canonical_image_encoder_name(model_name)
     if model_name == 'clip':
         raise NotImplementedError("it is unfair to use pretrained clip")
         # if pretrained:
@@ -710,7 +723,10 @@ def load_from_timm(model_name, pretrained):
         # model = timm.create_model('vit_base_patch14_dinov2', num_classes=0, pretrained=True)
         model = timm.create_model("vit_base_patch16_224.dino", num_classes=0, pretrained=True)
     else:
-        model = timm.create_model(model_name, num_classes=0, pretrained=True, global_pool="avg")
+        try:
+            model = timm.create_model(model_name, num_classes=0, pretrained=pretrained, global_pool="avg")
+        except Exception:
+            model = timm.create_model(model_name, num_classes=0, pretrained=False, global_pool="avg")
 
 
     return model
@@ -725,7 +741,7 @@ class ImageEncoder(nn.Module):
 
     def __init__(self, args):
         super().__init__()
-        self.model_name = args.image_encoder
+        self.model_name = canonical_image_encoder_name(args.image_encoder)
         self.pretrained = args.image_pretrained
         self.trainable = args.image_trainable
 
@@ -831,22 +847,27 @@ class CLIPModel_full(nn.Module):
     ):
         super().__init__()
 
-        if args.image_encoder == 'nfnet':
+        image_encoder_name = canonical_image_encoder_name(args.image_encoder)
+        if image_encoder_name == 'nfnet':
             if eval_stage:
                 self.image_embedding = 1000 #2048
             else:
                 self.image_embedding = 2304
-        elif args.image_encoder == 'convnet':
+        elif image_encoder_name == 'convnet':
             self.image_embedding = 768
-        elif args.image_encoder == 'nf_resnet50':
+        elif image_encoder_name == 'nf_resnet50':
             self.image_embedding = 2048
-        elif args.image_encoder == 'nf_regnet':
+        elif image_encoder_name == 'nf_regnet':
             self.image_embedding = 960
-        elif args.image_encoder == 'resnet18':
+        elif image_encoder_name in {'resnet10t', 'resnet18'}:
             self.image_embedding = 512
-        elif args.image_encoder == 'convnext':
+        elif image_encoder_name == 'convnext':
             self.image_embedding = 640
-        elif args.image_encoder == 'dinov2':
+        elif image_encoder_name == 'dinov2':
+            self.image_embedding = 768
+        elif image_encoder_name == 'resnet50':
+            self.image_embedding = 2048
+        elif image_encoder_name == 'vit_base_patch16_224':
             self.image_embedding = 768
         else:
             self.image_embedding = 1000

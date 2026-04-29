@@ -35,6 +35,7 @@ LORS_RUN_TAG="${LORS_RUN_TAG:-}"
 LORS_FORCE_REDISTILL="${LORS_FORCE_REDISTILL:-0}"
 LORS_MAX_FILES="${LORS_MAX_FILES:-}"
 LORS_MAX_EXPERTS="${LORS_MAX_EXPERTS:-}"
+LORS_RUN_EVALUATE="${LORS_RUN_EVALUATE:-1}"
 
 IMAGE_ROOT="$(get_image_root "${LORS_DATASET}")"
 MODEL_TAG="$(sanitize_component "${LORS_IMAGE_ENCODER}")_$(sanitize_component "${LORS_TEXT_ENCODER}")"
@@ -292,7 +293,11 @@ if [[ -z "${LATEST_CKPT}" ]]; then
   exit 1
 fi
 
-run_evaluate_stage "${LATEST_CKPT}"
+if [[ "${LORS_RUN_EVALUATE}" == "1" ]]; then
+  run_evaluate_stage "${LATEST_CKPT}"
+else
+  stage_log "Skip LoRS evaluate stage because LORS_RUN_EVALUATE=0"
+fi
 
 stage_log "LoRS baseline pipeline completed"
 stage_log "Buffer dir: ${BUFFER_LEAF_DIR}"

@@ -6,6 +6,12 @@ source "${SCRIPT_DIR}/common.sh"
 
 DATASET="${ARCH5_DATASET:-flickr}"
 RATIO="${ARCH5_RATIO:-0.05}"
+RATIO_TAG="$(python - "${RATIO}" <<'PY'
+import sys
+ratio = float(sys.argv[1])
+print(f"ratio_{int(round(ratio * 100)):02d}")
+PY
+)"
 SOURCE_BACKBONE="${ARCH5_SOURCE_BACKBONE:-nfnet}"
 TEXT_ENCODER="${ARCH5_TEXT_ENCODER:-bert}"
 EVAL_BACKBONES="${ARCH5_EVAL_BACKBONES:-nfnet resnet50 vit_b16}"
@@ -15,7 +21,7 @@ read -r -a SEEDS <<< "${SEEDS_STR}"
 METHODS="${ARCH5_METHODS:-ours random repblend}"
 OUTPUT_ROOT="${ARCH5_OUTPUT_ROOT:-artifacts/arch_bias_energy_5pct_rerun}"
 RUN_TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
-RUN_TAG="${ARCH5_RUN_TAG:-${DATASET}_ratio05_${RUN_TIMESTAMP}}"
+RUN_TAG="${ARCH5_RUN_TAG:-${DATASET}_${RATIO_TAG}_${RUN_TIMESTAMP}}"
 REPORT_DIR="${ARCH5_REPORT_DIR:-${OUTPUT_ROOT}/reports/${RUN_TAG}}"
 LOG_DIR="${ARCH5_LOG_DIR:-${OUTPUT_ROOT}/logs/${RUN_TAG}}"
 MEASURE_DIR="${ARCH5_MEASURE_DIR:-${OUTPUT_ROOT}/measurements/${RUN_TAG}}"
@@ -25,12 +31,6 @@ mkdir -p "${REPORT_DIR}" "${LOG_DIR}" "${MEASURE_DIR}"
 
 MODEL_TAG="$(sanitize_component "${SOURCE_BACKBONE}")_$(sanitize_component "${TEXT_ENCODER}")"
 IMAGE_ROOT="$(get_image_root "${DATASET}")"
-RATIO_TAG="$(python - "${RATIO}" <<'PY'
-import sys
-ratio = float(sys.argv[1])
-print(f"ratio_{int(round(ratio * 100)):02d}")
-PY
-)"
 
 OURS_FEATURE_CACHE_ROOT="${ARCH5_OURS_FEATURE_CACHE_ROOT:-${OUTPUT_ROOT}/feature_cache_dense_sift_bovw/${RUN_TAG}}"
 OURS_TOPOLOGY_ROOT="${ARCH5_OURS_TOPOLOGY_ROOT:-${OUTPUT_ROOT}/topology_graph_dense_sift_bovw/${RUN_TAG}}"
@@ -90,13 +90,24 @@ measure_command() {
   if [[ "${ENERGY_PREFER_ZEUS}" == "1" ]]; then
     zeus_args+=(--prefer_zeus)
   fi
-  python "${PROJECT_ROOT}/tools/measure_command_energy.py" \
-    --label "${label}" \
-    --output_json "${measurement_path}" \
-    --working_dir "${working_dir}" \
-    --gpu_sampler_interval "${ENERGY_GPU_SAMPLER_INTERVAL}" \
-    "${zeus_args[@]}" \
-    -- "$@" > "${log_path}" 2>&1
+  if [[ "${ARCH5_TEE_PROGRESS:-0}" == "1" ]]; then
+    python "${PROJECT_ROOT}/tools/measure_command_energy.py" \
+      --label "${label}" \
+      --output_json "${measurement_path}" \
+      --working_dir "${working_dir}" \
+      --gpu_sampler_interval "${ENERGY_GPU_SAMPLER_INTERVAL}" \
+      --tee_log "${log_path}" \
+      "${zeus_args[@]}" \
+      -- "$@"
+  else
+    python "${PROJECT_ROOT}/tools/measure_command_energy.py" \
+      --label "${label}" \
+      --output_json "${measurement_path}" \
+      --working_dir "${working_dir}" \
+      --gpu_sampler_interval "${ENERGY_GPU_SAMPLER_INTERVAL}" \
+      "${zeus_args[@]}" \
+      -- "$@" > "${log_path}" 2>&1
+  fi
 }
 
 compute_train_size() {
@@ -294,14 +305,42 @@ run_repblend() {
   repblend_params_for_count "${budget_count}"
 
   local run_name="repblend_${DATASET}_${RATIO_TAG}_${RUN_TIMESTAMP}"
+  local buffer_dir="${REPBLEND_BUFFER_ROOT}/${DATASET}/${MODEL_TAG}/InfoNCE"
+  local buffer_log="${LOG_DIR}/repblend_${RATIO_TAG}_buffer.log"
+  local buffer_measure="${MEASURE_DIR}/repblend_${RATIO_TAG}_buffer.json"
   local distill_log="${LOG_DIR}/repblend_${RATIO_TAG}_distill.log"
   local distill_measure="${MEASURE_DIR}/repblend_${RATIO_TAG}_distill.json"
+
+  if compgen -G "${buffer_dir}/img_replay_buffer_*.pt" >/dev/null && compgen -G "${buffer_dir}/txt_replay_buffer_*.pt" >/dev/null; then
+    stage_log "Skip RepBlend buffer generation: existing replay buffers found at ${buffer_dir}"
+  else
+    stage_log "Measure RepBlend buffer generation as selection setup: source=${MODEL_TAG}"
+    measure_command "repblend_${RATIO_TAG}_buffer" "${buffer_measure}" "${buffer_log}" "${REPBLEND_ROOT}" \
+      env CUDA_VISIBLE_DEVICES="${REPBLEND_CUDA_VISIBLE_DEVICES}" WANDB_MODE=disabled python buffer.py \
+        --dataset "${DATASET}" \
+        --buffer_path "${REPBLEND_BUFFER_ROOT}" \
+        --image_root "${IMAGE_ROOT}" \
+        --ann_root "${ANN_ROOT}" \
+        --image_encoder "${SOURCE_BACKBONE}" \
+        --text_encoder "${TEXT_ENCODER}" \
+        --loss_type InfoNCE \
+        --num_experts "${REPBLEND_BUFFER_NUM_EXPERTS:-20}" \
+        --train_epochs "${REPBLEND_BUFFER_TRAIN_EPOCHS:-10}" \
+        --eval_freq "${REPBLEND_BUFFER_EVAL_FREQ:-5}" \
+        --batch_train "${REPBLEND_BUFFER_BATCH_TRAIN:-128}" \
+        --batch_size_train "${REPBLEND_BUFFER_BATCH_TRAIN:-128}" \
+        --batch_size_test "${REPBLEND_BUFFER_BATCH_TEST:-128}" \
+        --disabled_wandb True
+    append_manifest method "repblend" dataset "${DATASET}" budget_type "ratio" budget_value "${RATIO}" budget_tag "${RATIO_TAG}" \
+      eval_backbone "" seed "0" stage "selection_buffer" gpu_count "${GPU_COUNT}" \
+      log_path "${buffer_log}" measurement_path "${buffer_measure}" skipped "0"
+  fi
 
   stage_log "Measure RepBlend distillation as selection: ${RATIO_TAG} count=${budget_count} num_queries=${REPBLEND_NUM_QUERIES}"
   measure_command "repblend_${RATIO_TAG}_distill" "${distill_measure}" "${distill_log}" "${REPBLEND_ROOT}" \
     env CUDA_VISIBLE_DEVICES="${REPBLEND_CUDA_VISIBLE_DEVICES}" WANDB_MODE=disabled python distill_repblend.py \
       --dataset "${DATASET}" \
-      --buffer_path "${REPBLEND_BUFFER_ROOT}/${DATASET}/${MODEL_TAG}/InfoNCE" \
+      --buffer_path "${buffer_dir}" \
       --image_root "${IMAGE_ROOT}" \
       --ann_root "${ANN_ROOT}" \
       --image_encoder "${SOURCE_BACKBONE}" \
@@ -345,7 +384,7 @@ run_repblend() {
   done
 }
 
-stage_log "5% architecture-bias + energy rerun start"
+stage_log "Architecture-bias + energy rerun start"
 stage_log "  methods=${METHODS}"
 stage_log "  dataset=${DATASET} ratio=${RATIO} tag=${RATIO_TAG}"
 stage_log "  source=${MODEL_TAG} eval_backbones=${EVAL_BACKBONES}"
