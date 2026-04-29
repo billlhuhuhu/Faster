@@ -1,6 +1,7 @@
 import argparse
 import csv
 import json
+import math
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -31,7 +32,10 @@ def to_float(value: Any) -> Optional[float]:
     try:
         if value in {"", None, "-"}:
             return None
-        return float(value)
+        parsed = float(value)
+        if math.isnan(parsed) or math.isinf(parsed):
+            return None
+        return parsed
     except (TypeError, ValueError):
         return None
 
@@ -115,6 +119,19 @@ def pick_numeric_metric_from_row(row: Dict[str, Any]) -> Optional[float]:
     return float(numeric[0])
 
 
+def looks_like_aggregate_file(path: Path) -> bool:
+    name = path.name.lower()
+    stem = path.stem.lower()
+    aggregate_tokens = ["summary", "score", "acc", "result", "eval", "rating", "overall"]
+    raw_tokens = ["prediction", "infer", "detail", "answer", "submission", "tmp", "cache"]
+    if any(token in name for token in raw_tokens):
+        return False
+    if any(token in name for token in aggregate_tokens):
+        return True
+    # VLMEvalKit sometimes writes benchmark-level Excel files directly as <benchmark>.xlsx.
+    return path.suffix.lower() in {".xlsx", ".xls"} and normalize_benchmark_name(stem) is not None
+
+
 def collect_from_summary_csv(path: Path) -> Dict[str, float]:
     out: Dict[str, float] = {}
     path_benchmark = normalize_benchmark_name(str(path))
@@ -124,7 +141,10 @@ def collect_from_summary_csv(path: Path) -> Dict[str, float]:
             for row in reader:
                 benchmark = row.get("benchmark") or row.get("dataset") or row.get("data") or row.get("name")
                 canonical = normalize_benchmark_name(str(benchmark)) or path_benchmark
-                value = pick_numeric_metric_from_row(row)
+                if "primary_metric_value" in row:
+                    value = as_percent(to_float(row.get("primary_metric_value")))
+                else:
+                    value = pick_numeric_metric_from_row(row)
                 if canonical and value is not None:
                     out[canonical] = value
     except Exception:
@@ -147,8 +167,21 @@ def collect_from_xlsx(path: Path) -> Dict[str, float]:
     for _, frame in sheets.items():
         if frame.empty:
             continue
+        columns_lower = {str(column).lower(): column for column in frame.columns}
+        for preferred in ["overall", "accuracy", "acc", "score"]:
+            if preferred in columns_lower:
+                values = frame[columns_lower[preferred]].dropna()
+                values = [as_percent(to_float(value)) for value in values]
+                values = [value for value in values if value is not None]
+                if values:
+                    # For aggregate sheets this is usually a single value. For item-level
+                    # sheets, averaging avoids accidentally taking the first sample's score.
+                    return {canonical: float(sum(values) / len(values))}
         rows = frame.to_dict(orient="records")
         for row in rows:
+            row_text = " ".join(str(value).lower() for value in row.values())
+            if not any(token in row_text for token in ["overall", "total", "avg", "average", "accuracy", "score"]):
+                continue
             value = pick_numeric_metric_from_row(row)
             if value is not None:
                 return {canonical: value}
@@ -162,7 +195,10 @@ def collect_from_xlsx(path: Path) -> Dict[str, float]:
                         return {canonical: as_percent(float(values.iloc[0]))}
             values = numeric.stack().dropna()
             if len(values):
-                return {canonical: as_percent(float(values.iloc[0]))}
+                parsed_values = [as_percent(to_float(value)) for value in values.tolist()]
+                parsed_values = [value for value in parsed_values if value is not None]
+                if parsed_values:
+                    return {canonical: float(sum(parsed_values) / len(parsed_values))}
     return {}
 
 
@@ -191,12 +227,17 @@ def collect_from_json(path: Path) -> Dict[str, float]:
     return out
 
 
-def collect_benchmark_scores(output_dir: Path) -> Dict[str, float]:
+def collect_benchmark_scores(output_dir: Path, debug: bool = False) -> Dict[str, float]:
     if not output_dir.exists():
         return {}
     scores: Dict[str, float] = {}
     candidate_files = sorted(
-        [path for path in output_dir.rglob("*") if path.is_file() and path.suffix.lower() in {".csv", ".json", ".xlsx", ".xls"}],
+        [
+            path for path in output_dir.rglob("*")
+            if path.is_file()
+            and path.suffix.lower() in {".csv", ".json", ".xlsx", ".xls"}
+            and looks_like_aggregate_file(path)
+        ],
         key=lambda path: (0 if "summary" in path.name.lower() else 1, len(str(path))),
     )
     for path in candidate_files:
@@ -207,6 +248,8 @@ def collect_benchmark_scores(output_dir: Path) -> Dict[str, float]:
             local = collect_from_xlsx(path)
         else:
             local = collect_from_json(path)
+        if debug and local:
+            print(f"[source] {path}: {local}")
         scores.update(local)
     return scores
 
@@ -289,6 +332,7 @@ def main() -> None:
     parser.add_argument("--output_md", type=str, default=None)
     parser.add_argument("--ratios", type=str, default="1,5,10")
     parser.add_argument("--modes", type=str, default="ours,random")
+    parser.add_argument("--debug_sources", action="store_true")
     args = parser.parse_args()
 
     plan_root = Path(args.plan_root)
@@ -314,7 +358,7 @@ def main() -> None:
         scores: Dict[str, float] = {}
         output_dirs = resolve_output_dirs(plan, plan_path, plan_root)
         for output_dir in output_dirs:
-            scores.update(collect_benchmark_scores(output_dir))
+            scores.update(collect_benchmark_scores(output_dir, debug=bool(args.debug_sources)))
         scores.update(global_summary_scores.get((mode, int(ratio), str(plan.get("seed", subset_info.get("seed", "")))), {}))
         row: Dict[str, Any] = {
             "subset_mode": mode,
