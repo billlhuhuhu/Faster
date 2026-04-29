@@ -123,13 +123,17 @@ def looks_like_aggregate_file(path: Path) -> bool:
     name = path.name.lower()
     stem = path.stem.lower()
     aggregate_tokens = ["summary", "score", "acc", "result", "eval", "rating", "overall"]
+    preferred_tokens = ["_acc", "_score", "_result", "summary"]
     raw_tokens = ["prediction", "infer", "detail", "answer", "submission", "tmp", "cache"]
     if any(token in name for token in raw_tokens):
         return False
+    if path.suffix.lower() in {".xlsx", ".xls"} and normalize_benchmark_name(stem) is not None:
+        # Plain qwen2vl_subset_<DATASET>.xlsx is usually item-level prediction output.
+        # Aggregate xlsx files in VLMEvalKit commonly include _result / _score / _acc.
+        return any(token in stem for token in preferred_tokens)
     if any(token in name for token in aggregate_tokens):
         return True
-    # VLMEvalKit sometimes writes benchmark-level Excel files directly as <benchmark>.xlsx.
-    return path.suffix.lower() in {".xlsx", ".xls"} and normalize_benchmark_name(stem) is not None
+    return False
 
 
 def collect_from_summary_csv(path: Path) -> Dict[str, float]:
@@ -141,8 +145,14 @@ def collect_from_summary_csv(path: Path) -> Dict[str, float]:
             for row in reader:
                 benchmark = row.get("benchmark") or row.get("dataset") or row.get("data") or row.get("name")
                 canonical = normalize_benchmark_name(str(benchmark)) or path_benchmark
-                if "primary_metric_value" in row:
+                if "primary_metric_value" in row and to_float(row.get("primary_metric_value")) is not None:
                     value = as_percent(to_float(row.get("primary_metric_value")))
+                elif path.name.lower().endswith("_score.csv") and canonical == "POPE":
+                    preferred = row.get("Overall") or row.get("overall") or row.get("Accuracy") or row.get("accuracy") or row.get("acc")
+                    value = as_percent(to_float(preferred)) if preferred is not None else pick_numeric_metric_from_row(row)
+                elif path.name.lower().endswith("_acc.csv"):
+                    preferred = row.get("accuracy") or row.get("acc") or row.get("Overall") or row.get("overall") or row.get("score")
+                    value = as_percent(to_float(preferred)) if preferred is not None else pick_numeric_metric_from_row(row)
                 else:
                     value = pick_numeric_metric_from_row(row)
                 if canonical and value is not None:
@@ -231,6 +241,17 @@ def collect_benchmark_scores(output_dir: Path, debug: bool = False) -> Dict[str,
     if not output_dir.exists():
         return {}
     scores: Dict[str, float] = {}
+    def file_priority(path: Path):
+        name = path.name.lower()
+        if "_acc." in name or "_score." in name:
+            group = 0
+        elif "_result." in name or "summary" in name:
+            group = 1
+        else:
+            group = 2
+        # Later timestamp directories generally correspond to reruns/resumed successful evals.
+        return (group, -path.stat().st_mtime, len(str(path)))
+
     candidate_files = sorted(
         [
             path for path in output_dir.rglob("*")
@@ -238,7 +259,7 @@ def collect_benchmark_scores(output_dir: Path, debug: bool = False) -> Dict[str,
             and path.suffix.lower() in {".csv", ".json", ".xlsx", ".xls"}
             and looks_like_aggregate_file(path)
         ],
-        key=lambda path: (0 if "summary" in path.name.lower() else 1, len(str(path))),
+        key=file_priority,
     )
     for path in candidate_files:
         suffix = path.suffix.lower()
