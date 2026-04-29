@@ -13,6 +13,7 @@ from transformers import BertTokenizer, BertModel, DistilBertModel, DistilBertTo
 from transformers.models.bert.modeling_bert import BertAttention, BertConfig
 import functools
 import copy
+from pathlib import Path
 from transformers import AutoTokenizer, AutoModel
 
 from .similarity_mining import MultilabelContrastiveLoss
@@ -20,29 +21,36 @@ from .similarity_mining import MultilabelContrastiveLoss
 
 # Caching text models, by Yue Xu
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def checkpoint_path(*parts):
+    return str(PROJECT_ROOT.joinpath("distill_utils", "checkpoints", *parts))
+
 @functools.lru_cache(maxsize=128)
 def get_bert_stuff():
-    tokenizer = BertTokenizer.from_pretrained('./distill_utils/checkpoints/bert-base-uncased')
-    BERT_model = BertModel.from_pretrained('./distill_utils/checkpoints/bert-base-uncased')
+    model_name = checkpoint_path("bert-base-uncased")
+    tokenizer = BertTokenizer.from_pretrained(model_name)
+    BERT_model = BertModel.from_pretrained(model_name)
     return BERT_model, tokenizer
 
 @functools.lru_cache(maxsize=128)
 def get_distilbert_stuff():
-    DistilBERT_model_name = "distilbert-base-uncased"
-    DistilBERT_model = DistilBertModel.from_pretrained('./distill_utils/checkpoints/distilbert-base-uncased')
-    DistilBERT_tokenizer = DistilBertTokenizer.from_pretrained('./distill_utils/checkpoints/distilbert-base-uncased')
+    DistilBERT_model_name = checkpoint_path("distilbert-base-uncased")
+    DistilBERT_model = DistilBertModel.from_pretrained(DistilBERT_model_name)
+    DistilBERT_tokenizer = DistilBertTokenizer.from_pretrained(DistilBERT_model_name)
     return DistilBERT_model, DistilBERT_tokenizer
 
 @functools.lru_cache(maxsize=128)
 def get_gpt1_stuff():
-    model_name = '/home/qiqitao/LoRS_Distill/distill_utils/checkpoints/openai-gpt'
+    model_name = checkpoint_path("openai-gpt")
     model = OpenAIGPTModel.from_pretrained(model_name)
     tokenizer = OpenAIGPTTokenizer.from_pretrained(model_name)
     return model, tokenizer
 
 @functools.lru_cache(maxsize=128)
 def get_bge_stuff():
-    model_name = './distill_utils/checkpoints/bge-base-en-v1.5'  # 本地路径或模型名
+    model_name = checkpoint_path("bge-base-en-v1.5")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModel.from_pretrained(model_name)
     return model, tokenizer
@@ -705,16 +713,16 @@ def load_from_timm(model_name, pretrained):
 
     elif model_name == 'nfnet':
         model = timm.create_model('nfnet_l0', pretrained=pretrained, num_classes=0, global_pool="avg",
-                                        pretrained_cfg_overlay=dict(file='./distill_utils/checkpoints/nfnet_l0_ra2-45c6688d.pth'))
+                                        pretrained_cfg_overlay=dict(file=checkpoint_path("nfnet_l0_ra2-45c6688d.pth")))
     elif model_name == 'vit':
         model = timm.create_model('vit_tiny_patch16_224', pretrained=True)
     elif model_name == 'nf_resnet50':
         model = timm.create_model('nf_resnet50', pretrained=True,num_classes=0, global_pool="avg",
-                                        pretrained_cfg_overlay=dict(file='./distill_utils/checkpoints/nf_resnet50_ra2_in1k.pth'))
+                                        pretrained_cfg_overlay=dict(file=checkpoint_path("nf_resnet50_ra2_in1k.pth")))
         # model = timm.create_model("hf_hub:timm/nf_resnet50.ra2_in1k", pretrained=True, num_classes=0, global_pool="avg" ) # 采用全局平均池化)
     elif model_name == 'nf_regnet':
         model = timm.create_model('nf_regnet_b1', pretrained=True,num_classes=0, global_pool="avg",
-                                        pretrained_cfg_overlay=dict(file='./distill_utils/checkpoints/nf_regnet_b1_ra2_in1k.pth'))
+                                        pretrained_cfg_overlay=dict(file=checkpoint_path("nf_regnet_b1_ra2_in1k.pth")))
         # model = timm.create_model("hf_hub:timm/nf_regnet_b1.ra2_in1k", pretrained=True, num_classes=0, global_pool="avg" ) # 采用全局平均池化)
     elif model_name=="efficientvit_m5":
             model = timm.create_model(model_name, num_classes=0, pretrained=True)
@@ -774,7 +782,7 @@ class TextEncoder(nn.Module):
         self.model_name = args.text_encoder
         
         if self.model_name == 'clip':
-            self.model, preprocess = clip.load("ViT-B/32", device='cuda', download_root="./distill_utils/checkpoints")
+            self.model, preprocess = clip.load("ViT-B/32", device='cuda', download_root=checkpoint_path())
         elif self.model_name == 'bert':
             pt_model, self.tokenizer = get_bert_stuff()
             if args.text_pretrained:
