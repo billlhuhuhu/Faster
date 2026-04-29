@@ -804,6 +804,29 @@ class TextEncoder(nn.Module):
 
         # we are using the CLS token hidden representation as the sentence's embedding
         self.target_token_idx = 0
+
+    def _tokenize_batch(self, texts, device='cuda', max_length=None):
+        kwargs = dict(return_tensors='pt', padding=True, truncation=True)
+        if max_length is not None:
+            kwargs["max_length"] = max_length
+        if callable(self.tokenizer):
+            encoding = self.tokenizer(texts, **kwargs)
+        elif hasattr(self.tokenizer, "batch_encode_plus"):
+            encoding = self.tokenizer.batch_encode_plus(texts, **kwargs)
+        else:
+            encoded = [self.tokenizer.encode_plus(text, **kwargs) for text in texts]
+            input_ids = torch.nn.utils.rnn.pad_sequence(
+                [item["input_ids"].squeeze(0) for item in encoded],
+                batch_first=True,
+                padding_value=getattr(self.tokenizer, "pad_token_id", 0) or 0,
+            )
+            attention_mask = torch.nn.utils.rnn.pad_sequence(
+                [item["attention_mask"].squeeze(0) for item in encoded],
+                batch_first=True,
+                padding_value=0,
+            )
+            encoding = {"input_ids": input_ids, "attention_mask": attention_mask}
+        return {key: value.to(device) for key, value in encoding.items()}
     
     def forward(self, texts, device='cuda'):
         if self.model_name == 'clip':
@@ -811,33 +834,27 @@ class TextEncoder(nn.Module):
 
         elif self.model_name == 'bert':
             # Tokenize the input text
-            encoding = self.tokenizer.batch_encode_plus(texts, return_tensors='pt', padding=True, truncation=True)
-            input_ids = encoding['input_ids'].to(device)
-            attention_mask = encoding['attention_mask'].to(device)
+            encoding = self._tokenize_batch(texts, device=device)
+            input_ids = encoding['input_ids']
+            attention_mask = encoding['attention_mask']
             output = self.model(input_ids, attention_mask=attention_mask).last_hidden_state[:, self.target_token_idx, :]
         
         elif self.model_name == 'distilbert':
-            encoding = self.tokenizer.batch_encode_plus(texts, return_tensors='pt', padding=True, truncation=True)
-            input_ids = encoding['input_ids'].to(device)
-            attention_mask = encoding['attention_mask'].to(device)
+            encoding = self._tokenize_batch(texts, device=device)
+            input_ids = encoding['input_ids']
+            attention_mask = encoding['attention_mask']
             output = self.model(input_ids, attention_mask=attention_mask).last_hidden_state[:, self.target_token_idx, :]
 
         elif self.model_name == 'gpt1':
             self.tokenizer.pad_token = ' '
-            encoding = self.tokenizer.batch_encode_plus(texts, return_tensors='pt', padding=True, truncation=True)
-            input_ids = encoding['input_ids'].to(device)
-            attention_mask = encoding['attention_mask'].to(device)
+            encoding = self._tokenize_batch(texts, device=device)
+            input_ids = encoding['input_ids']
+            attention_mask = encoding['attention_mask']
             output = self.model(input_ids, attention_mask=attention_mask).last_hidden_state[:, self.target_token_idx, :]
         elif self.model_name == 'bge':
-            encoding = self.tokenizer.batch_encode_plus(
-                texts,
-                return_tensors='pt',
-                padding=True,
-                truncation=True,
-                max_length=512
-            )
-            input_ids = encoding['input_ids'].to(device)
-            attention_mask = encoding['attention_mask'].to(device)
+            encoding = self._tokenize_batch(texts, device=device, max_length=512)
+            input_ids = encoding['input_ids']
+            attention_mask = encoding['attention_mask']
             output = self.model(input_ids, attention_mask=attention_mask).last_hidden_state[:, self.target_token_idx, :]
             
         return output
