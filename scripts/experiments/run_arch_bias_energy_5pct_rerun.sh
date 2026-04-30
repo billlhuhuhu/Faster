@@ -145,6 +145,14 @@ run_ours_selection() {
   local measurement_path="${MEASURE_DIR}/ours_${RATIO_TAG}_seed${seed}_selection.json"
   local selected_indices_path="${OURS_SELECTION_ROOT}/${DATASET}/train/${MODEL_TAG}/${RATIO_TAG}/proxy_opt_lsrc/seed_${seed}/selected_indices.json"
 
+  if [[ -f "${selected_indices_path}" ]]; then
+    stage_log "Skip Ours selection: existing selected_indices found at ${selected_indices_path}"
+    append_manifest method "ours" dataset "${DATASET}" budget_type "ratio" budget_value "${RATIO}" budget_tag "${RATIO_TAG}" \
+      eval_backbone "" seed "${seed}" stage "selection" gpu_count "${GPU_COUNT}" \
+      selected_indices_path "${selected_indices_path}" log_path "${log_path}" measurement_path "${measurement_path}" skipped "1"
+    return 0
+  fi
+
   stage_log "Measure Ours full selection pipeline: ${RATIO_TAG} seed=${seed}"
   measure_command "ours_${RATIO_TAG}_seed${seed}_selection" "${measurement_path}" "${log_path}" "${PROJECT_ROOT}" \
     env \
