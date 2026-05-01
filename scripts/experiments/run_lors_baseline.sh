@@ -35,6 +35,7 @@ LORS_RUN_TAG="${LORS_RUN_TAG:-}"
 LORS_FORCE_REDISTILL="${LORS_FORCE_REDISTILL:-0}"
 LORS_MAX_FILES="${LORS_MAX_FILES:-}"
 LORS_MAX_EXPERTS="${LORS_MAX_EXPERTS:-}"
+LORS_RUN_DISTILL="${LORS_RUN_DISTILL:-1}"
 LORS_RUN_EVALUATE="${LORS_RUN_EVALUATE:-1}"
 
 IMAGE_ROOT="$(get_image_root "${LORS_DATASET}")"
@@ -284,6 +285,15 @@ if [[ "${LORS_IMAGE_ENCODER}" == "nfnet" ]]; then
 fi
 
 run_buffer_stage
+
+if [[ "${LORS_RUN_DISTILL}" != "1" ]]; then
+  stage_log "Skip LoRS distill/evaluate stages because LORS_RUN_DISTILL=${LORS_RUN_DISTILL}"
+  stage_log "LoRS baseline pipeline completed"
+  stage_log "Buffer dir: ${BUFFER_LEAF_DIR}"
+  stage_log "Logs saved to ${RUN_LOG_DIR}"
+  exit 0
+fi
+
 run_distill_stage
 
 LATEST_CKPT="$(find_latest_distilled_checkpoint "${LORS_DATASET}" "${LORS_ITERATION}" || true)"
