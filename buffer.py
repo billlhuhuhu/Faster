@@ -1,5 +1,10 @@
 import os
 import argparse
+
+from src.sklearn_compat import install_sklearn_metrics_stub_if_broken
+
+install_sklearn_metrics_stub_if_broken()
+
 import torch
 import torch.nn as nn
 from tqdm import tqdm, trange

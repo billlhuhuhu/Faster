@@ -4,6 +4,10 @@ import os
 import argparse
 import re
 
+from src.sklearn_compat import install_sklearn_metrics_stub_if_broken
+
+install_sklearn_metrics_stub_if_broken()
+
 import numpy as np
 import torch
 import torch.nn as nn

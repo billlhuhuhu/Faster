@@ -10,6 +10,10 @@ from collections import defaultdict
 import os
 import re
 
+from src.sklearn_compat import install_sklearn_metrics_stub_if_broken
+
+install_sklearn_metrics_stub_if_broken()
+
 import numpy as np
 import torch
 

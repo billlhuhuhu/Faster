@@ -80,6 +80,8 @@ compute_train_size() {
   python - "${LORS3_DATASET}" "${IMAGE_ROOT}" "${ANN_ROOT}" <<'PY'
 import sys
 from types import SimpleNamespace
+from src.sklearn_compat import install_sklearn_metrics_stub_if_broken
+install_sklearn_metrics_stub_if_broken()
 from data import create_dataset
 args = SimpleNamespace(
     dataset=sys.argv[1],
