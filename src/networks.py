@@ -4,6 +4,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch
 import os
+import sys
+import types
+import importlib.machinery
 # from collections import OrderedDict
 # from typing import Tuple, Union
 try:
@@ -16,6 +19,57 @@ except ImportError:
     safe_load_file = None
 # from transformers import ViTConfig, ViTModel, AutoTokenizer, CLIPTextModel, CLIPTextConfig, CLIPProcessor, CLIPConfig
 import numpy as np
+
+
+def install_sklearn_metrics_stub_if_broken():
+    """Avoid optional sklearn ABI failures when importing Transformers.
+
+    Recent Transformers imports `sklearn.metrics.roc_curve` through generation
+    helpers even though this project only needs BERT encoders here.  If the
+    local sklearn binary is incompatible with the current NumPy, provide the
+    tiny optional symbol Transformers asks for instead of failing training.
+    """
+    try:
+        from sklearn.metrics import roc_curve  # noqa: F401
+        return
+    except Exception as exc:
+        message = str(exc)
+        if "numpy.dtype size changed" not in message and "sklearn" not in message:
+            return
+
+    for name in list(sys.modules):
+        if name == "sklearn" or name.startswith("sklearn."):
+            sys.modules.pop(name, None)
+
+    sklearn_stub = types.ModuleType("sklearn")
+    sklearn_stub.__spec__ = importlib.machinery.ModuleSpec("sklearn", loader=None, is_package=True)
+    sklearn_stub.__path__ = []
+    metrics_stub = types.ModuleType("sklearn.metrics")
+    metrics_stub.__spec__ = importlib.machinery.ModuleSpec("sklearn.metrics", loader=None)
+
+    def roc_curve(y_true, y_score, *args, **kwargs):
+        y_true = np.asarray(y_true)
+        y_score = np.asarray(y_score)
+        thresholds = np.unique(y_score)[::-1]
+        if thresholds.size == 0:
+            thresholds = np.asarray([np.inf], dtype=np.float32)
+        fps = np.zeros(thresholds.shape[0], dtype=np.float32)
+        tps = np.zeros(thresholds.shape[0], dtype=np.float32)
+        positives = max(float(np.sum(y_true == 1)), 1.0)
+        negatives = max(float(np.sum(y_true != 1)), 1.0)
+        for idx, threshold in enumerate(thresholds):
+            pred = y_score >= threshold
+            tps[idx] = float(np.sum(pred & (y_true == 1))) / positives
+            fps[idx] = float(np.sum(pred & (y_true != 1))) / negatives
+        return fps, tps, thresholds
+
+    metrics_stub.roc_curve = roc_curve
+    sklearn_stub.metrics = metrics_stub
+    sys.modules["sklearn"] = sklearn_stub
+    sys.modules["sklearn.metrics"] = metrics_stub
+
+
+install_sklearn_metrics_stub_if_broken()
 from transformers import BertTokenizer, BertModel, DistilBertModel, DistilBertTokenizer, OpenAIGPTTokenizer, OpenAIGPTModel
 # from torchvision.models import resnet18, resnet
 from transformers.models.bert.modeling_bert import BertAttention, BertConfig
