@@ -164,7 +164,7 @@ def draw_left_panel(ax: plt.Axes, table: pd.DataFrame) -> None:
     ax.axvline(full_mr, color=BLUE, linestyle="--", linewidth=1.3, zorder=1)
     ax.text(
         full_mr,
-        -0.7,
+        -0.62,
         f"Full / Ours ({full_mr:.2f})",
         ha="right",
         va="bottom",
@@ -212,7 +212,7 @@ def draw_left_panel(ax: plt.Axes, table: pd.DataFrame) -> None:
     ax.set_xlim(15.55, 21.55)
     ax.set_ylim(len(LEFT_ORDER) - 0.15, -0.55)
     ax.set_xlabel("mR")
-    ax.set_title("(a) Module Contribution Analysis", fontweight="bold", pad=24)
+    ax.set_title("(a) Module Contribution Analysis", fontweight="bold", pad=34)
     ax.xaxis.grid(True, linestyle=(0, (2, 3)), color=GRID, linewidth=0.8)
     ax.set_axisbelow(True)
     ax.spines["top"].set_visible(False)
@@ -221,7 +221,7 @@ def draw_left_panel(ax: plt.Axes, table: pd.DataFrame) -> None:
     ax.tick_params(axis="y", length=0, pad=10)
 
 
-def draw_heatmap(ax: plt.Axes, table: pd.DataFrame, fig: plt.Figure) -> None:
+def draw_heatmap(ax: plt.Axes, cax: plt.Axes, table: pd.DataFrame, fig: plt.Figure) -> None:
     data = np.vstack([metric_row(table, method) for method in HEATMAP_ORDER])
     labels = [METHOD_TO_LABEL[m] for m in HEATMAP_ORDER]
 
@@ -244,7 +244,7 @@ def draw_heatmap(ax: plt.Axes, table: pd.DataFrame, fig: plt.Figure) -> None:
             )
 
     ax.set_xticks(np.arange(len(METRIC_COLUMNS)))
-    ax.set_xticklabels([label for label, _ in METRIC_COLUMNS], fontsize=10)
+    ax.set_xticklabels([label for label, _ in METRIC_COLUMNS], fontsize=9)
     ax.xaxis.tick_top()
     ax.tick_params(axis="x", length=0, pad=8)
     ax.set_yticks(np.arange(len(labels)))
@@ -261,10 +261,10 @@ def draw_heatmap(ax: plt.Axes, table: pd.DataFrame, fig: plt.Figure) -> None:
     for spine in ax.spines.values():
         spine.set_visible(False)
     ax.tick_params(axis="y", length=0, pad=8)
-    ax.set_title("(b) Metric-Level Retrieval Summary", fontweight="bold", pad=42)
+    ax.set_title("(b) Metric-Level Retrieval Summary", fontweight="bold", pad=34)
 
-    cbar = fig.colorbar(image, ax=ax, fraction=0.046, pad=0.035)
-    cbar.ax.set_title("Recall (%)", fontsize=12, pad=8)
+    cbar = fig.colorbar(image, cax=cax)
+    cbar.ax.set_title("Recall (%)", fontsize=11, pad=10)
     cbar.set_ticks([0, 10, 20, 30, 40])
     cbar.ax.tick_params(labelsize=12, length=0)
     cbar.outline.set_visible(False)
@@ -275,24 +275,25 @@ def create_ablation_chart(data_path: Path, output_path: Path, budget: float = 0.
     table = load_ablation_table(data_path, budget)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig = plt.figure(figsize=(14.4, 5.8), facecolor="white")
+    fig = plt.figure(figsize=(14.8, 5.25), facecolor="white")
     grid = fig.add_gridspec(
         1,
-        2,
-        width_ratios=[1.05, 1.18],
+        3,
+        width_ratios=[1.04, 1.08, 0.035],
         left=0.06,
         right=0.965,
-        bottom=0.18,
-        top=0.72,
-        wspace=0.50,
+        bottom=0.19,
+        top=0.70,
+        wspace=0.44,
     )
     ax_left = fig.add_subplot(grid[0, 0])
     ax_right = fig.add_subplot(grid[0, 1])
+    cax = fig.add_subplot(grid[0, 2])
 
     draw_left_panel(ax_left, table)
-    draw_heatmap(ax_right, table, fig)
+    draw_heatmap(ax_right, cax, table, fig)
 
-    fig.suptitle(f"Flickr, budget = {budget:.2f}", y=0.975, fontsize=18)
+    fig.suptitle(f"Flickr, budget = {budget:.2f}", y=0.965, fontsize=18)
     fig.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
     print(f"Chart saved to {output_path}")
 
