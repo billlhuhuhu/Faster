@@ -191,7 +191,7 @@ def draw_left_panel(ax: plt.Axes, table: pd.DataFrame) -> None:
     ax.set_xlim(15.55, 22.0)
     ax.set_ylim(len(LEFT_ORDER) - 0.15, -0.55)
     ax.set_xlabel("mR", labelpad=12)
-    ax.set_title("(a) Module Contribution Analysis", fontweight="normal", pad=48)
+    ax.set_title("(a) Module Contribution Analysis", fontweight="normal", pad=48, y=1.10)
     ax.xaxis.grid(True, linestyle=(0, (2, 3)), color=GRID, linewidth=0.8)
     ax.set_axisbelow(True)
     ax.spines["top"].set_visible(False)
@@ -237,12 +237,12 @@ def draw_heatmap(ax: plt.Axes, cax: plt.Axes, table: pd.DataFrame, fig: plt.Figu
     ax.grid(which="minor", color="white", linewidth=1.0)
     ax.tick_params(which="minor", bottom=False, left=False)
     ax.tick_params(axis="y", length=0, pad=12)
-    ax.set_title("(b) Metric-Level Retrieval Summary", fontweight="normal", pad=58)
+    ax.set_title("(b) Metric-Level Retrieval Summary", fontweight="normal", pad=48, y=1.10)
     for spine in ax.spines.values():
         spine.set_visible(False)
 
     cbar = fig.colorbar(image, cax=cax)
-    cbar.ax.set_title("Recall (%)", fontsize=12, pad=10)
+    cbar.ax.set_title("Recall (%)", fontsize=12, pad=8, loc="center")
     cbar.set_ticks([0, 10, 20, 30, 40])
     cbar.ax.tick_params(labelsize=13, length=0, pad=8)
     cbar.outline.set_visible(False)
@@ -258,7 +258,7 @@ def create_ablation_chart(data_path: Path, output_path: Path, budget: float = 0.
     # Manual axes match the reference image more reliably than automatic GridSpec.
     ax_left = fig.add_axes([0.085, 0.18, 0.39, 0.56])
     ax_right = fig.add_axes([0.605, 0.18, 0.36, 0.56])
-    cax = fig.add_axes([0.980, 0.21, 0.018, 0.50])
+    cax = fig.add_axes([0.975, 0.21, 0.018, 0.50])
 
     draw_left_panel(ax_left, table)
     draw_heatmap(ax_right, cax, table, fig)
