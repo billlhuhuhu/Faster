@@ -251,22 +251,32 @@ def build_rbf_kernel(points, sigma=1.0):
     return torch.exp(-sqdist / (2.0 * sigma * sigma))
 
 
-def infer_mmd_bandwidth(x, y, eps=1e-8, max_points=1024):
-    x = x.detach()
-    y = y.detach()
+def infer_mmd_bandwidth(x, y, eps=1e-8, max_points=None):
+    """Estimate an RBF bandwidth without consuming scarce GPU memory.
+
+    The median heuristic only produces a scalar hyperparameter.  Keeping this
+    estimate on CPU avoids OOMs when large proxy runs already occupy the GPU.
+    """
+    if max_points is None:
+        max_points = int(os.environ.get("PROXY_MMD_BANDWIDTH_MAX_POINTS", "256"))
     max_points = max(2, int(max_points))
+
+    x = x.detach().to("cpu", dtype=torch.float32)
+    y = y.detach().to("cpu", dtype=torch.float32)
     if x.shape[0] > max_points:
-        x = x[torch.randperm(x.shape[0], device=x.device)[:max_points]]
+        x = x[torch.randperm(x.shape[0])[:max_points]]
     if y.shape[0] > max_points:
-        y = y[torch.randperm(y.shape[0], device=y.device)[:max_points]]
+        y = y[torch.randperm(y.shape[0])[:max_points]]
     combined = torch.cat([x, y], dim=0)
     if combined.shape[0] <= 1:
         return float(1.0)
-    sqdist = torch.cdist(combined, combined, p=2) ** 2
-    mask = sqdist > float(eps)
-    if not torch.any(mask):
-        return float(1.0)
-    median_sqdist = torch.median(sqdist[mask]).detach().cpu().item()
+
+    with torch.no_grad():
+        sqdist = torch.cdist(combined, combined, p=2) ** 2
+        valid = sqdist[sqdist > float(eps)]
+        if valid.numel() == 0:
+            return float(1.0)
+        median_sqdist = torch.median(valid).item()
     bandwidth = math.sqrt(max(float(median_sqdist), float(eps)) / 2.0)
     return float(max(bandwidth, 1e-6))
 

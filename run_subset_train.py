@@ -11,6 +11,17 @@ os.environ.setdefault("BLIS_NUM_THREADS", "1")
 from src.subset_train import train_and_evaluate_subset
 
 
+def str2bool(value):
+    if isinstance(value, bool):
+        return value
+    value = str(value).strip().lower()
+    if value in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if value in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"Boolean value expected, got {value!r}.")
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="Train and evaluate retrieval on a selected real subset.")
     parser.add_argument("--dataset", type=str, required=True, choices=["flickr", "coco"])
@@ -52,12 +63,12 @@ def build_parser():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--no_aug", action="store_true", default=False)
 
-    parser.add_argument("--image_pretrained", type=bool, default=True)
-    parser.add_argument("--text_pretrained", type=bool, default=True)
-    parser.add_argument("--image_trainable", type=bool, default=True)
-    parser.add_argument("--text_trainable", type=bool, default=False)
-    parser.add_argument("--only_has_image_projection", type=bool, default=False)
-    parser.add_argument("--distill", type=bool, default=False)
+    parser.add_argument("--image_pretrained", type=str2bool, default=True)
+    parser.add_argument("--text_pretrained", type=str2bool, default=True)
+    parser.add_argument("--image_trainable", type=str2bool, default=True)
+    parser.add_argument("--text_trainable", type=str2bool, default=False)
+    parser.add_argument("--only_has_image_projection", type=str2bool, default=False)
+    parser.add_argument("--distill", type=str2bool, default=False)
     parser.add_argument("--loss_type", type=str, default="InfoNCE")
     return parser
 
