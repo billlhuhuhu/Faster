@@ -235,6 +235,12 @@ class Qwen2VlDataCollator:
         for row_idx, prompt_len in enumerate(prompt_lengths):
             labels[row_idx, : min(int(prompt_len), labels.shape[1])] = -100
         batch["labels"] = labels
+        # Qwen2-VL embedding inputs must stay integer typed. Some processor /
+        # Trainer combinations can preserve tensors in a BatchFeature container
+        # with unstable dtypes, so normalize the discrete fields explicitly.
+        for key in ("input_ids", "attention_mask", "labels", "image_grid_thw", "video_grid_thw"):
+            if key in batch and torch.is_tensor(batch[key]):
+                batch[key] = batch[key].long()
         return batch
 
 
