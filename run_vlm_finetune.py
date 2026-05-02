@@ -8,6 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from src.sklearn_compat import install_sklearn_metrics_stub_if_broken
+
+install_sklearn_metrics_stub_if_broken()
+
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
