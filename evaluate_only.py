@@ -29,6 +29,17 @@ from src.networks import CLIPModel_full
 from src.vl_distill_utils import load_or_process_file
 
 
+def str2bool(value):
+    if isinstance(value, bool):
+        return value
+    value = str(value).strip().lower()
+    if value in {"1", "true", "yes", "y", "on"}:
+        return True
+    if value in {"0", "false", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"Boolean value expected, got {value!r}")
+
+
 def formatting_result_head():
     return "Img R@1  | Img R@5  | Img R@10 | Txt R@1  | Txt R@5  | Txt R@10 | Mean"
 
@@ -200,10 +211,10 @@ if __name__ == '__main__':
     parser.add_argument('--name', type=str, default=current_time, help='name of wandb run')
     parser.add_argument('--num_queries', type=int, default=100, help='number of queries')
     parser.add_argument('--mini_batch_size', type=int, default=100, help='number of queries')
-    parser.add_argument('--basis', type=bool, default=False, help='whether use basis or not')
+    parser.add_argument('--basis', type=str2bool, default=False, help='whether use basis or not')
     parser.add_argument('--n_basis', type=int, default=64, help='n_basis')
-    parser.add_argument('--recursive', type=bool, default=False, help='whether use basis or not')
-    parser.add_argument('--load_npy', type=bool, default=False, help='load_npy')
+    parser.add_argument('--recursive', type=str2bool, default=False, help='whether use basis or not')
+    parser.add_argument('--load_npy', type=str2bool, default=False, help='load_npy')
     parser.add_argument('--image_size', type=int, default=224, help='image_size')
     parser.add_argument('--image_root', type=str, default='distill_utils/data/Flickr30k/', help='location of image root')
     parser.add_argument('--ann_root', type=str, default='./data/Flickr30k_ann/', help='location of ann root')
@@ -211,20 +222,20 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size_test', type=int, default=128, help='batch_size_test')
     parser.add_argument('--image_encoder', type=str, default='nfnet',  help='image encoder') # , choices=['clip', 'nfnet', 'vit', 'nf_resnet50', "nf_regnet"]
     parser.add_argument('--text_encoder', type=str, default='bert', choices=['bert', 'clip', 'distilbert'], help='text encoder')
-    parser.add_argument('--text_pretrained', type=bool, default=True, help='text_pretrained')
-    parser.add_argument('--image_pretrained', type=bool, default=True, help='image_pretrained')
-    parser.add_argument('--text_trainable', type=bool, default=False, help='text_trainable')
-    parser.add_argument('--image_trainable', type=bool, default=True, help='image_trainable') 
-    parser.add_argument('--only_has_image_projection', type=bool, default=False, help='None')
-    parser.add_argument('--distill', type=bool, default=True, help='whether distill')
+    parser.add_argument('--text_pretrained', type=str2bool, default=True, help='text_pretrained')
+    parser.add_argument('--image_pretrained', type=str2bool, default=True, help='image_pretrained')
+    parser.add_argument('--text_trainable', type=str2bool, default=False, help='text_trainable')
+    parser.add_argument('--image_trainable', type=str2bool, default=True, help='image_trainable') 
+    parser.add_argument('--only_has_image_projection', type=str2bool, default=False, help='None')
+    parser.add_argument('--distill', type=str2bool, default=True, help='whether distill')
     parser.add_argument('--optimize', type=str, default='reparam', choices=['reparam', 'ift'], help='matching_train')
-    parser.add_argument('--image_only', type=bool, default=False, help='None')
-    parser.add_argument('--text_only', type=bool, default=False, help='None')
-    parser.add_argument('--draw', type=bool, default=False, help='None')
-    parser.add_argument('--transfer', type=bool, default=False, help='transfer cross architecture')
-    parser.add_argument('--std', type=bool, default=True, help='standard deviation')
-    parser.add_argument('--disabled_wandb', type=bool, default=False, help='disable wandb')
-    parser.add_argument('--test_with_norm', type=bool, default=False, help='')
+    parser.add_argument('--image_only', type=str2bool, default=False, help='None')
+    parser.add_argument('--text_only', type=str2bool, default=False, help='None')
+    parser.add_argument('--draw', type=str2bool, default=False, help='None')
+    parser.add_argument('--transfer', type=str2bool, default=False, help='transfer cross architecture')
+    parser.add_argument('--std', type=str2bool, default=True, help='standard deviation')
+    parser.add_argument('--disabled_wandb', type=str2bool, default=False, help='disable wandb')
+    parser.add_argument('--test_with_norm', type=str2bool, default=False, help='')
 
     parser.add_argument('--clamp_lr', type=float, default=None, help='')
 
