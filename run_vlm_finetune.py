@@ -1,4 +1,5 @@
 import argparse
+import traceback
 import json
 import math
 import os
@@ -194,11 +195,18 @@ class Qwen2VlDataCollator:
             sample["prompt"],
             sample["answer"] if include_answer else None,
         )
-        return self.processor.apply_chat_template(
+        text = self.processor.apply_chat_template(
             messages,
             tokenize=False,
             add_generation_prompt=not include_answer,
         )
+        # Qwen2-VL base checkpoints may ship a chat template that does not
+        # expand multimodal blocks into image placeholder tokens. The processor
+        # still receives images, so the model would see visual features but zero
+        # image tokens. Add the canonical placeholder when the template omitted it.
+        if "<|image_pad|>" not in text and "<image>" not in text:
+            text = "<|vision_start|><|image_pad|><|vision_end|>\n" + text
+        return text
 
     def __call__(self, features: Sequence[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         full_texts = [self._format_text(sample, include_answer=True) for sample in features]
@@ -241,7 +249,7 @@ class Qwen2VlDataCollator:
         for key in ("input_ids", "attention_mask", "labels", "image_grid_thw", "video_grid_thw"):
             if key in batch and torch.is_tensor(batch[key]):
                 batch[key] = batch[key].long()
-        return batch
+        return dict(batch)
 
 
 def split_train_val(
@@ -747,7 +755,15 @@ def main() -> None:
     trainer = build_trainer(args, model, processor, train_dataset, eval_dataset, output_dir)
 
     start = time.time()
-    train_result = trainer.train()
+    try:
+        train_result = trainer.train()
+    except Exception:
+        rank = os.environ.get("RANK", "0")
+        local_rank = os.environ.get("LOCAL_RANK", "0")
+        error_path = output_dir / f"train_error_rank{rank}_local{local_rank}.log"
+        error_path.write_text(traceback.format_exc(), encoding="utf-8")
+        print(f"[VLM finetune] rank={rank} local_rank={local_rank} failed; traceback saved to {error_path}")
+        raise
     trainer.save_model(str(output_dir / "last_checkpoint"))
     if getattr(trainer.state, "best_model_checkpoint", None):
         best_checkpoint = trainer.state.best_model_checkpoint
