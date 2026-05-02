@@ -366,7 +366,7 @@ def build_trainer(args: argparse.Namespace, model: Any, processor: Any, train_da
     try:
         from transformers import Trainer, TrainingArguments
     except ImportError as exc:
-        raise ImportError("Training requires transformers Trainer/TrainingArguments.") from exc
+        raise ImportError(f"Training requires transformers Trainer/TrainingArguments: {exc}") from exc
 
     eval_strategy_key = "evaluation_strategy"
     try:
