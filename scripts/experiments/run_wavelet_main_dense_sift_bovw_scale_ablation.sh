@@ -22,7 +22,6 @@ TOPOLOGY_ROOT_SHARED="${SCALE_ABLATION_TOPOLOGY_ROOT:-artifacts/topology_graph_d
 CROSS_ROOT_BASE="${SCALE_ABLATION_CROSS_ROOT:-${OUTPUT_ROOT}/cross_modal_topology}"
 SELECTION_ROOT_BASE="${SCALE_ABLATION_SELECTION_ROOT:-${OUTPUT_ROOT}/subset_selection}"
 TRAIN_ROOT="${SCALE_ABLATION_TRAIN_ROOT:-${OUTPUT_ROOT}/subset_train}"
-SINGLE_REUSE_TRAIN_ROOT="${SCALE_ABLATION_SINGLE_REUSE_TRAIN_ROOT:-${TRAIN_ROOT}}"
 REPORT_BASE="${SCALE_ABLATION_REPORT_ROOT:-${OUTPUT_ROOT}/reports}"
 RUN_TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
 REPORT_DIR="${REPORT_BASE}/scale_ablation_${DATASET}_${RUN_TIMESTAMP}"
@@ -49,22 +48,30 @@ contains_group() {
   return 1
 }
 
+reuse_root_for_group() {
+  local label="$1"
+  local env_name
+  env_name="SCALE_ABLATION_$(echo "${label}" | tr '[:lower:]' '[:upper:]')_REUSE_TRAIN_ROOT"
+  if [[ -n "${!env_name:-}" ]]; then
+    echo "${!env_name}"
+  elif [[ "${label}" == single_* && -n "${SCALE_ABLATION_SINGLE_REUSE_TRAIN_ROOT:-}" ]]; then
+    echo "${SCALE_ABLATION_SINGLE_REUSE_TRAIN_ROOT}"
+  else
+    echo "${TRAIN_ROOT}"
+  fi
+}
+
 stage_log "Wavelet scale ablation start: dataset=${DATASET} model=${MODEL_TAG}"
 stage_log "  budgets=${BUDGETS} ratios=${RATIOS} seeds=${SEEDS}"
 stage_log "  output=${OUTPUT_ROOT}"
 stage_log "  run_selection=${RUN_SELECTION} run_train=${RUN_TRAIN}"
 stage_log "  run_groups=${RUN_GROUPS}"
-stage_log "  single_reuse_train_root=${SINGLE_REUSE_TRAIN_ROOT}"
 
 CONFIG_ARGS=()
 for cfg in "${CONFIGS[@]}"; do
   IFS="|" read -r label scale_type scales variant <<< "${cfg}"
   scale_path="$(echo "${scales}" | tr ',' '_')"
-  if [[ "${scale_type}" == "single" ]]; then
-    cfg_train_root="${SINGLE_REUSE_TRAIN_ROOT}"
-  else
-    cfg_train_root="${TRAIN_ROOT}"
-  fi
+  cfg_train_root="$(reuse_root_for_group "${label}")"
   CONFIG_ARGS+=("${label}|${scale_type}|${scales}|${variant}|${cfg_train_root}")
 
   if ! contains_group "${label}"; then
