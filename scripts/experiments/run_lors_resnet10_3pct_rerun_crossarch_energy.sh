@@ -117,7 +117,7 @@ fi
 TRAIN_COUNT="$(compute_train_size)"
 BUDGET_SIZE="$(ratio_to_count "${TRAIN_COUNT}" "${LORS_RESNET_RATIO}")"
 DISTILL_RUN_NAME="${LORS_RESNET_RUN_TAG}_${RATIO_TAG}_${MODEL_TAG}"
-CKPT_PATH="${LORS_RESNET_LOG_ROOT}/${LORS_RESNET_DATASET}/${DISTILL_RUN_NAME}/distilled_${LORS_ITERATION:-3000}.pt"
+CKPT_PATH="${LORS_RESNET_LOG_ROOT}/${LORS_RESNET_DATASET}/${DISTILL_RUN_NAME}/distilled_${LORS_ITERATION:-500}.pt"
 DISTILL_MEASURE="${MEASURE_DIR}/${RATIO_TAG}_${MODEL_TAG}_distill.json"
 DISTILL_TEE_LOG="${LOG_DIR}/${RATIO_TAG}_${MODEL_TAG}_distill.log"
 
@@ -150,23 +150,23 @@ python "${PROJECT_ROOT}/tools/measure_command_energy.py" \
     LORS_RUN_NAME="${DISTILL_RUN_NAME}" \
     LORS_NUM_QUERIES="${BUDGET_SIZE}" \
     LORS_NO_AUG="${LORS_NO_AUG:-1}" \
-    LORS_MINI_BATCH_SIZE="${LORS_MINI_BATCH_SIZE:-100}" \
-    LORS_ITERATION="${LORS_ITERATION:-3000}" \
+    LORS_MINI_BATCH_SIZE="${LORS_MINI_BATCH_SIZE:-50}" \
+    LORS_ITERATION="${LORS_ITERATION:-500}" \
     LORS_EVAL_IT="${LORS_EVAL_IT:-50}" \
     LORS_NUM_EVAL="${LORS_NUM_EVAL:-1}" \
-    LORS_EPOCH_EVAL_TRAIN="${LORS_EPOCH_EVAL_TRAIN:-100}" \
-    LORS_EXPERT_EPOCHS="${LORS_EXPERT_EPOCHS:-3}" \
-    LORS_SYN_STEPS="${LORS_SYN_STEPS:-20}" \
+    LORS_EPOCH_EVAL_TRAIN="${LORS_EPOCH_EVAL_TRAIN:-50}" \
+    LORS_EXPERT_EPOCHS="${LORS_EXPERT_EPOCHS:-2}" \
+    LORS_SYN_STEPS="${LORS_SYN_STEPS:-10}" \
     LORS_MAX_START_EPOCH="${LORS_MAX_START_EPOCH:-25}" \
-    LORS_BATCH_TRAIN="${LORS_BATCH_TRAIN:-128}" \
-    LORS_BATCH_TEST="${LORS_BATCH_TEST:-128}" \
+    LORS_BATCH_TRAIN="${LORS_BATCH_TRAIN:-32}" \
+    LORS_BATCH_TEST="${LORS_BATCH_TEST:-64}" \
     bash "${SCRIPT_DIR}/run_lors_baseline.sh"
 
 if [[ ! -f "${CKPT_PATH}" ]]; then
-  CKPT_PATH="$(find "${LORS_RESNET_LOG_ROOT}/${LORS_RESNET_DATASET}" -type f -name "distilled_${LORS_ITERATION:-3000}.pt" -path "*${DISTILL_RUN_NAME}*" | sort | tail -n 1)"
+  CKPT_PATH="$(find "${LORS_RESNET_LOG_ROOT}/${LORS_RESNET_DATASET}" -type f -name "distilled_${LORS_ITERATION:-500}.pt" -path "*${DISTILL_RUN_NAME}*" | sort | tail -n 1)"
 fi
 if [[ -z "${CKPT_PATH}" || ! -f "${CKPT_PATH}" ]]; then
-  echo "No distilled checkpoint found after distill. Expected: ${LORS_RESNET_LOG_ROOT}/${LORS_RESNET_DATASET}/${DISTILL_RUN_NAME}/distilled_${LORS_ITERATION:-3000}.pt" >&2
+  echo "No distilled checkpoint found after distill. Expected: ${LORS_RESNET_LOG_ROOT}/${LORS_RESNET_DATASET}/${DISTILL_RUN_NAME}/distilled_${LORS_ITERATION:-500}.pt" >&2
   exit 1
 fi
 stage_log "LoRS distill checkpoint: ${CKPT_PATH}"
@@ -207,11 +207,11 @@ for eval_backbone in ${LORS_RESNET_EVAL_BACKBONES}; do
       --batch_size_test "${LORS_VIT_BATCH_TEST:-64}"
     )
   else
-    eval_extra_args+=(
-      --epoch_eval_train "${LORS_EPOCH_EVAL_TRAIN:-100}"
-      --batch_train "${LORS_BATCH_TRAIN:-128}"
-      --batch_size_train "${LORS_BATCH_TRAIN:-128}"
-      --batch_size_test "${LORS_BATCH_TEST:-128}"
+      eval_extra_args+=(
+      --epoch_eval_train "${LORS_EPOCH_EVAL_TRAIN:-50}"
+      --batch_train "${LORS_BATCH_TRAIN:-32}"
+      --batch_size_train "${LORS_BATCH_TRAIN:-32}"
+      --batch_size_test "${LORS_BATCH_TEST:-64}"
     )
   fi
 
