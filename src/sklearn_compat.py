@@ -33,6 +33,12 @@ def install_sklearn_metrics_stub_if_broken():
     metrics_stub.__path__ = []
     pairwise_stub = types.ModuleType("sklearn.metrics.pairwise")
     pairwise_stub.__spec__ = importlib.machinery.ModuleSpec("sklearn.metrics.pairwise", loader=None)
+    decomposition_stub = types.ModuleType("sklearn.decomposition")
+    decomposition_stub.__spec__ = importlib.machinery.ModuleSpec("sklearn.decomposition", loader=None)
+    neighbors_stub = types.ModuleType("sklearn.neighbors")
+    neighbors_stub.__spec__ = importlib.machinery.ModuleSpec("sklearn.neighbors", loader=None)
+    random_projection_stub = types.ModuleType("sklearn.random_projection")
+    random_projection_stub.__spec__ = importlib.machinery.ModuleSpec("sklearn.random_projection", loader=None)
 
     def roc_curve(y_true, y_score, *args, **kwargs):
         y_true = np.asarray(y_true)
@@ -163,6 +169,100 @@ def install_sklearn_metrics_stub_if_broken():
                 matrix[index[truth], index[pred]] += 1
         return matrix
 
+    class PCA:
+        def __init__(self, n_components=None, svd_solver=None, random_state=None, *args, **kwargs):
+            self.n_components = n_components
+            self.svd_solver = svd_solver
+            self.random_state = random_state
+            self.components_ = None
+            self.mean_ = None
+            self.explained_variance_ = None
+
+        def fit(self, X, y=None):
+            X = np.asarray(X, dtype=np.float32)
+            if X.ndim != 2:
+                raise ValueError("PCA expects a 2D array")
+            n_components = X.shape[1] if self.n_components is None else int(self.n_components)
+            n_components = max(1, min(n_components, X.shape[0], X.shape[1]))
+            self.mean_ = np.mean(X, axis=0, keepdims=True).astype(np.float32)
+            centered = X - self.mean_
+            _, singular_values, vt = np.linalg.svd(centered, full_matrices=False)
+            self.components_ = vt[:n_components].astype(np.float32, copy=False)
+            denom = max(X.shape[0] - 1, 1)
+            self.explained_variance_ = ((singular_values[:n_components] ** 2) / denom).astype(np.float32, copy=False)
+            return self
+
+        def transform(self, X):
+            if self.components_ is None or self.mean_ is None:
+                raise ValueError("PCA instance is not fitted yet")
+            X = np.asarray(X, dtype=np.float32)
+            return ((X - self.mean_) @ self.components_.T).astype(np.float32, copy=False)
+
+        def fit_transform(self, X, y=None):
+            return self.fit(X, y=y).transform(X)
+
+    class GaussianRandomProjection:
+        def __init__(self, n_components="auto", random_state=None, *args, **kwargs):
+            self.n_components = n_components
+            self.random_state = random_state
+            self.components_ = None
+
+        def fit(self, X, y=None):
+            X = np.asarray(X, dtype=np.float32)
+            n_components = X.shape[1] if self.n_components in (None, "auto") else int(self.n_components)
+            n_components = max(1, min(n_components, X.shape[1]))
+            rng = np.random.default_rng(None if self.random_state is None else int(self.random_state))
+            self.components_ = (
+                rng.normal(0.0, 1.0 / np.sqrt(float(n_components)), size=(n_components, X.shape[1]))
+                .astype(np.float32, copy=False)
+            )
+            return self
+
+        def transform(self, X):
+            if self.components_ is None:
+                raise ValueError("GaussianRandomProjection instance is not fitted yet")
+            X = np.asarray(X, dtype=np.float32)
+            return (X @ self.components_.T).astype(np.float32, copy=False)
+
+        def fit_transform(self, X, y=None):
+            return self.fit(X, y=y).transform(X)
+
+    class NearestNeighbors:
+        def __init__(self, n_neighbors=5, metric="minkowski", algorithm="auto", n_jobs=None, *args, **kwargs):
+            self.n_neighbors = int(n_neighbors)
+            self.metric = metric
+            self.algorithm = algorithm
+            self.n_jobs = n_jobs
+            self._fit_X = None
+
+        def fit(self, X, y=None):
+            self._fit_X = np.asarray(X, dtype=np.float32)
+            if self._fit_X.ndim != 2:
+                raise ValueError("NearestNeighbors expects a 2D array")
+            return self
+
+        def kneighbors(self, X=None, n_neighbors=None, return_distance=True):
+            if self._fit_X is None:
+                raise ValueError("NearestNeighbors instance is not fitted yet")
+            queries = self._fit_X if X is None else np.asarray(X, dtype=np.float32)
+            k = max(1, min(int(n_neighbors or self.n_neighbors), self._fit_X.shape[0]))
+            if str(self.metric) == "cosine":
+                distances = 1.0 - cosine_similarity(queries, self._fit_X)
+            else:
+                q_norm = np.sum(queries * queries, axis=1, keepdims=True)
+                x_norm = np.sum(self._fit_X * self._fit_X, axis=1, keepdims=True).T
+                distances = np.maximum(q_norm + x_norm - 2.0 * (queries @ self._fit_X.T), 0.0)
+                distances = np.sqrt(distances, dtype=np.float32)
+            indices = np.argpartition(distances, kth=k - 1, axis=1)[:, :k]
+            row = np.arange(distances.shape[0])[:, None]
+            local_dist = distances[row, indices]
+            order = np.argsort(local_dist, axis=1)
+            indices = indices[row, order].astype(np.int64, copy=False)
+            local_dist = local_dist[row, order].astype(np.float32, copy=False)
+            if return_distance:
+                return local_dist, indices
+            return indices
+
     metrics_stub.roc_curve = roc_curve
     metrics_stub.roc_auc_score = roc_auc_score
     metrics_stub.accuracy_score = accuracy_score
@@ -174,8 +274,17 @@ def install_sklearn_metrics_stub_if_broken():
     metrics_stub.classification_report = classification_report
     metrics_stub.confusion_matrix = confusion_matrix
     pairwise_stub.cosine_similarity = cosine_similarity
+    decomposition_stub.PCA = PCA
+    neighbors_stub.NearestNeighbors = NearestNeighbors
+    random_projection_stub.GaussianRandomProjection = GaussianRandomProjection
     metrics_stub.pairwise = pairwise_stub
     sklearn_stub.metrics = metrics_stub
+    sklearn_stub.decomposition = decomposition_stub
+    sklearn_stub.neighbors = neighbors_stub
+    sklearn_stub.random_projection = random_projection_stub
     sys.modules["sklearn"] = sklearn_stub
     sys.modules["sklearn.metrics"] = metrics_stub
     sys.modules["sklearn.metrics.pairwise"] = pairwise_stub
+    sys.modules["sklearn.decomposition"] = decomposition_stub
+    sys.modules["sklearn.neighbors"] = neighbors_stub
+    sys.modules["sklearn.random_projection"] = random_projection_stub

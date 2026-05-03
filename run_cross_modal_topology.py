@@ -8,6 +8,10 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
 os.environ.setdefault("BLIS_NUM_THREADS", "1")
 
+from src.sklearn_compat import install_sklearn_metrics_stub_if_broken
+
+install_sklearn_metrics_stub_if_broken()
+
 from src.cross_modal_topology import run_cross_modal_topology
 from src.topology_visualization import add_topology_visualization_args, extract_topology_visualization_config, visualize_cross_modal_topology_results
 

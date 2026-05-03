@@ -308,6 +308,19 @@ run_repblend_budget() {
   for eval_backbone in ${EVAL_BACKBONES}; do
     local eval_log="${LOG_DIR}/repblend_${budget_tag}_${eval_backbone}_evaluate.log"
     local eval_measure="${MEASURE_DIR}/repblend_${budget_tag}_${eval_backbone}_evaluate.json"
+    local eval_extra_args=()
+    if [[ "${eval_backbone}" == "vit_b16" && "${REPBLEND_VIT_USE_LOW_LR_FINETUNE:-1}" == "1" ]]; then
+      eval_extra_args+=(
+        --image_trainable true
+        --text_trainable false
+        --lr_teacher_img "${REPBLEND_VIT_LOWLR_IMG:-0.001}"
+        --lr_teacher_txt "${REPBLEND_VIT_LOWLR_TXT:-0.05}"
+        --epoch_eval_train "${REPBLEND_VIT_EPOCH_EVAL_TRAIN:-300}"
+        --batch_train "${REPBLEND_VIT_BATCH_TRAIN:-32}"
+        --batch_size_train "${REPBLEND_VIT_BATCH_TRAIN:-32}"
+        --batch_size_test "${REPBLEND_VIT_BATCH_TEST:-64}"
+      )
+    fi
     stage_log "Measure RepBlend train/eval: ${budget_tag} eval_backbone=${eval_backbone}"
     measure_command "repblend_${budget_tag}_${eval_backbone}_evaluate" "${eval_measure}" "${eval_log}" "${PROJECT_ROOT}" \
       env CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" python "${PROJECT_ROOT}/evaluate_only.py" \
@@ -324,7 +337,8 @@ run_repblend_budget() {
         --batch_size_train "${REPBLEND_EVAL_BATCH_TRAIN:-128}" \
         --batch_size_test "${REPBLEND_EVAL_BATCH_TEST:-128}" \
         --disabled_wandb True \
-        --no_aug
+        --no_aug \
+        "${eval_extra_args[@]}"
     append_manifest method "repblend" dataset "${DATASET}" budget_type "size" budget_value "${budget}" budget_tag "${budget_tag}" \
       eval_backbone "${eval_backbone}" stage "training_eval" gpu_count "${GPU_COUNT}" checkpoint_path "${checkpoint_path}" \
       evaluate_log "${eval_log}" log_path "${eval_log}" measurement_path "${eval_measure}" skipped "0"
