@@ -28,6 +28,10 @@ compute_train_size() {
   python - "${LORS_RATIO_DATASET}" "${IMAGE_ROOT}" "${ANN_ROOT}" <<'PY'
 import sys
 from types import SimpleNamespace
+from src.sklearn_compat import install_sklearn_metrics_stub_if_broken
+
+install_sklearn_metrics_stub_if_broken()
+
 from data import create_dataset
 
 args = SimpleNamespace(
@@ -78,6 +82,13 @@ iteration = sys.argv[3]
 if not log_path.exists():
     raise SystemExit(1)
 text = log_path.read_text(encoding="utf-8", errors="ignore")
+reuse_matches = re.findall(r"Reusing existing distilled checkpoint:\s*(.+)", text)
+if reuse_matches:
+    ckpt = Path(reuse_matches[-1].strip())
+    if not ckpt.is_absolute():
+        ckpt = project_root / ckpt
+    print(ckpt)
+    raise SystemExit(0)
 matches = re.findall(r"Saving to (.+)", text)
 if not matches:
     raise SystemExit(1)
@@ -126,6 +137,18 @@ for ratio in ${LORS_RATIO_VALUES}; do
       eval_extra_args=()
       if [[ "${LORS_NO_AUG:-1}" == "1" ]]; then
         eval_extra_args+=(--no_aug)
+      fi
+      if [[ "${eval_backbone}" == "vit_b16" && "${LORS_VIT_USE_LOW_LR_FINETUNE:-1}" == "1" ]]; then
+        eval_extra_args+=(
+          --image_trainable true
+          --text_trainable false
+          --lr_teacher_img "${LORS_VIT_LOWLR_IMG:-0.001}"
+          --lr_teacher_txt "${LORS_VIT_LOWLR_TXT:-0.05}"
+          --epoch_eval_train "${LORS_VIT_EPOCH_EVAL_TRAIN:-300}"
+          --batch_train "${LORS_VIT_BATCH_TRAIN:-32}"
+          --batch_size_train "${LORS_VIT_BATCH_TRAIN:-32}"
+          --batch_size_test "${LORS_VIT_BATCH_TEST:-64}"
+        )
       fi
 
       env CUDA_VISIBLE_DEVICES="${LORS_RATIO_DEVICE}" \

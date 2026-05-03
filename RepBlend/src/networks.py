@@ -1,5 +1,22 @@
 # import pdb
 # import warnings
+import importlib.util
+from pathlib import Path
+
+
+def install_project_sklearn_compat():
+    project_root = Path(__file__).resolve().parents[2]
+    compat_path = project_root / "src" / "sklearn_compat.py"
+    if not compat_path.exists():
+        return
+    spec = importlib.util.spec_from_file_location("_faster_sklearn_compat", compat_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.install_sklearn_metrics_stub_if_broken()
+
+
+install_project_sklearn_compat()
+
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
@@ -13,7 +30,6 @@ from transformers import BertTokenizer, BertModel, DistilBertModel, DistilBertTo
 from transformers.models.bert.modeling_bert import BertAttention, BertConfig
 import functools
 import copy
-from pathlib import Path
 from transformers import AutoTokenizer, AutoModel
 
 from .similarity_mining import MultilabelContrastiveLoss
