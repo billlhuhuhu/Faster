@@ -111,7 +111,32 @@ PY
 
 find_checkpoint() {
   if [[ -n "${LORS3_CHECKPOINT_PATH:-}" ]]; then
-    echo "${LORS3_CHECKPOINT_PATH}"
+    python - "${PROJECT_ROOT}" "${LORS3_CHECKPOINT_PATH}" <<'PY'
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+path = Path(sys.argv[2])
+if not path.is_absolute():
+    path = root / path
+
+if path.is_file():
+    print(path)
+    raise SystemExit(0)
+
+if path.is_dir():
+    candidates = []
+    for pattern in ("distilled_*.pt", "**/distilled_*.pt", "*.pt", "**/*.pt"):
+        for ckpt in path.glob(pattern):
+            if ckpt.is_file():
+                candidates.append((ckpt.stat().st_mtime, ckpt))
+    if candidates:
+        candidates.sort(reverse=True)
+        print(candidates[0][1])
+        raise SystemExit(0)
+
+raise SystemExit(f"LORS3_CHECKPOINT_PATH does not point to a checkpoint or searchable directory: {path}")
+PY
     return 0
   fi
   python - "${PROJECT_ROOT}" <<'PY'
@@ -125,12 +150,14 @@ patterns = [
     "artifacts/arch_bias_energy_3pct/lors/logs/*/lors_ratio_03_distill_from10buffers.log",
     "experiments/logs/lors_baseline_flickr_ratio_03_from10buffers_energy_*/distill.log",
     "logged_files/flickr/*/distilled_3000.pt",
+    "logged_files/flickr/*/distilled_*.pt",
+    "logged_files/flickr/**/distilled_*.pt",
 ]
 
 candidates = []
 for pattern in patterns:
     for path in root.glob(pattern):
-        if path.name == "distilled_3000.pt":
+        if path.suffix == ".pt":
             candidates.append((path.stat().st_mtime, path))
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
@@ -142,9 +169,13 @@ for pattern in patterns:
             ckpt = save_dir / "distilled_3000.pt"
             if ckpt.exists():
                 candidates.append((ckpt.stat().st_mtime, ckpt))
+            else:
+                distilled = sorted(save_dir.glob("distilled_*.pt"), key=lambda p: p.stat().st_mtime, reverse=True)
+                if distilled:
+                    candidates.append((distilled[0].stat().st_mtime, distilled[0]))
 
 if not candidates:
-    raise SystemExit("No distilled_3000.pt found. Set LORS3_CHECKPOINT_PATH=/path/to/distilled_3000.pt")
+    raise SystemExit("No distilled checkpoint found. Set LORS3_CHECKPOINT_PATH=/path/to/distilled_*.pt or /path/to/logged_files/flickr")
 candidates.sort(reverse=True)
 print(candidates[0][1])
 PY
