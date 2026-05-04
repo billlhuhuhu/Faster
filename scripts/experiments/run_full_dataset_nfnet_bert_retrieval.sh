@@ -8,7 +8,8 @@ DATASETS="${FULL_RETRIEVAL_DATASETS:-flickr coco}"
 BACKBONE="${FULL_RETRIEVAL_BACKBONE:-nfnet}"
 TEXT_ENCODER="${FULL_RETRIEVAL_TEXT_ENCODER:-bert}"
 SEEDS="${FULL_RETRIEVAL_SEEDS:-0}"
-OUTPUT_ROOT="${FULL_RETRIEVAL_OUTPUT_ROOT:-artifacts/full_dataset_retrieval_nfnet_bert}"
+FULL_RETRIEVAL_INDEX_MODE="${FULL_RETRIEVAL_INDEX_MODE:-image_unique}"
+OUTPUT_ROOT="${FULL_RETRIEVAL_OUTPUT_ROOT:-artifacts/full_dataset_retrieval_nfnet_bert_upper_bound}"
 INDICES_ROOT="${FULL_RETRIEVAL_INDICES_ROOT:-${OUTPUT_ROOT}/selected_indices_full}"
 TRAIN_ROOT="${FULL_RETRIEVAL_TRAIN_ROOT:-${OUTPUT_ROOT}/subset_train_full}"
 REPORT_ROOT_FULL="${FULL_RETRIEVAL_REPORT_ROOT:-${OUTPUT_ROOT}/reports}"
@@ -16,18 +17,32 @@ RUN_TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
 REPORT_DIR="${REPORT_ROOT_FULL}/full_dataset_nfnet_bert_${RUN_TIMESTAMP}"
 mkdir -p "${REPORT_DIR}" "${INDICES_ROOT}" "${TRAIN_ROOT}"
 
-BATCH_TRAIN="${FULL_RETRIEVAL_BATCH_TRAIN:-${BATCH_SIZE_TRAIN:-${BATCH_TRAIN}}}"
-BATCH_TEST="${FULL_RETRIEVAL_BATCH_TEST:-${BATCH_SIZE_TEST:-${BATCH_TEST}}}"
+BATCH_TRAIN="${FULL_RETRIEVAL_BATCH_TRAIN:-${BATCH_SIZE_TRAIN:-32}}"
+BATCH_TEST="${FULL_RETRIEVAL_BATCH_TEST:-${BATCH_SIZE_TEST:-128}}"
 TEXT_BATCH_SIZE="${FULL_RETRIEVAL_TEXT_BATCH_SIZE:-${TEXT_BATCH_SIZE}}"
+FULL_EPOCHS="${FULL_RETRIEVAL_EPOCHS:-50}"
+FULL_EVAL_INTERVAL="${FULL_RETRIEVAL_EVAL_INTERVAL:-1}"
+FULL_LR_IMG="${FULL_RETRIEVAL_LR_IMG:-0.001}"
+FULL_LR_TXT="${FULL_RETRIEVAL_LR_TXT:-0.05}"
+FULL_WEIGHT_DECAY="${FULL_RETRIEVAL_WEIGHT_DECAY:-5e-4}"
+FULL_LR_DECAY_GAMMA="${FULL_RETRIEVAL_LR_DECAY_GAMMA:-0.1}"
+FULL_IMAGE_TRAINABLE="${FULL_RETRIEVAL_IMAGE_TRAINABLE:-true}"
+FULL_TEXT_TRAINABLE="${FULL_RETRIEVAL_TEXT_TRAINABLE:-false}"
 
 MODEL_TAG="$(sanitize_component "${BACKBONE}")_$(sanitize_component "${TEXT_ENCODER}")"
-SUBSET_TAG="${FULL_RETRIEVAL_SUBSET_TAG:-full_dataset_nfnet_bert}"
+SUBSET_TAG="${FULL_RETRIEVAL_SUBSET_TAG:-full_${FULL_RETRIEVAL_INDEX_MODE}_${MODEL_TAG}_upper_bound}"
+
+if [[ "${FULL_RETRIEVAL_INDEX_MODE}" != "image_unique" && "${FULL_RETRIEVAL_INDEX_MODE}" != "pair_all" ]]; then
+  echo "Unsupported FULL_RETRIEVAL_INDEX_MODE=${FULL_RETRIEVAL_INDEX_MODE}; expected image_unique or pair_all" >&2
+  exit 1
+fi
 
 generate_full_indices() {
   local dataset="$1"
   local image_root="$2"
   local output_path="$3"
-  python - "${dataset}" "${image_root}" "${ANN_ROOT}" "${output_path}" <<'PY'
+  local index_mode="$4"
+  python - "${dataset}" "${image_root}" "${ANN_ROOT}" "${output_path}" "${index_mode}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -39,7 +54,7 @@ install_sklearn_metrics_stub_if_broken()
 
 from data import create_dataset
 
-dataset, image_root, ann_root, output_path = sys.argv[1:5]
+dataset, image_root, ann_root, output_path, index_mode = sys.argv[1:6]
 args = SimpleNamespace(
     dataset=dataset,
     image_root=image_root,
@@ -49,21 +64,48 @@ args = SimpleNamespace(
     return_sample_idx=True,
 )
 train_dataset, _, _ = create_dataset(args)
-indices = list(range(len(train_dataset)))
+if index_mode == "pair_all":
+    indices = list(range(len(train_dataset)))
+elif index_mode == "image_unique":
+    indices = []
+    seen = set()
+    for sample_idx in range(len(train_dataset)):
+        meta = train_dataset.get_pair_metadata(sample_idx)
+        key = meta.get("raw_image_id", meta.get("image", meta.get("img_id")))
+        if key in seen:
+            continue
+        seen.add(key)
+        indices.append(sample_idx)
+else:
+    raise ValueError(f"Unsupported index_mode: {index_mode}")
 path = Path(output_path)
 path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(json.dumps({"selected_indices": indices}, ensure_ascii=False), encoding="utf-8")
+path.write_text(
+    json.dumps(
+        {
+            "selected_indices": indices,
+            "selection_mode": index_mode,
+            "num_train_pairs": len(train_dataset),
+            "num_selected_records": len(indices),
+        },
+        ensure_ascii=False,
+        indent=2,
+    ),
+    encoding="utf-8",
+)
 print(len(indices))
 PY
 }
 
-stage_log "Full-dataset retrieval start: datasets=${DATASETS} model=${MODEL_TAG} seeds=${SEEDS}"
+stage_log "Full-dataset retrieval upper-bound start: datasets=${DATASETS} model=${MODEL_TAG} seeds=${SEEDS}"
+stage_log "  index_mode=${FULL_RETRIEVAL_INDEX_MODE} subset_tag=${SUBSET_TAG}"
+stage_log "  train config: epochs=${FULL_EPOCHS} batch_train=${BATCH_TRAIN} batch_test=${BATCH_TEST} lr_img=${FULL_LR_IMG} lr_txt=${FULL_LR_TXT} image_trainable=${FULL_IMAGE_TRAINABLE} text_trainable=${FULL_TEXT_TRAINABLE}"
 stage_log "  train_root=${TRAIN_ROOT}"
 stage_log "  report_dir=${REPORT_DIR}"
 
 for dataset in ${DATASETS}; do
   image_root="$(get_image_root "${dataset}")"
-  full_indices_path="${INDICES_ROOT}/${dataset}/train/${MODEL_TAG}/full/seed_0/selected_indices.json"
+  full_indices_path="${INDICES_ROOT}/${dataset}/train/${MODEL_TAG}/${FULL_RETRIEVAL_INDEX_MODE}/seed_0/selected_indices.json"
   if [[ -f "${full_indices_path}" ]]; then
     subset_size="$(python - "${full_indices_path}" <<'PY'
 import json
@@ -76,9 +118,9 @@ PY
 )"
     stage_log "Skip full indices: ${dataset} existing ${full_indices_path} size=${subset_size}"
   else
-    stage_log "Generate full indices: dataset=${dataset}"
-    subset_size="$(generate_full_indices "${dataset}" "${image_root}" "${full_indices_path}")"
-    stage_log "Full indices ready: dataset=${dataset} size=${subset_size}"
+    stage_log "Generate full indices: dataset=${dataset} mode=${FULL_RETRIEVAL_INDEX_MODE}"
+    subset_size="$(generate_full_indices "${dataset}" "${image_root}" "${full_indices_path}" "${FULL_RETRIEVAL_INDEX_MODE}")"
+    stage_log "Full indices ready: dataset=${dataset} mode=${FULL_RETRIEVAL_INDEX_MODE} size=${subset_size}"
   fi
 
   for seed in ${SEEDS}; do
@@ -114,8 +156,14 @@ PY
       --batch_size_test "${BATCH_TEST}" \
       --text_batch_size "${TEXT_BATCH_SIZE}" \
       --num_workers "${NUM_WORKERS}" \
-      --epochs "${EPOCHS}" \
-      --eval_interval "${EVAL_INTERVAL}" \
+      --epochs "${FULL_EPOCHS}" \
+      --eval_interval "${FULL_EVAL_INTERVAL}" \
+      --lr_teacher_img "${FULL_LR_IMG}" \
+      --lr_teacher_txt "${FULL_LR_TXT}" \
+      --weight_decay "${FULL_WEIGHT_DECAY}" \
+      --lr_decay_gamma "${FULL_LR_DECAY_GAMMA}" \
+      --image_trainable "${FULL_IMAGE_TRAINABLE}" \
+      --text_trainable "${FULL_TEXT_TRAINABLE}" \
       --seed "${seed}" \
       --device "${DEVICE}" \
       "${train_extra_args[@]}" \
@@ -226,7 +274,7 @@ print(f"saved summary md: {report_dir / 'full_dataset_retrieval_summary.md'}")
 print(f"collected runs: {len(raw_rows)}")
 PY
 
-stage_log "Full-dataset retrieval done"
+stage_log "Full-dataset retrieval upper-bound done"
 stage_log "  report_dir=${REPORT_DIR}"
 stage_log "  summary_csv=${REPORT_DIR}/full_dataset_retrieval_summary.csv"
 stage_log "  summary_md=${REPORT_DIR}/full_dataset_retrieval_summary.md"
