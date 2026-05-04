@@ -14,7 +14,7 @@ PY
 )"
 UPSTREAM_BACKBONE="${ARCH_SUPP_UPSTREAM_BACKBONE:-resnet10}"
 TEXT_ENCODER="${ARCH_SUPP_TEXT_ENCODER:-bert}"
-EVAL_BACKBONE="${ARCH_SUPP_EVAL_BACKBONE:-resnet10}"
+EVAL_BACKBONES="${ARCH_SUPP_EVAL_BACKBONES:-${ARCH_SUPP_EVAL_BACKBONE:-resnet10}}"
 METHODS="${ARCH_SUPP_METHODS:-repblend lors}"
 RUN_TAG="${ARCH_SUPP_RUN_TAG:-resnet10_downstream_supp_$(date '+%Y%m%d_%H%M%S')}"
 OUTPUT_ROOT="${ARCH_SUPP_OUTPUT_ROOT:-artifacts/arch_bias_energy_3pct/resnet10_downstream_supplement}"
@@ -193,6 +193,16 @@ run_eval() {
   local model_root="$7"
   local log_path="${LOG_DIR}/${method}_${RATIO_TAG}_${EVAL_BACKBONE}_evaluate.log"
   local measurement_path="${MEASURE_DIR}/${method}_${RATIO_TAG}_${EVAL_BACKBONE}_evaluate.json"
+  local eval_extra_args=()
+
+  if [[ "${EVAL_BACKBONE}" == "vit_b16" ]]; then
+    eval_extra_args+=(
+      --image_trainable true
+      --text_trainable false
+      --lr_teacher_img "${ARCH_SUPP_VIT_LR_IMG:-0.001}"
+      --lr_teacher_txt "${ARCH_SUPP_VIT_LR_TXT:-0.05}"
+    )
+  fi
 
   if [[ -z "${ckpt_path}" || ! -f "${ckpt_path}" ]]; then
     stage_log "Missing ${method} checkpoint, skip ${EVAL_BACKBONE}: ${ckpt_path}"
@@ -219,7 +229,8 @@ run_eval() {
       --batch_size_train "${batch_train}" \
       --batch_size_test "${batch_test}" \
       --disabled_wandb True \
-      --no_aug
+      --no_aug \
+      "${eval_extra_args[@]}"
 
   append_manifest method "${method}" dataset "${DATASET}" budget_type "ratio" budget_value "${RATIO}" budget_tag "${RATIO_TAG}" \
     eval_backbone "${EVAL_BACKBONE}" stage "training_eval" gpu_count "${GPU_COUNT}" checkpoint_path "${ckpt_path}" \
@@ -228,23 +239,41 @@ run_eval() {
 
 stage_log "Supplement downstream resnet10 evaluation start"
 stage_log "  methods=${METHODS}"
-stage_log "  dataset=${DATASET} ratio=${RATIO_TAG} upstream=${UPSTREAM_BACKBONE}+${TEXT_ENCODER} eval=${EVAL_BACKBONE}+${TEXT_ENCODER}"
+stage_log "  dataset=${DATASET} ratio=${RATIO_TAG} upstream=${UPSTREAM_BACKBONE}+${TEXT_ENCODER} eval_backbones=${EVAL_BACKBONES}"
 stage_log "  output=${RUN_ROOT}"
 
 if method_enabled repblend; then
   REPBLEND_CKPT="$(find_repblend_checkpoint || true)"
   stage_log "RepBlend checkpoint: ${REPBLEND_CKPT:-<not found>}"
-  run_eval "repblend" "${REPBLEND_CKPT:-}" "${REPBLEND_LOSS_TYPE}" "${REPBLEND_CUDA_VISIBLE_DEVICES}" \
-    "${REPBLEND_EVAL_BATCH_TRAIN:-32}" "${REPBLEND_EVAL_BATCH_TEST:-64}" \
-    "${REPBLEND_MODEL_CHECKPOINT_ROOT:-${PROJECT_ROOT}/distill_utils/checkpoints}"
+  for EVAL_BACKBONE in ${EVAL_BACKBONES}; do
+    if [[ "${EVAL_BACKBONE}" == "vit_b16" ]]; then
+      ARCH_SUPP_EPOCH_EVAL_TRAIN="${REPBLEND_VIT_EPOCH_EVAL_TRAIN:-300}" \
+      run_eval "repblend" "${REPBLEND_CKPT:-}" "${REPBLEND_LOSS_TYPE}" "${REPBLEND_CUDA_VISIBLE_DEVICES}" \
+        "${REPBLEND_VIT_BATCH_TRAIN:-32}" "${REPBLEND_VIT_BATCH_TEST:-64}" \
+        "${REPBLEND_MODEL_CHECKPOINT_ROOT:-${PROJECT_ROOT}/distill_utils/checkpoints}"
+    else
+      run_eval "repblend" "${REPBLEND_CKPT:-}" "${REPBLEND_LOSS_TYPE}" "${REPBLEND_CUDA_VISIBLE_DEVICES}" \
+        "${REPBLEND_EVAL_BATCH_TRAIN:-32}" "${REPBLEND_EVAL_BATCH_TEST:-64}" \
+        "${REPBLEND_MODEL_CHECKPOINT_ROOT:-${PROJECT_ROOT}/distill_utils/checkpoints}"
+    fi
+  done
 fi
 
 if method_enabled lors; then
   LORS_CKPT="$(find_lors_checkpoint || true)"
   stage_log "LoRS checkpoint: ${LORS_CKPT:-<not found>}"
-  run_eval "lors" "${LORS_CKPT:-}" "${LORS_LOSS_TYPE}" "${LORS_CUDA_VISIBLE_DEVICES}" \
-    "${LORS_EVAL_BATCH_TRAIN:-32}" "${LORS_EVAL_BATCH_TEST:-64}" \
-    "${LORS_MODEL_CHECKPOINT_ROOT:-${PROJECT_ROOT}/distill_utils/checkpoints}"
+  for EVAL_BACKBONE in ${EVAL_BACKBONES}; do
+    if [[ "${EVAL_BACKBONE}" == "vit_b16" ]]; then
+      ARCH_SUPP_EPOCH_EVAL_TRAIN="${LORS_VIT_EPOCH_EVAL_TRAIN:-300}" \
+      run_eval "lors" "${LORS_CKPT:-}" "${LORS_LOSS_TYPE}" "${LORS_CUDA_VISIBLE_DEVICES}" \
+        "${LORS_VIT_BATCH_TRAIN:-32}" "${LORS_VIT_BATCH_TEST:-64}" \
+        "${LORS_MODEL_CHECKPOINT_ROOT:-${PROJECT_ROOT}/distill_utils/checkpoints}"
+    else
+      run_eval "lors" "${LORS_CKPT:-}" "${LORS_LOSS_TYPE}" "${LORS_CUDA_VISIBLE_DEVICES}" \
+        "${LORS_EVAL_BATCH_TRAIN:-32}" "${LORS_EVAL_BATCH_TEST:-64}" \
+        "${LORS_MODEL_CHECKPOINT_ROOT:-${PROJECT_ROOT}/distill_utils/checkpoints}"
+    fi
+  done
 fi
 
 python "${PROJECT_ROOT}/tools/build_supplemental_arch_energy_tables.py" \
