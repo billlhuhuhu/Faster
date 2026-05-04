@@ -14,7 +14,7 @@ PY
 )"
 UPSTREAM_BACKBONE="${ARCH_SUPP_UPSTREAM_BACKBONE:-resnet10}"
 TEXT_ENCODER="${ARCH_SUPP_TEXT_ENCODER:-bert}"
-EVAL_BACKBONES="${ARCH_SUPP_EVAL_BACKBONES:-${ARCH_SUPP_EVAL_BACKBONE:-resnet10}}"
+EVAL_BACKBONES="${ARCH_SUPP_EVAL_BACKBONES:-${ARCH_SUPP_EVAL_BACKBONE:-nfnet resnet50 vit_b16 resnet10}}"
 METHODS="${ARCH_SUPP_METHODS:-repblend lors}"
 RUN_TAG="${ARCH_SUPP_RUN_TAG:-resnet10_downstream_supp_$(date '+%Y%m%d_%H%M%S')}"
 OUTPUT_ROOT="${ARCH_SUPP_OUTPUT_ROOT:-artifacts/arch_bias_energy_3pct/resnet10_downstream_supplement}"
