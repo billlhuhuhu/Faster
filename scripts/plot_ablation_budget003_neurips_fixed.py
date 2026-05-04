@@ -123,8 +123,8 @@ def create_ablation_chart(data_path: str, output_prefix: str, budget: float = 0.
     full_mR = float(df.loc[df["method"] == "flickr", "mR"].iloc[0])
     drops = mR_values - full_mR
 
-    fig = plt.figure(figsize=(9.6, 3.6), constrained_layout=False)
-    gs = fig.add_gridspec(1, 2, width_ratios=[1.08, 1.75], wspace=0.28)
+    fig = plt.figure(figsize=(10.2, 3.8), constrained_layout=False)
+    gs = fig.add_gridspec(1, 2, width_ratios=[1.0, 1.0], wspace=0.26)
     fig.suptitle("Flickr, budget = 0.03", fontsize=12, y=0.985)
 
     ax1 = fig.add_subplot(gs[0, 0])
@@ -171,17 +171,6 @@ def create_ablation_chart(data_path: str, output_prefix: str, budget: float = 0.
     ax1.spines["top"].set_visible(False)
     ax1.spines["right"].set_visible(False)
     ax1.set_title("(a) Overall Ablation Summary", fontweight="bold", fontsize=9, pad=9)
-    ax1.text(
-        0.0,
-        1.005,
-        "Numbers in parentheses denote mR change vs Full / Ours.",
-        transform=ax1.transAxes,
-        ha="left",
-        va="bottom",
-        fontsize=6.3,
-        color="#666666",
-        clip_on=False,
-    )
 
     ax2 = fig.add_subplot(gs[0, 1])
     cmap = LinearSegmentedColormap.from_list(
@@ -228,7 +217,7 @@ def create_ablation_chart(data_path: str, output_prefix: str, budget: float = 0.
     cbar.set_label("Recall", fontsize=7)
 
     os.makedirs(os.path.dirname(output_prefix), exist_ok=True)
-    fig.subplots_adjust(left=0.10, right=0.965, top=0.84, bottom=0.18, wspace=0.30)
+    fig.subplots_adjust(left=0.08, right=0.965, top=0.84, bottom=0.18, wspace=0.26)
 
     png_path = output_prefix + ".png"
     pdf_path = output_prefix + ".pdf"
@@ -246,4 +235,3 @@ if __name__ == "__main__":
     data_path = "/home/hzx/Faster/artifacts/reports/results/消融表格.xlsx"
     output_prefix = "/home/hzx/Faster/artifacts/reports/results/ablation_budget003_neurips_fixed"
     create_ablation_chart(data_path=data_path, output_prefix=output_prefix, budget=0.03)
-
