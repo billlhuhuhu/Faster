@@ -223,10 +223,21 @@ def create_ablation_chart(data_path: str, output_prefix: str, budget: float = 0.
     pdf_path = output_prefix + ".pdf"
     fig.savefig(png_path, dpi=300, bbox_inches="tight", facecolor="white")
     fig.savefig(pdf_path, dpi=300, bbox_inches="tight", facecolor="white")
+
+    # Extra export: no global title text
+    st = fig._suptitle
+    if st is not None:
+        st.set_visible(False)
+    png_path_notitle = output_prefix + "_notitle.png"
+    pdf_path_notitle = output_prefix + "_notitle.pdf"
+    fig.savefig(png_path_notitle, dpi=300, bbox_inches="tight", facecolor="white")
+    fig.savefig(pdf_path_notitle, dpi=300, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
     print(f"Saved PNG: {png_path}")
     print(f"Saved PDF: {pdf_path}")
+    print(f"Saved PNG (no title): {png_path_notitle}")
+    print(f"Saved PDF (no title): {pdf_path_notitle}")
     print("\nBudget = 0.03 summary:")
     print(df[["display_name"] + METRIC_COLS + ["mR"]].to_string(index=False))
 
