@@ -45,7 +45,7 @@ def build_parser():
     parser.add_argument("--enable_stage4_lsrc", dest="enable_stage4_lsrc", action="store_true", default=True)
     parser.add_argument("--disable_stage4_lsrc", dest="enable_stage4_lsrc", action="store_false")
 
-    parser.add_argument("--image_encoder", type=str, required=True, choices=["nfnet", "resnet50", "resnet-50", "vit_b16", "vit-b16", "vit-b/16"])
+    parser.add_argument("--image_encoder", type=str, required=True, choices=["nfnet", "resnet50", "resnet-50", "resnet10", "resnet-10", "vit_b16", "vit-b16", "vit-b/16"])
     parser.add_argument("--text_encoder", type=str, default="bert", choices=["bert"])
     parser.add_argument("--image_size", type=int, default=224)
     parser.add_argument("--batch_size_train", type=int, default=64)
